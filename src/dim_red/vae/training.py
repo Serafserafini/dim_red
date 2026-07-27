@@ -3,12 +3,14 @@ Training utilities for VAE models.
 """
 
 from dataclasses import dataclass
-from typing import Dict, List
-import numpy as np
+from typing import Dict, List, Tuple
+
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 from learned_optimization.research.general_lopt import prefab
+
 from dim_red.vae.database import VAEDatabase
 from dim_red.vae.model import VAE
 
@@ -38,11 +40,7 @@ class TrainConfig:
 
 
 def vae_loss(
-    x_recon: Array,
-    x_true: Array,
-    mu: Array,
-    logvar: Array,
-    beta: float = 1.0
+    x_recon: Array, x_true: Array, mu: Array, logvar: Array, beta: float = 1.0
 ) -> tuple[Array, Array, Array]:
     """Compute the beta-VAE loss components.
 
@@ -66,25 +64,25 @@ def vae_loss(
 
 
 def _iter_batches(
-    X: np.ndarray,
-    batch_size: int,
-    rng: np.random.Generator
+    X: np.ndarray, batch_size: int, rng: np.random.Generator
 ) -> List[np.ndarray]:
     """Shuffle and split data into mini-batches."""
     n_samples = X.shape[0]
     indices = rng.permutation(n_samples)
     batches = []
     for start in range(0, n_samples, batch_size):
-        batch_idx = indices[start:start + batch_size]
+        batch_idx = indices[start : start + batch_size]
         batches.append(X[batch_idx])
     return batches
 
 
 def _make_train_step(model: VAE, tx, beta):
     """Create a jitted training step bound to model, optimizer and beta."""
+
     @jax.jit
     def _train_step(params, batch_x, key, opt_state):
         """Single optimization step returning updated params/state/loss."""
+
         def loss_fn(local_params):
             mu, logvar = model.encode_with_params(local_params, batch_x)
             z = model.reparameterize(key, mu, logvar)
@@ -106,24 +104,66 @@ def _make_train_step(model: VAE, tx, beta):
 
 
 def _make_eval_step(model: VAE, beta):
-    """Create a jitted evaluation step for validation batches."""
+    """Create a jitted evaluation step returning per-sample losses."""
+
     @jax.jit
     def _eval_step(params, batch_x, key):
-        """Compute validation loss for one batch without parameter updates."""
+        """Compute per-sample validation losses for one batch."""
         mu, logvar = model.encode_with_params(params, batch_x)
         z = model.reparameterize(key, mu, logvar)
         x_recon = model.decode_with_params(params, z)
-        total, _, _ = vae_loss(x_recon, batch_x, mu, logvar, beta=beta)
-        return total
+        recon = jnp.mean((x_recon - batch_x) ** 2, axis=1)
+        kl = -0.5 * jnp.mean(1.0 + logvar - mu**2 - jnp.exp(logvar), axis=1)
+        return recon + beta * kl
 
     return _eval_step
 
 
+def _prepare_padded_batches(
+    X: np.ndarray, batch_size: int, rng: np.random.Generator
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Create fixed-size shuffled batches and a validity mask for padding.
+
+    Returns:
+        A tuple ``(batched_x, batched_mask)`` where:
+        - ``batched_x`` has shape ``(n_batches, batch_size, n_features)``.
+        - ``batched_mask`` has shape ``(n_batches, batch_size)`` with 1.0 on
+          valid samples and 0.0 on padded entries.
+    """
+    n_samples, n_features = X.shape
+    indices = rng.permutation(n_samples)
+    X_shuffled = X[indices]
+    n_batches = int(np.ceil(n_samples / batch_size))
+    total_slots = n_batches * batch_size
+    pad = total_slots - n_samples
+
+    if pad > 0:
+        X_shuffled = np.pad(X_shuffled, ((0, pad), (0, 0)), mode="constant")
+
+    batched_x = X_shuffled.reshape(n_batches, batch_size, n_features)
+    batched_mask = np.ones((n_batches, batch_size), dtype=np.float32)
+    if pad > 0:
+        batched_mask[-1, batch_size - pad :] = 0.0
+    return batched_x, batched_mask
+
+
+def _make_eval_epoch(eval_step):
+    """Create a jitted epoch-level parallel evaluator over mini-batches."""
+
+    @jax.jit
+    def _eval_epoch(params, batched_x, batched_mask, keys):
+        per_sample_losses = jax.vmap(eval_step, in_axes=(None, 0, 0))(
+            params, batched_x, keys
+        )
+        weighted_sum = jnp.sum(per_sample_losses * batched_mask)
+        valid_count = jnp.sum(batched_mask)
+        return weighted_sum / jnp.maximum(valid_count, 1.0)
+
+    return _eval_epoch
+
+
 def train_vae(
-    model: VAE,
-    train_db: VAEDatabase,
-    val_db: VAEDatabase,
-    config: TrainConfig
+    model: VAE, train_db: VAEDatabase, val_db: VAEDatabase, config: TrainConfig
 ) -> Dict[str, List[float]]:
     """Train a VAE with VeLO (Optax wrapper) and return loss history.
 
@@ -167,6 +207,7 @@ def train_vae(
     beta = jnp.asarray(config.beta, dtype=jnp.float32)
     train_step = _make_train_step(model, tx, beta)
     eval_step = _make_eval_step(model, beta)
+    eval_epoch = _make_eval_epoch(eval_step)
     opt_state = tx.init(model.params)
     params = model.params
 
@@ -176,21 +217,22 @@ def train_vae(
         for batch in train_batches:
             jax_key, step_key = jax.random.split(jax_key)
             batch_x = jax.device_put(jnp.asarray(batch), device)
-            params, opt_state, loss = train_step(
-                params, batch_x, step_key, opt_state
-            )
+            params, opt_state, loss = train_step(params, batch_x, step_key, opt_state)
             train_losses.append(float(loss))
 
-        val_losses = []
-        val_batches = _iter_batches(val_np, config.batch_size, rng)
-        for batch in val_batches:
-            jax_key, step_key = jax.random.split(jax_key)
-            batch_x = jax.device_put(jnp.asarray(batch), device)
-            loss = eval_step(params, batch_x, step_key)
-            val_losses.append(float(loss))
+        val_batched_x, val_batched_mask = _prepare_padded_batches(
+            val_np, config.batch_size, rng
+        )
+        val_batched_x_jax = jax.device_put(jnp.asarray(val_batched_x), device)
+        val_batched_mask_jax = jax.device_put(jnp.asarray(val_batched_mask), device)
+        n_val_batches = val_batched_x.shape[0]
+        split_keys = jax.random.split(jax_key, n_val_batches + 1)
+        jax_key = split_keys[0]
+        val_keys = split_keys[1:]
+        val_loss = eval_epoch(params, val_batched_x_jax, val_batched_mask_jax, val_keys)
 
         history["train_loss"].append(float(np.mean(train_losses)))
-        history["val_loss"].append(float(np.mean(val_losses)))
+        history["val_loss"].append(float(val_loss))
 
     model.params = params
     return history

@@ -2,11 +2,11 @@
 Variational Autoencoder (VAE) model definitions using Flax Linen.
 """
 
-from typing import Tuple
+from typing import Optional, Sequence, Tuple
+
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
-
 
 Array = jax.Array
 Params = dict
@@ -31,13 +31,15 @@ def reparameterize(key: Array, mu: Array, logvar: Array) -> Array:
 class EncoderModule(nn.Module):
     """Flax Linen encoder mapping input vectors to latent distribution params."""
 
-    hidden_dim: int
+    hidden_dim: Sequence[int]
     latent_dim: int
 
     @nn.compact
     def __call__(self, x: Array) -> Tuple[Array, Array]:
         """Encode input features into ``(mu, logvar)`` tensors."""
-        h = nn.relu(nn.Dense(self.hidden_dim)(x))
+        h = x
+        for dim in self.hidden_dim:
+            h = nn.relu(nn.Dense(dim)(h))
         mu = nn.Dense(self.latent_dim)(h)
         logvar = nn.Dense(self.latent_dim)(h)
         return mu, logvar
@@ -46,13 +48,15 @@ class EncoderModule(nn.Module):
 class DecoderModule(nn.Module):
     """Flax Linen decoder mapping latent vectors back to feature space."""
 
-    hidden_dim: int
+    hidden_dim: Sequence[int]
     output_dim: int
 
     @nn.compact
     def __call__(self, z: Array) -> Array:
         """Decode latent vectors into reconstructed input features."""
-        h = nn.relu(nn.Dense(self.hidden_dim)(z))
+        h = z
+        for dim in self.hidden_dim:
+            h = nn.relu(nn.Dense(dim)(h))
         return nn.Dense(self.output_dim)(h)
 
 
@@ -60,13 +64,19 @@ class VAEModule(nn.Module):
     """Core Flax VAE module exposing explicit encode/decode/forward paths."""
 
     input_dim: int
-    hidden_dim: int
+    encoder_hidden_dim: Sequence[int]
+    decoder_hidden_dim: Sequence[int]
+
     latent_dim: int
 
     def setup(self):
         """Initialize encoder and decoder submodules."""
-        self.encoder_net = EncoderModule(hidden_dim=self.hidden_dim, latent_dim=self.latent_dim)
-        self.decoder_net = DecoderModule(hidden_dim=self.hidden_dim, output_dim=self.input_dim)
+        self.encoder_net = EncoderModule(
+            hidden_dim=self.encoder_hidden_dim, latent_dim=self.latent_dim
+        )
+        self.decoder_net = DecoderModule(
+            hidden_dim=self.decoder_hidden_dim, output_dim=self.input_dim
+        )
 
     def encode(self, x: Array) -> Tuple[Array, Array]:
         """Run encoder network and return latent mean and log-variance."""
@@ -114,26 +124,59 @@ class VAE:
     methods for inference or training loops.
     """
 
-    def __init__(self, input_dim: int, hidden_dim: int, latent_dim: int, seed: int = 42):
+    def __init__(
+        self,
+        input_dim: int,
+        encoder_hidden_dim: Sequence[int],
+        decoder_hidden_dim: Optional[Sequence[int]],
+        latent_dim: int,
+        mirror: Optional[bool] = True,
+        seed: int = 42,
+    ):
         """Initialize module architecture and random model parameters.
 
         Args:
             input_dim: Number of input features.
-            hidden_dim: Width of hidden layers in encoder/decoder.
+            encoder_hidden_dim: Widths of hidden layers in encoder.
+            decoder_hidden_dim: Widths of hidden layers in decoder.
             latent_dim: Size of latent representation.
+            mirror: Whether to mirror encoder hidden dims in decoder (default: True).
             seed: Random seed used for Flax parameter initialization.
 
         Raises:
             ValueError: If any dimensional argument is non-positive.
         """
-        if input_dim <= 0 or hidden_dim <= 0 or latent_dim <= 0:
-            raise ValueError("input_dim, hidden_dim and latent_dim must be positive integers")
+        if not isinstance(encoder_hidden_dim, Sequence):
+            encoder_hidden_dim = [encoder_hidden_dim]
+        if decoder_hidden_dim is not None and not isinstance(
+            decoder_hidden_dim, Sequence
+        ):
+            decoder_hidden_dim = [decoder_hidden_dim]
+
+        if mirror and decoder_hidden_dim is not None:
+            raise ValueError("Cannot specify decoder_hidden_dim when mirror is True")
+        if not mirror and decoder_hidden_dim is None:
+            raise ValueError("Must specify decoder_hidden_dim when mirror is False")
+        if mirror and decoder_hidden_dim is None:
+            decoder_hidden_dim = encoder_hidden_dim[::-1]
+        if (
+            input_dim <= 0
+            or any(dim <= 0 for dim in encoder_hidden_dim)
+            or any(dim <= 0 for dim in decoder_hidden_dim)
+            or latent_dim <= 0
+        ):
+            raise ValueError("All dimensional arguments must be positive integers")
+
         self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
+        self.encoder_hidden_dim = encoder_hidden_dim
+        self.decoder_hidden_dim = decoder_hidden_dim
+
         self.latent_dim = latent_dim
+
         self.module = VAEModule(
             input_dim=input_dim,
-            hidden_dim=hidden_dim,
+            encoder_hidden_dim=self.encoder_hidden_dim,
+            decoder_hidden_dim=self.decoder_hidden_dim,
             latent_dim=latent_dim,
         )
         init_x = jnp.zeros((1, input_dim), dtype=jnp.float32)
@@ -151,11 +194,19 @@ class VAE:
 
     def encode_with_params(self, params: Params, x: Array) -> Tuple[Array, Array]:
         """Encode ``x`` using an explicit parameter tree."""
-        return self.module.apply({"params": params}, jnp.asarray(x, dtype=jnp.float32), method=self.module.encode)
+        return self.module.apply(
+            {"params": params},
+            jnp.asarray(x, dtype=jnp.float32),
+            method=self.module.encode,
+        )
 
     def decode_with_params(self, params: Params, z: Array) -> Array:
         """Decode ``z`` using an explicit parameter tree."""
-        return self.module.apply({"params": params}, jnp.asarray(z, dtype=jnp.float32), method=self.module.decode)
+        return self.module.apply(
+            {"params": params},
+            jnp.asarray(z, dtype=jnp.float32),
+            method=self.module.decode,
+        )
 
     def forward_with_params(
         self, params: Params, x: Array, key: Array
