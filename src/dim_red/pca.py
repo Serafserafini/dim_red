@@ -4,87 +4,77 @@ Principal Component Analysis (PCA) module.
 
 from typing import Optional
 import numpy as np
+from sklearn.decomposition import PCA as SklearnPCA
+
 
 
 class PCA:
     """Principal Component Analysis (PCA) for dimensionality reduction.
-
-    Attributes:
-        n_components: Number of components to keep.
-        components_: Principal axes in feature space, shape (n_components, n_features).
-        explained_variance_ratio_: Percentage of variance explained by each component.
-        mean_: Per-feature empirical mean estimated from the training set.
     """
 
     def __init__(self, n_components: int):
-        if n_components <= 0:
-            raise ValueError("n_components must be a positive integer.")
-        self.n_components = n_components
-        self.components_: Optional[np.ndarray] = None
-        self.explained_variance_ratio_: Optional[np.ndarray] = None
-        self.mean_: Optional[np.ndarray] = None
-
-    def fit(self, X: np.ndarray) -> "PCA":
-        """Fit the PCA model with X.
+        """Initializes the PCA estimator.
 
         Args:
-            X: Training data of shape (n_samples, n_features).
+            n_components: Number of principal components to keep.
+
+        Raises:
+            ValueError: If n_components is not a positive integer.
+        """
+        if not isinstance(n_components, int) or n_components <= 0:
+            raise ValueError("n_components must be a positive integer")
+        self.n_components = n_components
+        self._pca: Optional[SklearnPCA] = None
+        self.components_: Optional[np.ndarray] = None
+        self.explained_variance_ratio_: Optional[np.ndarray] = None
+
+    def fit(self, X: np.ndarray) -> "PCA":
+        """Fits the PCA model with X.
+
+        Args:
+            X: Input data of shape (n_samples, n_features).
 
         Returns:
-            self
+            The fitted PCA instance.
+
+        Raises:
+            ValueError: If n_components is greater than the number of features in X.
         """
-        X = np.asarray(X, dtype=float)
-        if X.ndim != 2:
-            raise ValueError(f"Expected 2D array, got {X.ndim}D array instead.")
+        X_arr = np.asarray(X)
+        n_samples, n_features = X_arr.shape
+        if self.n_components > n_features:
+            raise ValueError(f"n_components must be <= number of features ({n_features})")
 
-        n_samples, n_features = X.shape
-        if self.n_components > min(n_samples, n_features):
-            raise ValueError(
-                f"n_components={self.n_components} must be <= min(n_samples, n_features)={min(n_samples, n_features)}"
-            )
-
-        # Center data
-        self.mean_ = np.mean(X, axis=0)
-        X_centered = X - self.mean_
-
-        # SVD: X_centered = U * S * Vt
-        _, S, Vt = np.linalg.svd(X_centered, full_matrices=False)
-
-        self.components_ = Vt[: self.n_components]
-
-        # Calculate explained variance ratio
-        total_variance = np.sum(S**2) / (n_samples - 1) if n_samples > 1 else 1.0
-        component_variance = (S[: self.n_components] ** 2) / (n_samples - 1) if n_samples > 1 else np.ones(self.n_components)
-        self.explained_variance_ratio_ = component_variance / total_variance if total_variance > 0 else np.zeros(self.n_components)
-
+        self._pca = SklearnPCA(n_components=self.n_components)
+        self._pca.fit(X_arr)
+        self.components_ = self._pca.components_
+        self.explained_variance_ratio_ = self._pca.explained_variance_ratio_
         return self
 
     def transform(self, X: np.ndarray) -> np.ndarray:
         """Apply dimensionality reduction to X.
 
         Args:
-            X: Data of shape (n_samples, n_features).
+            X: Input data of shape (n_samples, n_features).
 
         Returns:
-            X_new: Transformed array of shape (n_samples, n_components).
+            Transformed data of shape (n_samples, n_components).
+
+        Raises:
+            RuntimeError: If the model has not been fitted yet.
         """
-        if self.components_ is None or self.mean_ is None:
-            raise RuntimeError("PCA instance is not fitted yet. Call 'fit' before 'transform'.")
-
-        X = np.asarray(X, dtype=float)
-        if X.ndim != 2:
-            raise ValueError(f"Expected 2D array, got {X.ndim}D array instead.")
-
-        X_centered = X - self.mean_
-        return np.dot(X_centered, self.components_.T)
+        if self._pca is None:
+            raise RuntimeError("PCA is not fitted yet")
+        return self._pca.transform(np.asarray(X))
 
     def fit_transform(self, X: np.ndarray) -> np.ndarray:
-        """Fit the model with X and apply dimensionality reduction on X.
+        """Fit the model with X and apply the dimensionality reduction on X.
 
         Args:
-            X: Data of shape (n_samples, n_features).
+            X: Input data of shape (n_samples, n_features).
 
         Returns:
-            X_new: Transformed array of shape (n_samples, n_components).
+            Transformed data of shape (n_samples, n_components).
         """
-        return self.fit(X).transform(X)
+        self.fit(X)
+        return self.transform(X)

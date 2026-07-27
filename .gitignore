@@ -46,3 +46,6 @@ htmlcov/
 # OS specific
 .DS_Store
 Thumbs.db
+
+# Agent
+.agents/

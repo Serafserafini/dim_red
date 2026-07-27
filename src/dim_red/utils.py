@@ -27,3 +27,5 @@ def standardize(X: np.ndarray, eps: float = 1e-12) -> np.ndarray:
     std[std < eps] = 1.0
 
     return (X - mean) / std
+
+    
