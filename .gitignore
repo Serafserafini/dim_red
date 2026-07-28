@@ -49,3 +49,6 @@ Thumbs.db
 
 # Agent
 .agents/
+
+# Pipeline experiment outputs
+runs/

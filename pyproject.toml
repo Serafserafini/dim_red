@@ -1,3 +1,37 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dim_red"
+description = "Dimensionality reduction toolkit for crystal structures (SOAP, PCA, UMAP, VAE)."
+readme = "README.md"
+requires-python = ">=3.9"
+dynamic = ["version"]
+dependencies = [
+    "numpy",
+    "scikit-learn",
+]
+
+[project.optional-dependencies]
+soap = ["ase", "dscribe"]
+fetch = ["mp-api", "pymatgen", "ase"]
+umap = ["umap-learn"]
+vae = ["jax", "jaxlib", "flax", "optax"]
+analysis = ["matplotlib"]
+pipeline = ["pyyaml"]
+dev = [
+    "dim_red[soap,fetch,umap,vae,analysis,pipeline]",
+    "pytest",
+    "pre-commit",
+]
+
+[tool.setuptools.dynamic]
+version = { attr = "dim_red.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

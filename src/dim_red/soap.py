@@ -3,6 +3,7 @@ SOAP (Smooth Overlap of Atomic Positions) descriptor module.
 """
 
 from typing import List, Optional, Union
+
 import numpy as np
 from ase import Atoms
 from dscribe.descriptors import SOAP
@@ -17,10 +18,10 @@ def _normalize_atoms_distances(atoms: Atoms) -> Atoms:
 
     # Calculate all pairwise distances using Minimum Image Convention if periodic
     distances = atoms.get_all_distances(mic=True)
-    
+
     # Fill diagonal with infinity to ignore self-distances
     np.fill_diagonal(distances, np.inf)
-    
+
     min_dist = np.min(distances)
     if min_dist < 1e-6:
         return atoms
@@ -30,7 +31,7 @@ def _normalize_atoms_distances(atoms: Atoms) -> Atoms:
         scaled_atoms.set_cell(atoms.get_cell() / min_dist, scale_atoms=True)
     else:
         scaled_atoms.set_positions(atoms.get_positions() / min_dist)
-        
+
     return scaled_atoms
 
 
@@ -42,10 +43,10 @@ def compute_soap(
     l_max: int = 6,
     sigma: float = 0.5,
     periodic: Optional[bool] = None,
-    crossover: bool = True,
+    element_agnostic: bool = False,
     average: str = "off",
     sparse: bool = False,
-    normalize_distances: bool = False
+    normalize_distances: bool = False,
 ) -> np.ndarray:
     """Computes the SOAP descriptor for one or more ASE Atoms objects.
 
@@ -58,8 +59,12 @@ def compute_soap(
         l_max: Maximum degree of spherical harmonics.
         sigma: Standard deviation of the Gaussian positioning kernels in Angstroms.
         periodic: Whether the system is periodic. If None, determined from atoms.
-        crossover: Whether to include cross-species correlations.
-        average: Average type, e.g., 'off', 'inner', 'outer'.
+        element_agnostic: If True, compresses the descriptor into an
+            element-agnostic representation (dscribe's "mu2" compression
+            mode), so its size no longer depends on the number of species.
+        average: Average type, e.g., 'off', 'inner', 'outer'. Use 'outer' to
+            get a single global descriptor per structure, computed as the
+            average of the per-atom SOAP vectors.
         sparse: Whether to return a sparse matrix.
         normalize_distances: If True, normalizes the distances of each Atoms object
             such that the nearest-neighbor distance is scaled to 1.0.
@@ -88,7 +93,7 @@ def compute_soap(
         else:
             periodic = any(bool(a.pbc.any()) for a in atoms)
 
-    compression = {"mode": "off" if crossover else "crossover"}
+    compression = {"mode": "mu2" if element_agnostic else "off"}
 
     soap = SOAP(
         species=species,
@@ -99,7 +104,7 @@ def compute_soap(
         periodic=periodic,
         compression=compression,
         average=average,
-        sparse=sparse
+        sparse=sparse,
     )
 
     return soap.create(atoms)

@@ -1,0 +1,33 @@
+# Example config for a single fetch -> SOAP -> VAE run.
+# Run with: python -m dim_red.pipeline.cli --config configs/single_run.example.yaml
+
+seed: 42
+output_dir: runs
+api_key: null # falls back to the MP_API_KEY environment variable
+
+data:
+  crystal_systems: [cubic, hexagonal]
+  limit_per_system: 15
+
+soap:
+  r_cut: 5.0
+  n_max: 4
+  l_max: 3
+  sigma: 0.5
+  element_agnostic: false
+  normalize_distances: false
+  species: null # auto-detected from the fetched structures
+
+vae:
+  encoder_hidden_dim: [128, 64]
+  decoder_hidden_dim: null # null -> mirrors the encoder
+  latent_dim: 2
+  mirror: true
+
+train:
+  epochs: 20
+  batch_size: 32
+  learning_rate: 0.001 # unused by the VeLO optimizer, kept for API compatibility
+  beta: 1.0
+  val_ratio: 0.2
+  device: cpu

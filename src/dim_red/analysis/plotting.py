@@ -3,15 +3,18 @@ Plotting utilities for visualization of reduced dimensional spaces.
 """
 
 from typing import List, Optional
-import numpy as np
+
 import matplotlib.pyplot as plt
+import numpy as np
 
 
 def plot_reduced_space(
     X_reduced: np.ndarray,
     labels: List[str],
     title: str = "PCA Projection of SOAP descriptors",
-    save_path: Optional[str] = None
+    save_path: Optional[str] = None,
+    xlabel: str = "Principal Component 1",
+    ylabel: str = "Principal Component 2",
 ) -> None:
     """Plots the 2D reduced dimensional space using Matplotlib.
 
@@ -20,12 +23,14 @@ def plot_reduced_space(
         labels: Class labels (e.g. crystal system names) for color mapping.
         title: The plot title.
         save_path: If provided, saves the plot to this filepath.
+        xlabel: Label for the x-axis (first reduced dimension).
+        ylabel: Label for the y-axis (second reduced dimension).
     """
     if X_reduced.shape[1] < 2:
         raise ValueError("X_reduced must have at least 2 components for a 2D plot.")
 
     plt.figure(figsize=(10, 8))
-    
+
     unique_labels = sorted(list(set(labels)))
     cmap = plt.get_cmap("tab10")
 
@@ -39,19 +44,19 @@ def plot_reduced_space(
             color=cmap(i % 10),
             alpha=0.8,
             edgecolors="w",
-            s=80
+            s=80,
         )
 
-    plt.xlabel("Principal Component 1")
-    plt.ylabel("Principal Component 2")
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
     plt.title(title, fontsize=14, fontweight="bold", pad=15)
     plt.legend(frameon=True, facecolor="white", edgecolor="none")
     plt.grid(True, linestyle="--", alpha=0.5)
 
     plt.tight_layout()
-    
+
     if save_path:
         plt.savefig(save_path, dpi=300)
         print(f"Plot saved successfully to {save_path}")
-    
+
     plt.close()

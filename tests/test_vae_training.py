@@ -31,7 +31,23 @@ def test_train_vae_returns_history():
     )
     history = train_vae(model, train_db, val_db, config)
 
-    assert len(history["train_loss"]) == 2
-    assert len(history["val_loss"]) == 2
-    assert all(loss >= 0.0 for loss in history["train_loss"])
-    assert all(loss >= 0.0 for loss in history["val_loss"])
+    for key in (
+        "train_loss",
+        "train_recon",
+        "train_kl",
+        "val_loss",
+        "val_recon",
+        "val_kl",
+    ):
+        assert len(history[key]) == 2
+        assert all(loss >= 0.0 for loss in history[key])
+
+    # total == recon + beta * kl for every epoch, given beta=1.0 in config.
+    for total, recon, kl in zip(
+        history["train_loss"], history["train_recon"], history["train_kl"]
+    ):
+        assert total == pytest.approx(recon + config.beta * kl, abs=1e-5)
+    for total, recon, kl in zip(
+        history["val_loss"], history["val_recon"], history["val_kl"]
+    ):
+        assert total == pytest.approx(recon + config.beta * kl, abs=1e-5)
