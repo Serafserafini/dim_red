@@ -3,7 +3,7 @@ Training utilities for VAE models.
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -12,7 +12,7 @@ import optax
 from learned_optimization.research.general_lopt import prefab
 
 from dim_red.vae.database import VAEDatabase
-from dim_red.vae.model import VAE
+from dim_red.vae.model import VAE, apply_family_mask
 
 Array = jax.Array
 
@@ -27,6 +27,12 @@ class TrainConfig:
         learning_rate: Kept for API compatibility; VeLO is still used as
             optimizer backend.
         beta: Weight applied to the KL-divergence term in VAE loss.
+        lambda_family: Weight applied to the family classification
+            cross-entropy term, when family ids are passed to ``train_vae``.
+            Ignored otherwise.
+        lambda_spacegroup: Weight applied to the (family-masked) spacegroup
+            classification cross-entropy term, when spacegroup ids are
+            passed to ``train_vae``. Ignored otherwise.
         seed: Seed controlling batch shuffling and random latent sampling.
         device: JAX backend string (for example ``"cpu"`` or ``"gpu"``).
     """
@@ -35,6 +41,8 @@ class TrainConfig:
     batch_size: int = 32
     learning_rate: float = 1e-3
     beta: float = 1.0
+    lambda_family: float = 0.0
+    lambda_spacegroup: float = 0.0
     seed: int = 42
     device: str = "cpu"
 
@@ -64,23 +72,39 @@ def vae_loss(
 
 
 def _iter_batches(
-    X: np.ndarray, batch_size: int, rng: np.random.Generator
-) -> List[np.ndarray]:
-    """Shuffle and split data into mini-batches."""
-    n_samples = X.shape[0]
+    arrays: Tuple[np.ndarray, ...], batch_size: int, rng: np.random.Generator
+) -> List[Tuple[np.ndarray, ...]]:
+    """Shuffle a set of same-length arrays with one shared permutation and
+    split them into aligned mini-batches.
+    """
+    n_samples = arrays[0].shape[0]
     indices = rng.permutation(n_samples)
     batches = []
     for start in range(0, n_samples, batch_size):
         batch_idx = indices[start : start + batch_size]
-        batches.append(X[batch_idx])
+        batches.append(tuple(a[batch_idx] for a in arrays))
     return batches
 
 
-def _make_train_step(model: VAE, tx, beta):
-    """Create a jitted training step bound to model, optimizer and beta."""
+def _make_train_step(
+    model: VAE,
+    tx,
+    beta,
+    lambda_family,
+    lambda_spacegroup,
+    has_family: bool,
+    has_spacegroup: bool,
+    family_spacegroup_mask,
+):
+    """Create a jitted training step bound to model, optimizer and loss weights.
+
+    ``has_family``/``has_spacegroup`` are plain Python bools (not traced
+    values): the branches they guard are resolved at trace time, so the
+    unused-head code is compiled away entirely when a head is inactive.
+    """
 
     @jax.jit
-    def _train_step(params, batch_x, key, opt_state):
+    def _train_step(params, batch_x, batch_family, batch_spacegroup, key, opt_state):
         """Single optimization step returning updated params/state/losses."""
 
         def loss_fn(local_params):
@@ -88,9 +112,35 @@ def _make_train_step(model: VAE, tx, beta):
             z = model.reparameterize(key, mu, logvar)
             x_recon = model.decode_with_params(local_params, z)
             total, recon, kl = vae_loss(x_recon, batch_x, mu, logvar, beta=beta)
-            return total, (recon, kl)
 
-        (loss, (recon, kl)), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
+            family_ce = jnp.asarray(0.0)
+            spacegroup_ce = jnp.asarray(0.0)
+            if has_family:
+                family_logits = model.classify_family_with_params(local_params, z)
+                family_ce = optax.softmax_cross_entropy_with_integer_labels(
+                    family_logits, batch_family
+                ).mean()
+                total = total + lambda_family * family_ce
+            if has_spacegroup:
+                spacegroup_logits = model.classify_spacegroup_with_params(
+                    local_params, z
+                )
+                family_onehot = jax.nn.one_hot(
+                    batch_family, family_spacegroup_mask.shape[0]
+                )
+                masked_logits = apply_family_mask(
+                    spacegroup_logits, family_onehot, family_spacegroup_mask
+                )
+                spacegroup_ce = optax.softmax_cross_entropy_with_integer_labels(
+                    masked_logits, batch_spacegroup
+                ).mean()
+                total = total + lambda_spacegroup * spacegroup_ce
+
+            return total, (recon, kl, family_ce, spacegroup_ce)
+
+        (loss, (recon, kl, family_ce, spacegroup_ce)), grads = jax.value_and_grad(
+            loss_fn, has_aux=True
+        )(params)
         updates, new_opt_state = tx.update(
             grads,
             opt_state,
@@ -98,75 +148,132 @@ def _make_train_step(model: VAE, tx, beta):
             extra_args={"loss": loss},
         )
         new_params = optax.apply_updates(params, updates)
-        return new_params, new_opt_state, loss, recon, kl
+        return new_params, new_opt_state, loss, recon, kl, family_ce, spacegroup_ce
 
     return _train_step
 
 
-def _make_eval_step(model: VAE, beta):
-    """Create a jitted evaluation step returning per-sample losses."""
+def _make_eval_step(
+    model: VAE,
+    beta,
+    lambda_family,
+    lambda_spacegroup,
+    has_family: bool,
+    has_spacegroup: bool,
+    family_spacegroup_mask,
+):
+    """Create a jitted evaluation step returning per-sample losses.
+
+    Mirrors ``_make_train_step``'s masking policy (hard family one-hot from
+    the true label) -- the val split's true family/spacegroup are known
+    during training, this is only "soft" (predicted family) at genuine
+    downstream inference, handled separately outside this training loop.
+    """
 
     @jax.jit
-    def _eval_step(params, batch_x, key):
-        """Compute per-sample validation total/recon/KL losses for one batch."""
+    def _eval_step(params, batch_x, batch_family, batch_spacegroup, key):
+        """Compute per-sample validation losses for one batch."""
         mu, logvar = model.encode_with_params(params, batch_x)
         z = model.reparameterize(key, mu, logvar)
         x_recon = model.decode_with_params(params, z)
         recon = jnp.mean((x_recon - batch_x) ** 2, axis=1)
         kl = -0.5 * jnp.mean(1.0 + logvar - mu**2 - jnp.exp(logvar), axis=1)
         total = recon + beta * kl
-        return total, recon, kl
+
+        family_ce = jnp.zeros_like(recon)
+        spacegroup_ce = jnp.zeros_like(recon)
+        if has_family:
+            family_logits = model.classify_family_with_params(params, z)
+            family_ce = optax.softmax_cross_entropy_with_integer_labels(
+                family_logits, batch_family
+            )
+            total = total + lambda_family * family_ce
+        if has_spacegroup:
+            spacegroup_logits = model.classify_spacegroup_with_params(params, z)
+            family_onehot = jax.nn.one_hot(
+                batch_family, family_spacegroup_mask.shape[0]
+            )
+            masked_logits = apply_family_mask(
+                spacegroup_logits, family_onehot, family_spacegroup_mask
+            )
+            spacegroup_ce = optax.softmax_cross_entropy_with_integer_labels(
+                masked_logits, batch_spacegroup
+            )
+            total = total + lambda_spacegroup * spacegroup_ce
+
+        return total, recon, kl, family_ce, spacegroup_ce
 
     return _eval_step
 
 
 def _prepare_padded_batches(
-    X: np.ndarray, batch_size: int, rng: np.random.Generator
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Create fixed-size shuffled batches and a validity mask for padding.
+    arrays: Tuple[np.ndarray, ...], batch_size: int, rng: np.random.Generator
+) -> Tuple[Tuple[np.ndarray, ...], np.ndarray]:
+    """Create fixed-size shuffled, aligned batches (one shared permutation)
+    and a validity mask for padding.
 
     Returns:
-        A tuple ``(batched_x, batched_mask)`` where:
-        - ``batched_x`` has shape ``(n_batches, batch_size, n_features)``.
+        A tuple ``(batched_arrays, batched_mask)`` where:
+        - ``batched_arrays[i]`` has shape ``(n_batches, batch_size, *arrays[i].shape[1:])``.
         - ``batched_mask`` has shape ``(n_batches, batch_size)`` with 1.0 on
           valid samples and 0.0 on padded entries.
     """
-    n_samples, n_features = X.shape
+    n_samples = arrays[0].shape[0]
     indices = rng.permutation(n_samples)
-    X_shuffled = X[indices]
+    shuffled = [a[indices] for a in arrays]
     n_batches = int(np.ceil(n_samples / batch_size))
     total_slots = n_batches * batch_size
     pad = total_slots - n_samples
 
     if pad > 0:
-        X_shuffled = np.pad(X_shuffled, ((0, pad), (0, 0)), mode="constant")
+        shuffled = [
+            np.pad(a, [(0, pad)] + [(0, 0)] * (a.ndim - 1), mode="constant")
+            for a in shuffled
+        ]
 
-    batched_x = X_shuffled.reshape(n_batches, batch_size, n_features)
+    batched = tuple(a.reshape(n_batches, batch_size, *a.shape[1:]) for a in shuffled)
     batched_mask = np.ones((n_batches, batch_size), dtype=np.float32)
     if pad > 0:
         batched_mask[-1, batch_size - pad :] = 0.0
-    return batched_x, batched_mask
+    return batched, batched_mask
 
 
 def _make_eval_epoch(eval_step):
     """Create a jitted epoch-level parallel evaluator over mini-batches."""
 
     @jax.jit
-    def _eval_epoch(params, batched_x, batched_mask, keys):
-        total, recon, kl = jax.vmap(eval_step, in_axes=(None, 0, 0))(
-            params, batched_x, keys
-        )
+    def _eval_epoch(
+        params, batched_x, batched_family, batched_spacegroup, batched_mask, keys
+    ):
+        total, recon, kl, family_ce, spacegroup_ce = jax.vmap(
+            eval_step, in_axes=(None, 0, 0, 0, 0)
+        )(params, batched_x, batched_family, batched_spacegroup, keys)
         valid_count = jnp.maximum(jnp.sum(batched_mask), 1.0)
-        mean_total = jnp.sum(total * batched_mask) / valid_count
-        mean_recon = jnp.sum(recon * batched_mask) / valid_count
-        mean_kl = jnp.sum(kl * batched_mask) / valid_count
-        return mean_total, mean_recon, mean_kl
+
+        def masked_mean(values):
+            return jnp.sum(values * batched_mask) / valid_count
+
+        return (
+            masked_mean(total),
+            masked_mean(recon),
+            masked_mean(kl),
+            masked_mean(family_ce),
+            masked_mean(spacegroup_ce),
+        )
 
     return _eval_epoch
 
 
 def train_vae(
-    model: VAE, train_db: VAEDatabase, val_db: VAEDatabase, config: TrainConfig
+    model: VAE,
+    train_db: VAEDatabase,
+    val_db: VAEDatabase,
+    config: TrainConfig,
+    train_family_ids: Optional[np.ndarray] = None,
+    val_family_ids: Optional[np.ndarray] = None,
+    train_spacegroup_ids: Optional[np.ndarray] = None,
+    val_spacegroup_ids: Optional[np.ndarray] = None,
+    family_spacegroup_mask: Optional[np.ndarray] = None,
 ) -> Dict[str, List[float]]:
     """Train a VAE with VeLO (Optax wrapper) and return loss history.
 
@@ -175,17 +282,38 @@ def train_vae(
         train_db: Training dataset wrapper.
         val_db: Validation dataset wrapper.
         config: Training hyperparameters and execution backend options.
+        train_family_ids: Integer family class ids (shape ``(n_train,)``),
+            aligned row-for-row with ``train_db``. Together with
+            ``val_family_ids`` and a model built with a family head,
+            activates the family auxiliary loss (weighted by
+            ``config.lambda_family``). Leave both ``None`` for a plain VAE.
+        val_family_ids: Integer family class ids aligned with ``val_db``.
+        train_spacegroup_ids: Integer spacegroup class ids (shape
+            ``(n_train,)``), aligned with ``train_db``. Requires
+            ``train_family_ids``/``val_family_ids`` and
+            ``family_spacegroup_mask`` to also be given, and a model built
+            with a spacegroup head. Activates the family-masked spacegroup
+            auxiliary loss (weighted by ``config.lambda_spacegroup``).
+        val_spacegroup_ids: Integer spacegroup class ids aligned with ``val_db``.
+        family_spacegroup_mask: ``1.0``/``0.0`` co-occurrence matrix of
+            shape ``(n_family_classes, n_spacegroup_classes)``, used to mask
+            implausible spacegroups given the (here, true) family. See
+            ``dim_red.vae.model.apply_family_mask``.
 
     Returns:
-        Dictionary containing per-epoch losses with keys ``"train_loss"``,
+        Dictionary with per-epoch losses. Always contains ``"train_loss"``,
         ``"train_recon"``, ``"train_kl"``, ``"val_loss"``, ``"val_recon"``
-        and ``"val_kl"``. The ``*_loss`` entries are the beta-weighted total
-        objective; ``*_recon`` and ``*_kl`` are its two components,
-        unweighted by ``beta``.
+        and ``"val_kl"`` (the ``*_loss`` entries are the full weighted
+        objective actually optimized; ``*_recon``/``*_kl``/etc. are its
+        unweighted components). Also contains ``"train_family_ce"``/
+        ``"val_family_ce"`` when family ids are given, and
+        ``"train_spacegroup_ce"``/``"val_spacegroup_ce"`` when spacegroup
+        ids are given.
 
     Raises:
-        ValueError: If config values are invalid or requested JAX backend
-            has no available devices.
+        ValueError: If config values are invalid, no matching JAX device is
+            found, or the family/spacegroup id arguments are inconsistent
+            (e.g. spacegroup ids given without family ids/mask).
     """
     if config.epochs <= 0:
         raise ValueError("epochs must be a positive integer")
@@ -195,6 +323,25 @@ def train_vae(
         raise ValueError("learning_rate must be > 0")
     if config.beta < 0:
         raise ValueError("beta must be >= 0")
+    if config.lambda_family < 0:
+        raise ValueError("lambda_family must be >= 0")
+    if config.lambda_spacegroup < 0:
+        raise ValueError("lambda_spacegroup must be >= 0")
+
+    has_family = train_family_ids is not None
+    has_spacegroup = train_spacegroup_ids is not None
+    if has_family != (val_family_ids is not None):
+        raise ValueError("train_family_ids and val_family_ids must be given together")
+    if has_spacegroup != (val_spacegroup_ids is not None):
+        raise ValueError(
+            "train_spacegroup_ids and val_spacegroup_ids must be given together"
+        )
+    if has_spacegroup and not (has_family and family_spacegroup_mask is not None):
+        raise ValueError(
+            "train_spacegroup_ids/val_spacegroup_ids require train_family_ids/"
+            "val_family_ids and family_spacegroup_mask to also be provided "
+            "(the spacegroup head is conditioned on family)"
+        )
 
     devices = jax.devices(config.device)
     if not devices:
@@ -203,6 +350,33 @@ def train_vae(
 
     train_np = np.asarray(train_db.data, dtype=np.float32)
     val_np = np.asarray(val_db.data, dtype=np.float32)
+
+    train_family_np = (
+        np.asarray(train_family_ids, dtype=np.int32)
+        if has_family
+        else np.zeros(train_np.shape[0], dtype=np.int32)
+    )
+    val_family_np = (
+        np.asarray(val_family_ids, dtype=np.int32)
+        if has_family
+        else np.zeros(val_np.shape[0], dtype=np.int32)
+    )
+    train_spacegroup_np = (
+        np.asarray(train_spacegroup_ids, dtype=np.int32)
+        if has_spacegroup
+        else np.zeros(train_np.shape[0], dtype=np.int32)
+    )
+    val_spacegroup_np = (
+        np.asarray(val_spacegroup_ids, dtype=np.int32)
+        if has_spacegroup
+        else np.zeros(val_np.shape[0], dtype=np.int32)
+    )
+    mask_jax = (
+        jnp.asarray(family_spacegroup_mask, dtype=jnp.float32)
+        if has_spacegroup
+        else jnp.zeros((1, 1), dtype=jnp.float32)
+    )
+
     rng = np.random.default_rng(config.seed)
     jax_key = jax.random.PRNGKey(config.seed)
     batches_per_epoch = int(np.ceil(train_np.shape[0] / config.batch_size))
@@ -216,40 +390,92 @@ def train_vae(
         "val_recon": [],
         "val_kl": [],
     }
+    if has_family:
+        history["train_family_ce"] = []
+        history["val_family_ce"] = []
+    if has_spacegroup:
+        history["train_spacegroup_ce"] = []
+        history["val_spacegroup_ce"] = []
+
     tx = prefab.optax_lopt(num_steps=total_steps)
     beta = jnp.asarray(config.beta, dtype=jnp.float32)
-    train_step = _make_train_step(model, tx, beta)
-    eval_step = _make_eval_step(model, beta)
+    lambda_family = jnp.asarray(config.lambda_family, dtype=jnp.float32)
+    lambda_spacegroup = jnp.asarray(config.lambda_spacegroup, dtype=jnp.float32)
+
+    train_step = _make_train_step(
+        model,
+        tx,
+        beta,
+        lambda_family,
+        lambda_spacegroup,
+        has_family,
+        has_spacegroup,
+        mask_jax,
+    )
+    eval_step = _make_eval_step(
+        model,
+        beta,
+        lambda_family,
+        lambda_spacegroup,
+        has_family,
+        has_spacegroup,
+        mask_jax,
+    )
     eval_epoch = _make_eval_epoch(eval_step)
     opt_state = tx.init(model.params)
     params = model.params
 
     for _ in range(config.epochs):
-        train_losses = []
-        train_recons = []
-        train_kls = []
-        train_batches = _iter_batches(train_np, config.batch_size, rng)
-        for batch in train_batches:
+        train_losses, train_recons, train_kls = [], [], []
+        train_family_ces, train_spacegroup_ces = [], []
+        train_batches = _iter_batches(
+            (train_np, train_family_np, train_spacegroup_np), config.batch_size, rng
+        )
+        for batch_x, batch_family, batch_spacegroup in train_batches:
             jax_key, step_key = jax.random.split(jax_key)
-            batch_x = jax.device_put(jnp.asarray(batch), device)
-            params, opt_state, loss, recon, kl = train_step(
-                params, batch_x, step_key, opt_state
+            batch_x_jax = jax.device_put(jnp.asarray(batch_x), device)
+            batch_family_jax = jax.device_put(jnp.asarray(batch_family), device)
+            batch_spacegroup_jax = jax.device_put(jnp.asarray(batch_spacegroup), device)
+            params, opt_state, loss, recon, kl, family_ce, spacegroup_ce = train_step(
+                params,
+                batch_x_jax,
+                batch_family_jax,
+                batch_spacegroup_jax,
+                step_key,
+                opt_state,
             )
             train_losses.append(float(loss))
             train_recons.append(float(recon))
             train_kls.append(float(kl))
+            if has_family:
+                train_family_ces.append(float(family_ce))
+            if has_spacegroup:
+                train_spacegroup_ces.append(float(spacegroup_ce))
 
-        val_batched_x, val_batched_mask = _prepare_padded_batches(
-            val_np, config.batch_size, rng
+        (
+            val_batched_x,
+            val_batched_family,
+            val_batched_spacegroup,
+        ), val_batched_mask = _prepare_padded_batches(
+            (val_np, val_family_np, val_spacegroup_np), config.batch_size, rng
         )
         val_batched_x_jax = jax.device_put(jnp.asarray(val_batched_x), device)
+        val_batched_family_jax = jax.device_put(jnp.asarray(val_batched_family), device)
+        val_batched_spacegroup_jax = jax.device_put(
+            jnp.asarray(val_batched_spacegroup), device
+        )
         val_batched_mask_jax = jax.device_put(jnp.asarray(val_batched_mask), device)
         n_val_batches = val_batched_x.shape[0]
         split_keys = jax.random.split(jax_key, n_val_batches + 1)
         jax_key = split_keys[0]
         val_keys = split_keys[1:]
-        val_loss, val_recon, val_kl = eval_epoch(
-            params, val_batched_x_jax, val_batched_mask_jax, val_keys
+        val_loss, val_recon, val_kl, val_family_ce, val_spacegroup_ce = eval_epoch(
+            params,
+            val_batched_x_jax,
+            val_batched_family_jax,
+            val_batched_spacegroup_jax,
+            val_batched_mask_jax,
+            val_keys,
         )
 
         history["train_loss"].append(float(np.mean(train_losses)))
@@ -258,6 +484,12 @@ def train_vae(
         history["val_loss"].append(float(val_loss))
         history["val_recon"].append(float(val_recon))
         history["val_kl"].append(float(val_kl))
+        if has_family:
+            history["train_family_ce"].append(float(np.mean(train_family_ces)))
+            history["val_family_ce"].append(float(val_family_ce))
+        if has_spacegroup:
+            history["train_spacegroup_ce"].append(float(np.mean(train_spacegroup_ces)))
+            history["val_spacegroup_ce"].append(float(val_spacegroup_ce))
 
     model.params = params
     return history

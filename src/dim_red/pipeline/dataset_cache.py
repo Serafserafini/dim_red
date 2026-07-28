@@ -37,13 +37,19 @@ def _cache_key(
     return hashlib.sha256(blob).hexdigest()[:16]
 
 
+_CACHE_ARRAY_KEYS = ("X", "labels", "material_ids", "spacegroups")
+
+# Sentinel spacegroup number for structures MP didn't return symmetry data for.
+_UNKNOWN_SPACEGROUP = -1
+
+
 def get_or_build_dataset(
     crystal_systems: Sequence[str],
     soap_kwargs: Dict[str, Any],
     limit_per_system: int,
     cache_dir: Union[str, Path],
     api_key: Optional[str] = None,
-) -> Tuple[np.ndarray, List[str], List[str]]:
+) -> Tuple[np.ndarray, List[str], List[str], List[int]]:
     """Fetch structures, compute a global SOAP descriptor per structure, and
     standardize the result -- reusing a cached copy on disk when available.
 
@@ -57,8 +63,9 @@ def get_or_build_dataset(
         api_key: Materials Project API key (falls back to ``MP_API_KEY``).
 
     Returns:
-        ``(X_std, labels, material_ids)`` where ``X_std`` has shape
-        ``(n_samples, n_features)``.
+        ``(X_std, labels, material_ids, spacegroups)`` where ``X_std`` has
+        shape ``(n_samples, n_features)`` and ``spacegroups`` holds the MP
+        spacegroup number (1-230) per structure, or ``-1`` when unavailable.
     """
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -66,11 +73,23 @@ def get_or_build_dataset(
     cache_path = cache_dir / f"{key}.npz"
 
     if cache_path.exists():
-        logger.info(
-            "Dataset cache hit (%s) for crystal_systems=%s", key, list(crystal_systems)
-        )
         cached = np.load(cache_path)
-        return cached["X"], cached["labels"].tolist(), cached["material_ids"].tolist()
+        if all(k in cached.files for k in _CACHE_ARRAY_KEYS):
+            logger.info(
+                "Dataset cache hit (%s) for crystal_systems=%s",
+                key,
+                list(crystal_systems),
+            )
+            return (
+                cached["X"],
+                cached["labels"].tolist(),
+                cached["material_ids"].tolist(),
+                cached["spacegroups"].tolist(),
+            )
+        logger.info(
+            "Dataset cache at %s is missing expected fields (stale schema); rebuilding",
+            cache_path,
+        )
 
     logger.info(
         "Dataset cache miss (%s); fetching structures for crystal_systems=%s",
@@ -92,6 +111,7 @@ def get_or_build_dataset(
         raise ValueError("No structures fetched for the requested crystal systems.")
 
     material_ids = [a.info.get("material_id", "unknown") for a in all_atoms]
+    spacegroups = [a.info.get("spacegroup", _UNKNOWN_SPACEGROUP) for a in all_atoms]
 
     effective_soap_kwargs = dict(soap_kwargs)
     if effective_soap_kwargs.get("species") is None:
@@ -110,7 +130,8 @@ def get_or_build_dataset(
         X=X_std,
         labels=np.array(labels),
         material_ids=np.array(material_ids),
+        spacegroups=np.array(spacegroups, dtype=np.int64),
     )
     logger.info("Dataset cached at %s (shape=%s)", cache_path, X_std.shape)
 
-    return X_std, labels, material_ids
+    return X_std, labels, material_ids, spacegroups

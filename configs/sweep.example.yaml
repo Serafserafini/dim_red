@@ -31,6 +31,15 @@ vae:
   latent_dim: 2
   mirror: true
 
+# Optional auxiliary classification heads on the latent z. mode: none (this
+# default) reproduces the plain VAE unchanged, and lambda_*_values are
+# ignored. See configs/sweep_aux_heads.example.yaml for an active example.
+aux_heads:
+  mode: none
+  lambda_family_values: [1.0]
+  lambda_spacegroup_values: [1.0]
+  head_hidden_dim: 16
+
 train:
   epochs: 20
   batch_size: 32

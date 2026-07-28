@@ -4,15 +4,16 @@ Module for fetching crystal structures from the Materials Project database.
 
 import os
 from typing import List, Optional, Union
+
+from ase import Atoms
 from mp_api.client import MPRester
 from pymatgen.io.ase import AseAtomsAdaptor
-from ase import Atoms
 
 
 def fetch_structures_by_crystal_system(
     crystal_system: Union[str, List[str]],
     api_key: Optional[str] = None,
-    limit: int = 10
+    limit: int = 10,
 ) -> List[Atoms]:
     """Fetches crystal structures from the Materials Project based on the crystal system.
 
@@ -47,11 +48,11 @@ def fetch_structures_by_crystal_system(
     with MPRester(api_key) as mpr:
         docs = mpr.materials.summary.search(
             crystal_system=crystal_systems,
-            fields=["material_id", "structure"],
+            fields=["material_id", "structure", "symmetry"],
             chunk_size=limit,
-            num_chunks=1
+            num_chunks=1,
         )
-        
+
     # Ensure we return at most 'limit' structures
     docs = docs[:limit]
 
@@ -62,6 +63,10 @@ def fetch_structures_by_crystal_system(
             atoms = AseAtomsAdaptor.get_atoms(doc.structure)
             # Add material_id as an info attribute for reference
             atoms.info["material_id"] = str(doc.material_id)
+            # Add the spacegroup number (1-230) as an info attribute, when available
+            symmetry = getattr(doc, "symmetry", None)
+            if symmetry is not None and getattr(symmetry, "number", None) is not None:
+                atoms.info["spacegroup"] = int(symmetry.number)
             atoms_list.append(atoms)
 
     return atoms_list

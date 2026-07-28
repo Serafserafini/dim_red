@@ -13,14 +13,15 @@ from ase import Atoms
 from dim_red.pipeline.dataset_cache import get_or_build_dataset
 
 
-def _fake_atoms(symbol: str, material_id: str) -> Atoms:
+def _fake_atoms(symbol: str, material_id: str, spacegroup: int) -> Atoms:
     atoms = Atoms(symbol, positions=[[0.0, 0.0, 0.0]])
     atoms.info["material_id"] = material_id
+    atoms.info["spacegroup"] = spacegroup
     return atoms
 
 
 def test_get_or_build_dataset_cache_miss_then_hit(tmp_path):
-    fake_atoms = [_fake_atoms("Cu", "mp-1"), _fake_atoms("Fe", "mp-2")]
+    fake_atoms = [_fake_atoms("Cu", "mp-1", 225), _fake_atoms("Fe", "mp-2", 229)]
     fake_soap = np.array([[1.0, 2.0], [3.0, 4.0]])
 
     with (
@@ -32,7 +33,7 @@ def test_get_or_build_dataset_cache_miss_then_hit(tmp_path):
             "dim_red.pipeline.dataset_cache.compute_soap", return_value=fake_soap
         ) as mock_soap,
     ):
-        X1, labels1, ids1 = get_or_build_dataset(
+        X1, labels1, ids1, sg1 = get_or_build_dataset(
             crystal_systems=["cubic"],
             soap_kwargs={"r_cut": 3.0, "n_max": 2, "l_max": 2},
             limit_per_system=2,
@@ -44,6 +45,7 @@ def test_get_or_build_dataset_cache_miss_then_hit(tmp_path):
         assert X1.shape == (2, 2)
         assert labels1 == ["Cubic", "Cubic"]
         assert ids1 == ["mp-1", "mp-2"]
+        assert sg1 == [225, 229]
 
         # compute_soap should always be called with average="outer" and
         # auto-detected species when none were configured.
@@ -53,7 +55,7 @@ def test_get_or_build_dataset_cache_miss_then_hit(tmp_path):
 
         # Second call with identical parameters should hit the cache and not
         # call fetch/compute_soap again.
-        X2, labels2, ids2 = get_or_build_dataset(
+        X2, labels2, ids2, sg2 = get_or_build_dataset(
             crystal_systems=["cubic"],
             soap_kwargs={"r_cut": 3.0, "n_max": 2, "l_max": 2},
             limit_per_system=2,
@@ -65,10 +67,51 @@ def test_get_or_build_dataset_cache_miss_then_hit(tmp_path):
         np.testing.assert_allclose(X1, X2)
         assert labels2 == labels1
         assert ids2 == ids1
+        assert sg2 == sg1
+
+
+def test_get_or_build_dataset_rebuilds_stale_cache_missing_spacegroups(tmp_path):
+    """A cache .npz written before the "spacegroups" field existed should be
+    treated as a miss and rebuilt, not raise a KeyError.
+    """
+    fake_atoms = [_fake_atoms("Cu", "mp-1", 225)]
+    fake_soap = np.array([[1.0, 2.0]])
+    soap_kwargs = {"r_cut": 3.0, "n_max": 2, "l_max": 2}
+
+    from dim_red.pipeline.dataset_cache import _cache_key
+
+    key = _cache_key(["cubic"], 2, soap_kwargs)
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        tmp_path / f"{key}.npz",
+        X=np.array([[9.0, 9.0]]),
+        labels=np.array(["Stale"]),
+        material_ids=np.array(["mp-old"]),
+        # "spacegroups" intentionally omitted to simulate a pre-existing cache.
+    )
+
+    with (
+        patch(
+            "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
+            return_value=fake_atoms,
+        ) as mock_fetch,
+        patch("dim_red.pipeline.dataset_cache.compute_soap", return_value=fake_soap),
+    ):
+        X, labels, ids, sg = get_or_build_dataset(
+            crystal_systems=["cubic"],
+            soap_kwargs=soap_kwargs,
+            limit_per_system=2,
+            cache_dir=tmp_path,
+        )
+
+    assert mock_fetch.call_count == 1
+    assert labels == ["Cubic"]
+    assert ids == ["mp-1"]
+    assert sg == [225]
 
 
 def test_get_or_build_dataset_different_params_miss_cache(tmp_path):
-    fake_atoms = [_fake_atoms("Cu", "mp-1")]
+    fake_atoms = [_fake_atoms("Cu", "mp-1", 225)]
     fake_soap = np.array([[1.0, 2.0]])
 
     with (
