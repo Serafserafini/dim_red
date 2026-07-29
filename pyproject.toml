@@ -13,6 +13,12 @@ dependencies = [
     "scikit-learn",
 ]
 
+[project.scripts]
+dimred-run = "dim_red.pipeline.cli:run_command"
+dimred-sweep = "dim_red.pipeline.cli:sweep_command"
+dimred-rerun = "dim_red.pipeline.cli:rerun_command"
+dimred-compare = "dim_red.pipeline.cli:compare_command"
+
 [project.optional-dependencies]
 soap = ["ase", "dscribe"]
 fetch = ["mp-api", "pymatgen", "ase"]

@@ -107,6 +107,64 @@ def test_run_single_auto_name_encodes_swept_params(tmp_path):
     assert "cs-cubic" in run_dir.name
 
 
+def test_run_single_autoencoder_writes_expected_artifacts(tmp_path):
+    config = RunConfig(
+        crystal_systems=["cubic"],
+        limit_per_system=8,
+        soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
+        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
+        train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
+        seed=0,
+        output_dir=str(tmp_path / "runs"),
+        model_kind="autoencoder",
+    )
+    fetch_patch, soap_patch = _patch_dataset()
+
+    with fetch_patch, soap_patch:
+        run_dir = run_single(config)
+
+    assert "model-autoencoder" in run_dir.name
+    assert (run_dir / "embeddings.npz").exists()
+    assert (run_dir / "model_params.msgpack").exists()
+
+    embeddings = np.load(run_dir / "embeddings.npz")
+    assert embeddings["embeddings"].shape == (8, 2)
+
+    # No KL columns at all for a plain Autoencoder (unlike the VAE's header).
+    with open(run_dir / "loss_history.csv") as f:
+        header = f.readline().strip().split(",")
+    assert header == [
+        "epoch",
+        "train_loss",
+        "train_recon",
+        "val_loss",
+        "val_recon",
+    ]
+
+
+def test_run_single_autoencoder_and_vae_dont_collide_in_same_sweep_dir(tmp_path):
+    base_kwargs = dict(
+        crystal_systems=["cubic"],
+        limit_per_system=8,
+        soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
+        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
+        train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
+        seed=0,
+        output_dir=str(tmp_path / "runs"),
+    )
+    vae_config = RunConfig(**base_kwargs, model_kind="vae")
+    ae_config = RunConfig(**base_kwargs, model_kind="autoencoder")
+    fetch_patch, soap_patch = _patch_dataset()
+
+    with fetch_patch, soap_patch:
+        vae_run_dir = run_single(vae_config)
+        ae_run_dir = run_single(ae_config)
+
+    assert vae_run_dir != ae_run_dir
+    assert "model-autoencoder" in ae_run_dir.name
+    assert "model-" not in vae_run_dir.name  # default "vae" stays untagged
+
+
 def test_run_single_reuses_dataset_cache_across_runs(tmp_path):
     config_a = _make_config(tmp_path, name="run-a")
     config_b = _make_config(tmp_path, name="run-b")
@@ -194,6 +252,54 @@ def test_run_single_family_and_spacegroup_aux_heads(tmp_path):
     )
     np.testing.assert_allclose(
         embeddings["spacegroup_probs"].sum(axis=1), np.ones(n_total), atol=1e-5
+    )
+
+
+def test_run_single_autoencoder_family_only_aux_heads(tmp_path):
+    config = RunConfig(
+        crystal_systems=["cubic", "hexagonal"],
+        limit_per_system=8,
+        soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
+        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
+        train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
+        aux_heads=AuxHeadsConfig(
+            mode="family_only", lambda_family=1.0, head_hidden_dim=4
+        ),
+        seed=0,
+        output_dir=str(tmp_path / "runs"),
+        model_kind="autoencoder",
+    )
+
+    def fake_fetch(crystal_system, api_key=None, limit=10):
+        return [_fake_atoms("Cu", f"mp-{crystal_system}-{i}") for i in range(limit)]
+
+    rng = np.random.default_rng(0)
+
+    def fake_compute_soap(atoms, **kwargs):
+        n = len(atoms) if isinstance(atoms, list) else 1
+        return rng.normal(size=(n, 5)).astype(np.float32)
+
+    with (
+        patch(
+            "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
+            side_effect=fake_fetch,
+        ),
+        patch(
+            "dim_red.pipeline.dataset_cache.compute_soap", side_effect=fake_compute_soap
+        ),
+    ):
+        run_dir = run_single(config)
+
+    with open(run_dir / "loss_history.csv") as f:
+        header = f.readline().strip().split(",")
+    assert "train_family_ce" in header
+    assert "train_kl" not in header
+
+    embeddings = np.load(run_dir / "embeddings.npz")
+    n_total = 16
+    assert "family_probs" in embeddings.files
+    np.testing.assert_allclose(
+        embeddings["family_probs"].sum(axis=1), np.ones(n_total), atol=1e-5
     )
 
 

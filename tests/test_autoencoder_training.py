@@ -1,0 +1,227 @@
+"""
+Unit tests for Autoencoder training loop utilities.
+"""
+
+import pytest
+
+pytest.importorskip("jax")
+
+import numpy as np
+
+from dim_red.autoencoder.model import Autoencoder
+from dim_red.autoencoder.training import TrainConfig, train_autoencoder
+from dim_red.vae.database import VAEDatabase
+
+
+def test_train_autoencoder_returns_history():
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(40, 5)).astype(np.float32)
+    db = VAEDatabase.from_array(X)
+    train_db, val_db = db.train_val_split(val_ratio=0.25, seed=0)
+    model = Autoencoder(
+        input_dim=5,
+        encoder_hidden_dim=[8],
+        decoder_hidden_dim=None,
+        latent_dim=2,
+        seed=0,
+    )
+
+    config = TrainConfig(
+        epochs=2, batch_size=8, learning_rate=1e-3, seed=0, device="cpu"
+    )
+    history = train_autoencoder(model, train_db, val_db, config)
+
+    for key in ("train_loss", "train_recon", "val_loss", "val_recon"):
+        assert len(history[key]) == 2
+        assert all(loss >= 0.0 for loss in history[key])
+
+    # No KL term at all -> total == recon exactly, unlike the VAE.
+    for total, recon in zip(history["train_loss"], history["train_recon"]):
+        assert total == pytest.approx(recon, abs=1e-6)
+    for total, recon in zip(history["val_loss"], history["val_recon"]):
+        assert total == pytest.approx(recon, abs=1e-6)
+
+    # No auxiliary keys when no family/spacegroup ids are given.
+    assert "train_family_ce" not in history
+    assert "train_spacegroup_ce" not in history
+
+
+def _make_split_db(n=40, n_features=5, val_ratio=0.25, seed=0):
+    rng = np.random.default_rng(seed)
+    X = rng.normal(size=(n, n_features)).astype(np.float32)
+    db = VAEDatabase.from_array(X)
+    return db.train_val_split(val_ratio=val_ratio, seed=seed)
+
+
+def _split_indices_like_train_val_split(n, val_ratio, seed):
+    """Reproduce VAEDatabase.train_val_split's index split to align external
+    label arrays (family/spacegroup ids) with train_db/val_db rows.
+    """
+    n_val = max(1, int(round(n * val_ratio)))
+    n_val = min(n_val, n - 1)
+    rng = np.random.default_rng(seed)
+    indices = rng.permutation(n)
+    return indices[n_val:], indices[:n_val]
+
+
+def test_train_autoencoder_family_only_aux_loss():
+    n = 40
+    train_db, val_db = _make_split_db(n=n)
+    train_idx, val_idx = _split_indices_like_train_val_split(n, 0.25, 0)
+
+    rng = np.random.default_rng(1)
+    n_family = 3
+    family_ids = rng.integers(0, n_family, size=n).astype(np.int32)
+
+    model = Autoencoder(
+        input_dim=5,
+        encoder_hidden_dim=[8],
+        decoder_hidden_dim=None,
+        latent_dim=2,
+        seed=0,
+        n_family_classes=n_family,
+        head_hidden_dim=4,
+    )
+    config = TrainConfig(
+        epochs=2, batch_size=8, lambda_family=0.7, seed=0, device="cpu"
+    )
+    history = train_autoencoder(
+        model,
+        train_db,
+        val_db,
+        config,
+        train_family_ids=family_ids[train_idx],
+        val_family_ids=family_ids[val_idx],
+    )
+
+    assert "train_family_ce" in history and "val_family_ce" in history
+    assert "train_spacegroup_ce" not in history
+    assert len(history["train_family_ce"]) == 2
+
+    for total, recon, family_ce in zip(
+        history["train_loss"], history["train_recon"], history["train_family_ce"]
+    ):
+        assert total == pytest.approx(
+            recon + config.lambda_family * family_ce, abs=1e-5
+        )
+
+
+def test_train_autoencoder_family_and_spacegroup_aux_loss():
+    n = 40
+    train_db, val_db = _make_split_db(n=n)
+    train_idx, val_idx = _split_indices_like_train_val_split(n, 0.25, 0)
+
+    rng = np.random.default_rng(1)
+    n_family = 3
+    n_spacegroup = 6
+    family_ids = rng.integers(0, n_family, size=n).astype(np.int32)
+    # Spacegroup deterministic given family, so the mask is meaningful.
+    spacegroup_ids = (family_ids * 2 + rng.integers(0, 2, size=n)).astype(np.int32)
+    mask = np.zeros((n_family, n_spacegroup), dtype=np.float32)
+    mask[family_ids, spacegroup_ids] = 1.0
+
+    model = Autoencoder(
+        input_dim=5,
+        encoder_hidden_dim=[8],
+        decoder_hidden_dim=None,
+        latent_dim=2,
+        seed=0,
+        n_family_classes=n_family,
+        n_spacegroup_classes=n_spacegroup,
+        head_hidden_dim=4,
+    )
+    config = TrainConfig(
+        epochs=2,
+        batch_size=8,
+        lambda_family=1.0,
+        lambda_spacegroup=0.5,
+        seed=0,
+        device="cpu",
+    )
+    history = train_autoencoder(
+        model,
+        train_db,
+        val_db,
+        config,
+        train_family_ids=family_ids[train_idx],
+        val_family_ids=family_ids[val_idx],
+        train_spacegroup_ids=spacegroup_ids[train_idx],
+        val_spacegroup_ids=spacegroup_ids[val_idx],
+        family_spacegroup_mask=mask,
+    )
+
+    for key in (
+        "train_family_ce",
+        "val_family_ce",
+        "train_spacegroup_ce",
+        "val_spacegroup_ce",
+    ):
+        assert key in history
+        assert len(history[key]) == 2
+
+    for total, recon, family_ce, spacegroup_ce in zip(
+        history["train_loss"],
+        history["train_recon"],
+        history["train_family_ce"],
+        history["train_spacegroup_ce"],
+    ):
+        assert total == pytest.approx(
+            recon
+            + config.lambda_family * family_ce
+            + config.lambda_spacegroup * spacegroup_ce,
+            abs=1e-5,
+        )
+
+
+def test_train_autoencoder_spacegroup_ids_require_family_and_mask():
+    n = 40
+    train_db, val_db = _make_split_db(n=n)
+    train_idx, val_idx = _split_indices_like_train_val_split(n, 0.25, 0)
+    rng = np.random.default_rng(1)
+    spacegroup_ids = rng.integers(0, 6, size=n).astype(np.int32)
+
+    model = Autoencoder(
+        input_dim=5,
+        encoder_hidden_dim=[8],
+        decoder_hidden_dim=None,
+        latent_dim=2,
+        seed=0,
+        n_family_classes=3,
+        n_spacegroup_classes=6,
+        head_hidden_dim=4,
+    )
+    config = TrainConfig(epochs=1, batch_size=8, seed=0, device="cpu")
+
+    with pytest.raises(ValueError, match="require train_family_ids"):
+        train_autoencoder(
+            model,
+            train_db,
+            val_db,
+            config,
+            train_spacegroup_ids=spacegroup_ids[train_idx],
+            val_spacegroup_ids=spacegroup_ids[val_idx],
+        )
+
+
+def test_train_autoencoder_family_ids_must_be_given_with_val_ids():
+    n = 40
+    train_db, val_db = _make_split_db(n=n)
+    train_idx, _ = _split_indices_like_train_val_split(n, 0.25, 0)
+    rng = np.random.default_rng(1)
+    family_ids = rng.integers(0, 3, size=n).astype(np.int32)
+
+    model = Autoencoder(
+        input_dim=5,
+        encoder_hidden_dim=[8],
+        decoder_hidden_dim=None,
+        latent_dim=2,
+        seed=0,
+        n_family_classes=3,
+        head_hidden_dim=4,
+    )
+    config = TrainConfig(epochs=1, batch_size=8, seed=0, device="cpu")
+
+    with pytest.raises(ValueError, match="must be given together"):
+        train_autoencoder(
+            model, train_db, val_db, config, train_family_ids=family_ids[train_idx]
+        )

@@ -1,19 +1,23 @@
 """
-Executes one fetch -> SOAP -> VAE training pass from a RunConfig and persists
-every artifact needed for later analysis: the config used, the trained model,
-per-epoch loss curves (total/recon/KL, train and val, plus family/spacegroup
-cross-entropy when auxiliary heads are active), the latent embeddings of
-every point in the dataset used for training (with soft-masked auxiliary
-head predictions when active), and a 2D scatter plot of those embeddings.
+Executes one fetch -> SOAP -> model training pass from a RunConfig and
+persists every artifact needed for later analysis: the config used, the
+trained model, per-epoch loss curves (total/recon, plus KL for a VAE and
+family/spacegroup cross-entropy when auxiliary heads are active), the latent
+embeddings of every point in the dataset used for training (with soft-masked
+auxiliary head predictions when active), and a 2D scatter plot of those
+embeddings. ``config.model_kind`` selects between a VAE
+(``dim_red.vae``) and a deterministic Autoencoder (``dim_red.autoencoder``);
+both share the same architecture (``config.vae``) and aux-heads (
+``config.aux_heads``) schema, and expose the same training call shape.
 """
 
 from __future__ import annotations
 
 import csv
 import logging
-from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
+from unicodedata import name
 
 import jax
 import jax.numpy as jnp
@@ -22,11 +26,17 @@ import yaml
 from flax import serialization
 
 from dim_red.analysis.plotting import plot_reduced_space
+from dim_red.autoencoder.model import Autoencoder
+from dim_red.autoencoder.model import apply_family_mask as ae_apply_family_mask
+from dim_red.autoencoder.training import TrainConfig as AETrainConfig
+from dim_red.autoencoder.training import train_autoencoder
 from dim_red.pipeline.config import RunConfig, run_config_to_dict
 from dim_red.pipeline.dataset_cache import get_or_build_dataset
 from dim_red.vae.database import VAEDatabase
-from dim_red.vae.model import VAE, apply_family_mask
-from dim_red.vae.training import TrainConfig, train_vae
+from dim_red.vae.model import VAE
+from dim_red.vae.model import apply_family_mask as vae_apply_family_mask
+from dim_red.vae.training import TrainConfig as VAETrainConfig
+from dim_red.vae.training import train_vae
 
 logger = logging.getLogger("dim_red.pipeline")
 # `dim_red.vae.training` imports `learned_optimization`, which pulls in absl
@@ -46,19 +56,45 @@ def _slugify(values) -> str:
 def make_run_name(config: RunConfig) -> str:
     """Build a run directory name encoding the swept parameters, unless the
     config sets an explicit ``name``.
+
+    The name carries only the hyperparameters that distinguish this run
+    (hidden dims, crystal systems, aux-head lambdas, and the model kind when
+    it isn't the default ``"vae"``) -- no timestamp -- so sibling runs of the
+    same sweep are identifiable by what they swept, not by when they ran.
+    Tagging non-default ``model_kind`` values means a sweep varying it (e.g.
+    ``grid: {"model": ["vae", "autoencoder"]}``) still gets distinctly named
+    runs rather than colliding.
     """
     if config.name:
         return config.name
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     hd = _slugify(config.vae.encoder_hidden_dim)
     cs = _slugify(sorted(cs.lower() for cs in config.crystal_systems))
-    name = f"{timestamp}_hd-{hd}_cs-{cs}"
+    name = f"hd-{hd}_cs-{cs}"
+    if config.model_kind != "vae":
+        name = f"model-{config.model_kind}_{name}"
     aux = config.aux_heads
     if aux.mode != "none":
         name += f"_aux-{aux.mode}_lf{aux.lambda_family:g}"
         if aux.mode == "family_and_spacegroup":
             name += f"_lsg{aux.lambda_spacegroup:g}"
     return name
+
+
+def _make_unique_run_dir(output_dir: Path, name: str) -> Path:
+    """Create and return ``output_dir / name``, deduplicating with a
+    ``-<n>`` suffix if that directory already exists (e.g. re-running the
+    same unnamed config into the same ``output_dir``) so runs never silently
+    overwrite one another now that names carry no timestamp.
+    """
+    run_dir = output_dir / name
+    suffix = 1
+    while True:
+        try:
+            run_dir.mkdir(parents=True, exist_ok=False)
+            return run_dir
+        except FileExistsError:
+            suffix += 1
+            run_dir = output_dir / f"{name}-{suffix}"
 
 
 def _split_indices(n_samples: int, val_ratio: float, seed: int) -> tuple:
@@ -95,21 +131,30 @@ def _build_family_spacegroup_mask(
 
 
 def _log_epoch(epoch: int, total_epochs: int, history: Dict[str, List[float]]) -> None:
-    """Log one epoch's losses, including whichever auxiliary keys are present."""
+    """Log one epoch's losses, including whichever auxiliary keys are present.
+
+    ``kl`` is only present for a VAE (``dim_red.vae.training.train_vae``'s
+    history); a plain Autoencoder's history has no KL term at all, so it's
+    included conditionally just like the aux-head cross-entropy terms.
+    """
     i = epoch - 1
     msg = (
         f"epoch {epoch}/{total_epochs} - "
         f"train_loss={history['train_loss'][i]:.4f} "
-        f"(recon={history['train_recon'][i]:.4f} kl={history['train_kl'][i]:.4f}"
+        f"(recon={history['train_recon'][i]:.4f}"
     )
+    if "train_kl" in history:
+        msg += f" kl={history['train_kl'][i]:.4f}"
     if "train_family_ce" in history:
         msg += f" family_ce={history['train_family_ce'][i]:.4f}"
     if "train_spacegroup_ce" in history:
         msg += f" spacegroup_ce={history['train_spacegroup_ce'][i]:.4f}"
     msg += (
         f") - val_loss={history['val_loss'][i]:.4f} "
-        f"(recon={history['val_recon'][i]:.4f} kl={history['val_kl'][i]:.4f}"
+        f"(recon={history['val_recon'][i]:.4f}"
     )
+    if "val_kl" in history:
+        msg += f" kl={history['val_kl'][i]:.4f}"
     if "val_family_ce" in history:
         msg += f" family_ce={history['val_family_ce'][i]:.4f}"
     if "val_spacegroup_ce" in history:
@@ -136,14 +181,14 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
     Returns:
         Path to the run directory containing ``config.yaml``,
         ``model_params.msgpack``, ``loss_history.csv``, ``embeddings.npz``
-        (latent embeddings of every point in the training dataset, plus
-        ``family_probs``/``spacegroup_probs`` and their class vocabularies
-        when auxiliary heads are active), ``embeddings_plot.png`` and
-        ``run.log``.
+        (latent embeddings of every point in the training dataset, the raw
+        standardized SOAP ``features`` fed to the model, the true
+        ``spacegroups`` per point, plus ``family_probs``/``spacegroup_probs``
+        and their class vocabularies when auxiliary heads are active),
+        ``embeddings_plot.png`` and ``run.log``.
     """
     output_dir = Path(config.output_dir)
-    run_dir = output_dir / make_run_name(config)
-    run_dir.mkdir(parents=True, exist_ok=False)
+    run_dir = _make_unique_run_dir(output_dir, make_run_name(config))
 
     file_handler = logging.FileHandler(run_dir / "run.log")
     file_handler.setFormatter(
@@ -214,7 +259,11 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
             config.seed,
         )
 
-        model = VAE(
+        is_vae = config.model_kind == "vae"
+        apply_family_mask = vae_apply_family_mask if is_vae else ae_apply_family_mask
+        model_cls = VAE if is_vae else Autoencoder
+
+        model = model_cls(
             input_dim=X.shape[1],
             encoder_hidden_dim=config.vae.encoder_hidden_dim,
             decoder_hidden_dim=config.vae.decoder_hidden_dim,
@@ -226,29 +275,51 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
             seed=config.seed,
         )
 
-        train_config = TrainConfig(
-            epochs=config.train.epochs,
-            batch_size=config.train.batch_size,
-            learning_rate=config.train.learning_rate,
-            beta=config.train.beta,
-            lambda_family=config.aux_heads.lambda_family,
-            lambda_spacegroup=config.aux_heads.lambda_spacegroup,
-            seed=config.seed,
-            device=config.train.device,
-        )
-        logger.info(
-            "Training VAE: encoder_hidden_dim=%s latent_dim=%d epochs=%d "
-            "batch_size=%d beta=%.3f aux_heads=%s device=%s",
-            config.vae.encoder_hidden_dim,
-            config.vae.latent_dim,
-            config.train.epochs,
-            config.train.batch_size,
-            config.train.beta,
-            aux_mode,
-            config.train.device,
-        )
+        if is_vae:
+            train_config = VAETrainConfig(
+                epochs=config.train.epochs,
+                batch_size=config.train.batch_size,
+                learning_rate=config.train.learning_rate,
+                beta=config.train.beta,
+                lambda_family=config.aux_heads.lambda_family,
+                lambda_spacegroup=config.aux_heads.lambda_spacegroup,
+                seed=config.seed,
+                device=config.train.device,
+            )
+            logger.info(
+                "Training VAE: encoder_hidden_dim=%s latent_dim=%d epochs=%d "
+                "batch_size=%d beta=%.3f aux_heads=%s device=%s",
+                config.vae.encoder_hidden_dim,
+                config.vae.latent_dim,
+                config.train.epochs,
+                config.train.batch_size,
+                config.train.beta,
+                aux_mode,
+                config.train.device,
+            )
+        else:
+            train_config = AETrainConfig(
+                epochs=config.train.epochs,
+                batch_size=config.train.batch_size,
+                learning_rate=config.train.learning_rate,
+                lambda_family=config.aux_heads.lambda_family,
+                lambda_spacegroup=config.aux_heads.lambda_spacegroup,
+                seed=config.seed,
+                device=config.train.device,
+            )
+            logger.info(
+                "Training Autoencoder: encoder_hidden_dim=%s latent_dim=%d epochs=%d "
+                "batch_size=%d aux_heads=%s device=%s",
+                config.vae.encoder_hidden_dim,
+                config.vae.latent_dim,
+                config.train.epochs,
+                config.train.batch_size,
+                aux_mode,
+                config.train.device,
+            )
 
-        history = train_vae(
+        train_fn = train_vae if is_vae else train_autoencoder
+        history = train_fn(
             model,
             train_db,
             val_db,
@@ -266,12 +337,20 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
 
         # Apply the trained encoder to every point of the dataset used for
         # training (train + val), not just the held-out validation split.
-        mu_all, _ = model.encode(X)
+        # A VAE's encode returns (mu, logvar); an Autoencoder's returns just
+        # z, since encoding is deterministic (no posterior to describe).
+        mu_all = model.encode(X)[0] if is_vae else model.encode(X)
         mu_all = np.asarray(mu_all)
         embeddings_payload = dict(
             embeddings=mu_all,
+            # Raw standardized SOAP features (the model's actual input), so
+            # downstream comparison tooling (see dim_red.pipeline.compare)
+            # can fit classical baselines (PCA, UMAP) on the exact same data
+            # without needing to re-fetch/re-run SOAP.
+            features=X,
             labels=np.array(labels),
             material_ids=np.array(material_ids),
+            spacegroups=np.array(spacegroups, dtype=np.int64),
             split=split,
         )
         logger.info(
@@ -316,8 +395,8 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
                 mu_all,
                 labels,
                 title=(
-                    f"VAE latent space (hidden={config.vae.encoder_hidden_dim}, "
-                    f"crystal_systems={config.crystal_systems})"
+                    f"HD={'->'.join(str(dim) for dim in config.vae.encoder_hidden_dim)}, "
+                    f"CS={'-'.join(cs[:3] for cs in config.crystal_systems)}"
                 ),
                 save_path=str(plot_path),
                 xlabel="Latent Dimension 1",

@@ -5,7 +5,9 @@ pipeline, covering both single-run configs and grid-sweep configs.
 
 from __future__ import annotations
 
+import copy
 import dataclasses
+import itertools
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,6 +18,7 @@ import yaml
 logger = logging.getLogger("dim_red.pipeline")
 
 _AUX_HEADS_MODES = ("none", "family_only", "family_and_spacegroup")
+_MODEL_KINDS = ("vae", "autoencoder")
 
 
 @dataclass(frozen=True)
@@ -48,7 +51,14 @@ class SoapConfig:
 
 @dataclass(frozen=True)
 class VAEArchConfig:
-    """VAE architecture: this is sweep axis A (hidden-layer configuration)."""
+    """Encoder/decoder architecture: this is sweep axis A (hidden-layer
+    configuration). Shared by both model kinds (``RunConfig.model_kind``) --
+    a VAE and a plain Autoencoder built from the same ``encoder_hidden_dim``/
+    ``latent_dim``/``decoder_hidden_dim``/``mirror`` differ only in how the
+    latent code is produced (sampled vs. deterministic) and trained, not in
+    this architecture shape. Kept as ``vae`` in configs/dotted-paths for
+    backward compatibility with existing sweep configs.
+    """
 
     encoder_hidden_dim: List[int]
     latent_dim: int
@@ -58,7 +68,11 @@ class VAEArchConfig:
 
 @dataclass(frozen=True)
 class TrainSettings:
-    """Training hyperparameters, plus the train/val split ratio."""
+    """Training hyperparameters, plus the train/val split ratio.
+
+    ``beta`` is ignored when ``RunConfig.model_kind == "autoencoder"`` (no
+    KL term to weight -- see ``dim_red.autoencoder.training.TrainConfig``).
+    """
 
     epochs: int = 20
     batch_size: int = 32
@@ -101,7 +115,17 @@ class AuxHeadsConfig:
 
 @dataclass(frozen=True)
 class RunConfig:
-    """Fully resolved configuration for a single fetch -> SOAP -> VAE run."""
+    """Fully resolved configuration for a single fetch -> SOAP -> model run.
+
+    Attributes:
+        model_kind: Which model to train: ``"vae"`` (default, a
+            variational autoencoder trained with a KL term/``beta``) or
+            ``"autoencoder"`` (a deterministic autoencoder, no KL/``beta``).
+            Both read their architecture from ``vae`` (encoder/decoder
+            hidden dims, latent dim, mirror) and their aux-head settings from
+            ``aux_heads`` -- identical schema either way, see
+            ``dim_red.pipeline.single_run.run_single``.
+    """
 
     crystal_systems: List[str]
     limit_per_system: int
@@ -113,35 +137,38 @@ class RunConfig:
     output_dir: str = "runs"
     api_key: Optional[str] = None
     name: Optional[str] = None
+    model_kind: str = "vae"
+
+    def __post_init__(self):
+        if self.model_kind not in _MODEL_KINDS:
+            raise ValueError(
+                f"model_kind must be one of {_MODEL_KINDS}, got {self.model_kind!r}"
+            )
 
 
 @dataclass(frozen=True)
 class SweepConfig:
-    """Grid over sweep axis A (hidden-layer configs) x axis B (crystal-system
-    subsets) x, when auxiliary heads are active, the lambda weight(s) of
-    their loss terms; every other setting is shared across the grid.
+    """Generic grid sweep: a single-run-shaped ``base`` config (same nested
+    shape ``load_run_config`` reads) plus any number of dotted-path axes in
+    ``grid`` to Cartesian-product over.
+
+    Any ``RunConfig`` field can be swept this way -- not just a fixed set of
+    named axes -- since each grid key is just a path into that same nested
+    dict, e.g. ``"vae.encoder_hidden_dim"``, ``"train.learning_rate"``,
+    ``"aux_heads.lambda_family"``, ``"data.crystal_systems"``, or a
+    top-level field like ``"seed"``.
     """
 
-    crystal_system_sets: List[List[str]]
-    hidden_layer_configs: List[List[int]]
-    limit_per_system: int
-    soap: SoapConfig
-    latent_dim: int
-    train: TrainSettings
-    aux_heads_mode: str = "none"
-    lambda_family_values: List[float] = field(default_factory=lambda: [1.0])
-    lambda_spacegroup_values: List[float] = field(default_factory=lambda: [1.0])
-    head_hidden_dim: int = 16
-    seed: int = 42
-    output_dir: str = "runs"
-    api_key: Optional[str] = None
-    mirror: bool = True
+    base: Dict[str, Any]
+    grid: Dict[str, List[Any]] = field(default_factory=dict)
 
-    def __post_init__(self):
-        if self.aux_heads_mode not in _AUX_HEADS_MODES:
-            raise ValueError(
-                f"aux_heads_mode must be one of {_AUX_HEADS_MODES}, got {self.aux_heads_mode!r}"
-            )
+    @property
+    def output_dir(self) -> str:
+        return str(self.base.get("output_dir", "runs"))
+
+    @property
+    def api_key(self) -> Optional[str]:
+        return self.base.get("api_key")
 
 
 def _dataclass_from_dict(cls, d: Dict[str, Any]):
@@ -179,6 +206,7 @@ def run_config_from_dict(d: Dict[str, Any]) -> RunConfig:
         output_dir=str(d.get("output_dir", "runs")),
         api_key=d.get("api_key"),
         name=d.get("name"),
+        model_kind=str(d.get("model", "vae")),
     )
 
 
@@ -195,6 +223,7 @@ def run_config_to_dict(config: RunConfig) -> Dict[str, Any]:
         "output_dir": config.output_dir,
         "api_key": config.api_key,
         "name": config.name,
+        "model": config.model_kind,
         "data": {
             "crystal_systems": config.crystal_systems,
             "limit_per_system": config.limit_per_system,
@@ -208,88 +237,60 @@ def run_config_to_dict(config: RunConfig) -> Dict[str, Any]:
 
 def load_sweep_config(path: Union[str, Path]) -> SweepConfig:
     d = load_yaml(path)
-    data = d.get("data", {})
-    vae = d.get("vae", {})
-    aux_heads = d.get("aux_heads", {})
-    soap = _dataclass_from_dict(SoapConfig, d.get("soap", {}))
-    train = _dataclass_from_dict(TrainSettings, d.get("train", {}))
-    return SweepConfig(
-        crystal_system_sets=[list(s) for s in data["crystal_system_sets"]],
-        hidden_layer_configs=[list(h) for h in vae["hidden_layer_configs"]],
-        limit_per_system=int(data.get("limit_per_system", 15)),
-        soap=soap,
-        latent_dim=int(vae["latent_dim"]),
-        train=train,
-        aux_heads_mode=str(aux_heads.get("mode", "none")),
-        lambda_family_values=[
-            float(v) for v in aux_heads.get("lambda_family_values", [1.0])
-        ],
-        lambda_spacegroup_values=[
-            float(v) for v in aux_heads.get("lambda_spacegroup_values", [1.0])
-        ],
-        head_hidden_dim=int(aux_heads.get("head_hidden_dim", 16)),
-        seed=int(d.get("seed", 42)),
-        output_dir=str(d.get("output_dir", "runs")),
-        api_key=d.get("api_key"),
-        mirror=bool(vae.get("mirror", True)),
-    )
-
-
-def _expand_aux_heads(sweep: SweepConfig) -> List[AuxHeadsConfig]:
-    """Expand the auxiliary-heads axis (lambda_family x lambda_spacegroup),
-    only over the lambdas actually used by ``sweep.aux_heads_mode``.
-    """
-    if sweep.aux_heads_mode == "none":
-        return [AuxHeadsConfig(mode="none")]
-    if sweep.aux_heads_mode == "family_only":
-        return [
-            AuxHeadsConfig(
-                mode="family_only",
-                lambda_family=lf,
-                head_hidden_dim=sweep.head_hidden_dim,
-            )
-            for lf in sweep.lambda_family_values
-        ]
-    # aux_heads_mode == "family_and_spacegroup" (only remaining valid value).
-    return [
-        AuxHeadsConfig(
-            mode="family_and_spacegroup",
-            lambda_family=lf,
-            lambda_spacegroup=lsg,
-            head_hidden_dim=sweep.head_hidden_dim,
+    base = d.get("base", {})
+    grid = d.get("grid", {})
+    if not grid:
+        logger.warning(
+            "Sweep config %s has an empty 'grid'; expand_sweep will produce a "
+            "single run from 'base' alone",
+            path,
         )
-        for lf in sweep.lambda_family_values
-        for lsg in sweep.lambda_spacegroup_values
-    ]
+    return SweepConfig(base=base, grid={k: list(v) for k, v in grid.items()})
+
+
+def _set_dotted(d: Dict[str, Any], path: str, value: Any) -> None:
+    """Set a nested dict's value at dotted ``path`` (e.g. ``"vae.latent_dim"``),
+    creating intermediate dicts as needed. Mirrors the nested shape
+    ``run_config_from_dict`` reads, so any grid key can override any single-run
+    config field.
+    """
+    parts = path.split(".")
+    cur = d
+    for part in parts[:-1]:
+        cur = cur.setdefault(part, {})
+    cur[parts[-1]] = value
+
+
+def flatten_config_dict(d: Dict[str, Any], prefix: str = "") -> Dict[str, Any]:
+    """Flatten a nested config dict (as produced by ``run_config_to_dict``)
+    into ``{dotted_path: leaf_value}`` pairs -- the inverse of ``_set_dotted``.
+    Only ``dict`` values are recursed into; lists/None/scalars are leaves.
+    """
+    flat: Dict[str, Any] = {}
+    for key, value in d.items():
+        dotted = f"{prefix}.{key}" if prefix else key
+        if isinstance(value, dict):
+            flat.update(flatten_config_dict(value, dotted))
+        else:
+            flat[dotted] = value
+    return flat
 
 
 def expand_sweep(sweep: SweepConfig) -> List[RunConfig]:
-    """Expand a sweep's grid -- crystal-system sets x hidden-layer configs x,
-    when auxiliary heads are active, their lambda weight(s) -- into one
-    RunConfig per combination.
+    """Expand a sweep's grid -- the Cartesian product of every dotted-path
+    axis in ``sweep.grid`` -- into one ``RunConfig`` per combination, each
+    built by overriding ``sweep.base`` at those paths. An empty grid produces
+    a single run from ``base`` alone.
     """
+    if not sweep.grid:
+        return [run_config_from_dict(copy.deepcopy(sweep.base))]
+
+    keys = list(sweep.grid)
+    value_lists = [sweep.grid[k] for k in keys]
     runs = []
-    for cs_set in sweep.crystal_system_sets:
-        for hidden_dims in sweep.hidden_layer_configs:
-            for aux_cfg in _expand_aux_heads(sweep):
-                vae_cfg = VAEArchConfig(
-                    encoder_hidden_dim=list(hidden_dims),
-                    latent_dim=sweep.latent_dim,
-                    decoder_hidden_dim=None,
-                    mirror=sweep.mirror,
-                )
-                runs.append(
-                    RunConfig(
-                        crystal_systems=list(cs_set),
-                        limit_per_system=sweep.limit_per_system,
-                        soap=sweep.soap,
-                        vae=vae_cfg,
-                        train=sweep.train,
-                        aux_heads=aux_cfg,
-                        seed=sweep.seed,
-                        output_dir=sweep.output_dir,
-                        api_key=sweep.api_key,
-                        name=None,
-                    )
-                )
+    for combo in itertools.product(*value_lists):
+        d = copy.deepcopy(sweep.base)
+        for key, value in zip(keys, combo):
+            _set_dotted(d, key, value)
+        runs.append(run_config_from_dict(d))
     return runs

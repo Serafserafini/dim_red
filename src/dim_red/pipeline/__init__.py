@@ -12,6 +12,7 @@ __all__ = [
     "load_sweep_config",
     "run_single",
     "run_sweep",
+    "generate_comparison_report",
 ]
 
 
@@ -24,4 +25,6 @@ def __getattr__(name: str):
         return import_module("dim_red.pipeline.single_run").run_single
     if name == "run_sweep":
         return import_module("dim_red.pipeline.sweep").run_sweep
+    if name == "generate_comparison_report":
+        return import_module("dim_red.pipeline.compare").generate_comparison_report
     raise AttributeError(f"module 'dim_red.pipeline' has no attribute '{name}'")

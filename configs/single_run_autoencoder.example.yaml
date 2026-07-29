@@ -1,0 +1,49 @@
+# Example config for a single fetch -> SOAP -> Autoencoder run: identical to
+# single_run.example.yaml except for "model: autoencoder" and the absence of
+# a KL term (so train.beta is irrelevant here and omitted). See
+# CLAUDE.md/dim_red.autoencoder for how this differs from the default VAE.
+# Run with: python -m dim_red.pipeline.cli --config configs/single_run_autoencoder.example.yaml
+# or:       dimred-run configs/single_run_autoencoder.example.yaml
+
+seed: 42
+output_dir: runs
+api_key: null # falls back to the MP_API_KEY environment variable
+
+model: autoencoder # "vae" (default) or "autoencoder"
+
+data:
+  crystal_systems: [cubic, hexagonal]
+  limit_per_system: 15
+
+soap:
+  r_cut: 5.0
+  n_max: 4
+  l_max: 3
+  sigma: 0.5
+  element_agnostic: false
+  normalize_distances: false
+  species: null # auto-detected from the fetched structures
+
+# Same architecture schema as the VAE -- encoder/decoder shape has nothing
+# model-specific about it, only how the latent code is produced/trained does.
+vae:
+  encoder_hidden_dim: [128, 64]
+  decoder_hidden_dim: null # null -> mirrors the encoder
+  latent_dim: 2
+  mirror: true
+
+# Optional auxiliary classification heads on the latent z -- same schema as
+# for a VAE. mode: none (this default) reproduces the plain autoencoder
+# unchanged. Other options: family_only, family_and_spacegroup.
+aux_heads:
+  mode: none
+  lambda_family: 1.0
+  lambda_spacegroup: 1.0
+  head_hidden_dim: 16
+
+train:
+  epochs: 20
+  batch_size: 32
+  learning_rate: 0.001 # unused by the VeLO optimizer, kept for API compatibility
+  val_ratio: 0.2
+  device: cpu

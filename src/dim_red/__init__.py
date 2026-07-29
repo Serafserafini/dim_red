@@ -15,6 +15,7 @@ __all__ = [
     "fetch_structures_by_crystal_system",
     "analysis",
     "vae",
+    "autoencoder",
     "pipeline",
 ]
 
@@ -29,6 +30,8 @@ def __getattr__(name: str):
         return import_module("dim_red.analysis")
     if name == "vae":
         return import_module("dim_red.vae")
+    if name == "autoencoder":
+        return import_module("dim_red.autoencoder")
     if name == "pipeline":
         return import_module("dim_red.pipeline")
     raise AttributeError(f"module 'dim_red' has no attribute '{name}'")

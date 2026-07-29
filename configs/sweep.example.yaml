@@ -1,49 +1,61 @@
-# Example sweep config: grid over VAE hidden-layer configs (axis A) x
-# crystal-system subsets (axis B). Runs sharing a crystal-system subset reuse
-# the same cached dataset (fetch + SOAP run once per subset, not per run).
+# Example sweep config: a "base" single-run config (same shape as
+# single_run.example.yaml) plus a "grid" of dotted-path axes to
+# Cartesian-product over. Any RunConfig field can be a grid axis -- not just
+# VAE hidden dims / crystal systems -- since each grid key is just a path
+# into the base config (e.g. "train.learning_rate", "soap.r_cut", "seed").
+# Runs sharing a crystal-system subset + SOAP settings + fetch limit reuse
+# the same cached dataset (fetch + SOAP run once per distinct combination of
+# those, not per run).
 # Run with: python -m dim_red.pipeline.cli --config configs/sweep.example.yaml --sweep
+# or:       dimred-sweep configs/sweep.example.yaml
 
-seed: 42
-output_dir: runs
-api_key: null
+base:
+  seed: 42
+  output_dir: runs
+  api_key: null
 
-data:
-  crystal_system_sets:
+  data:
+    crystal_systems: [cubic]
+    limit_per_system: 15
+
+  soap:
+    r_cut: 5.0
+    n_max: 4
+    l_max: 3
+    sigma: 0.5
+    element_agnostic: false
+    normalize_distances: false
+    species: null
+
+  vae:
+    encoder_hidden_dim: [128]
+    latent_dim: 2
+    mirror: true
+
+  # Optional auxiliary classification heads on the latent z. mode: none (this
+  # default) reproduces the plain VAE unchanged. See
+  # configs/sweep_aux_heads.example.yaml for an active example.
+  aux_heads:
+    mode: none
+
+  train:
+    epochs: 20
+    batch_size: 32
+    learning_rate: 0.001
+    beta: 1.0
+    val_ratio: 0.2
+    device: cpu
+
+# Cartesian product of every axis below (2 crystal-system sets x 2
+# hidden-layer configs = 4 runs here). Add/remove axes freely -- e.g.
+# "train.learning_rate: [0.001, 0.0005]" would multiply the run count by 2,
+# or "seed: [0, 1, 2]" to repeat every combination with different seeds.
+grid:
+  data.crystal_systems:
     - [cubic]
     - [cubic, hexagonal]
     - [cubic, hexagonal, tetragonal]
-  limit_per_system: 15
-
-soap:
-  r_cut: 5.0
-  n_max: 4
-  l_max: 3
-  sigma: 0.5
-  element_agnostic: false
-  normalize_distances: false
-  species: null
-
-vae:
-  hidden_layer_configs:
+  vae.encoder_hidden_dim:
     - [128]
     - [128, 64]
     - [128, 64, 32]
-  latent_dim: 2
-  mirror: true
-
-# Optional auxiliary classification heads on the latent z. mode: none (this
-# default) reproduces the plain VAE unchanged, and lambda_*_values are
-# ignored. See configs/sweep_aux_heads.example.yaml for an active example.
-aux_heads:
-  mode: none
-  lambda_family_values: [1.0]
-  lambda_spacegroup_values: [1.0]
-  head_hidden_dim: 16
-
-train:
-  epochs: 20
-  batch_size: 32
-  learning_rate: 0.001
-  beta: 1.0
-  val_ratio: 0.2
-  device: cpu
