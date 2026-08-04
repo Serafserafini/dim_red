@@ -90,11 +90,25 @@ def _do_rerun(run_dir: str, cache_dir: Optional[str]) -> Path:
     return new_run_dir
 
 
-def _do_compare(sweep_dir: str, output_dir: Optional[str]) -> Path:
+def _str_to_bool(value: str) -> bool:
+    if value.lower() in ("true", "1", "yes"):
+        return True
+    if value.lower() in ("false", "0", "no"):
+        return False
+    raise argparse.ArgumentTypeError(
+        f"Expected a boolean value (true/false), got {value!r}"
+    )
+
+
+def _do_compare(
+    sweep_dir: str, output_dir: Optional[str], data_file: bool = False
+) -> Path:
     from dim_red.pipeline.compare import generate_comparison_report
 
     _configure_console_logging()
-    report_dir = generate_comparison_report(sweep_dir, output_dir=output_dir)
+    report_dir = generate_comparison_report(
+        sweep_dir, output_dir=output_dir, write_data_files=data_file
+    )
     print(f"Comparison report saved to {report_dir}")
     return report_dir
 
@@ -164,8 +178,16 @@ def compare_command(argv=None) -> None:
         default=None,
         help="Where to write the comparison PNGs (default: <sweep_dir>/comparison).",
     )
+    parser.add_argument(
+        "--data-file",
+        type=_str_to_bool,
+        default=False,
+        metavar="{true,false}",
+        help="Also write the data behind each comparison plot to a CSV file "
+        "next to its PNG (default: false, PNGs only).",
+    )
     args = parser.parse_args(argv)
-    _do_compare(args.sweep_dir, args.output_dir)
+    _do_compare(args.sweep_dir, args.output_dir, args.data_file)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -202,6 +224,14 @@ def _build_parser() -> argparse.ArgumentParser:
             "<sweep_dir>/comparison/ instead of running anything."
         ),
     )
+    parser.add_argument(
+        "--data-file",
+        type=_str_to_bool,
+        default=False,
+        metavar="{true,false}",
+        help="With --compare: also write the data behind each comparison "
+        "plot to a CSV file next to its PNG (default: false, PNGs only).",
+    )
     return parser
 
 
@@ -214,7 +244,7 @@ def main(argv=None) -> None:
     args = parser.parse_args(argv)
 
     if args.compare:
-        _do_compare(args.compare, None)
+        _do_compare(args.compare, None, args.data_file)
         return
 
     if args.rerun:

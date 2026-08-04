@@ -17,6 +17,8 @@ __all__ = [
     "vae",
     "autoencoder",
     "pipeline",
+    "augmentation",
+    "generate",
 ]
 
 
@@ -26,6 +28,10 @@ def __getattr__(name: str):
         return import_module("dim_red.soap").compute_soap
     if name == "fetch_structures_by_crystal_system":
         return import_module("dim_red.fetch").fetch_structures_by_crystal_system
+    if name == "augmentation":
+        return import_module("dim_red.augmentation")
+    if name == "generate":
+        return import_module("dim_red.generate")
     if name == "analysis":
         return import_module("dim_red.analysis")
     if name == "vae":

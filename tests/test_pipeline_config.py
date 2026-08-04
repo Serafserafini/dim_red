@@ -8,6 +8,8 @@ import yaml
 
 from dim_red.pipeline.config import (
     AuxHeadsConfig,
+    FetchConfig,
+    PyxtalConfig,
     RunConfig,
     SoapConfig,
     TrainSettings,
@@ -30,7 +32,7 @@ def _single_run_dict():
     return {
         "seed": 7,
         "output_dir": "runs",
-        "data": {"crystal_systems": ["cubic", "hexagonal"], "limit_per_system": 5},
+        "fetch": {"crystal_systems": ["cubic", "hexagonal"], "limit_per_system": 5},
         "soap": {"r_cut": 4.0, "n_max": 2, "l_max": 2},
         "vae": {"encoder_hidden_dim": [16, 8], "latent_dim": 2},
         "train": {"epochs": 3, "batch_size": 4, "beta": 0.5, "val_ratio": 0.25},
@@ -42,8 +44,8 @@ def test_load_run_config_roundtrip(tmp_path):
     config = load_run_config(config_path)
 
     assert config.seed == 7
-    assert config.crystal_systems == ["cubic", "hexagonal"]
-    assert config.limit_per_system == 5
+    assert config.fetch.crystal_systems == ["cubic", "hexagonal"]
+    assert config.fetch.limit_per_system == 5
     assert config.soap.r_cut == 4.0
     assert config.soap.n_max == 2
     assert config.vae.encoder_hidden_dim == [16, 8]
@@ -75,11 +77,10 @@ def test_run_config_parses_model_kind(tmp_path):
 def test_run_config_rejects_invalid_model_kind():
     with pytest.raises(ValueError, match="model_kind must be one of"):
         RunConfig(
-            crystal_systems=["cubic"],
-            limit_per_system=5,
             soap=SoapConfig(),
             vae=VAEArchConfig(encoder_hidden_dim=[8], latent_dim=2),
             train=TrainSettings(),
+            fetch=FetchConfig(crystal_systems=["cubic"]),
             model_kind="bogus",
         )
 
@@ -92,6 +93,140 @@ def test_run_config_to_dict_roundtrips_model_kind(tmp_path):
     reloaded = load_run_config(saved_path)
     assert reloaded == config
     assert reloaded.model_kind == "autoencoder"
+
+
+def test_run_config_defaults_to_fetch_data_source(tmp_path):
+    d = _single_run_dict()
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+    assert config.data_source == "fetch"
+    assert config.pyxtal is None
+    assert config.fetch is not None
+
+
+def test_run_config_rejects_invalid_data_source():
+    with pytest.raises(ValueError, match="data_source must be one of"):
+        RunConfig(
+            soap=SoapConfig(),
+            vae=VAEArchConfig(encoder_hidden_dim=[8], latent_dim=2),
+            train=TrainSettings(),
+            fetch=FetchConfig(crystal_systems=["cubic"]),
+            data_source="bogus",
+        )
+
+
+def test_run_config_fetch_data_source_requires_fetch_block():
+    with pytest.raises(ValueError, match="requires a 'fetch' config block"):
+        RunConfig(
+            soap=SoapConfig(),
+            vae=VAEArchConfig(encoder_hidden_dim=[8], latent_dim=2),
+            train=TrainSettings(),
+            data_source="fetch",
+        )
+
+
+def test_run_config_pyxtal_data_source_requires_pyxtal_block():
+    with pytest.raises(ValueError, match="requires a 'pyxtal' config block"):
+        RunConfig(
+            soap=SoapConfig(),
+            vae=VAEArchConfig(encoder_hidden_dim=[8], latent_dim=2),
+            train=TrainSettings(),
+            data_source="pyxtal",
+        )
+
+
+def test_run_config_from_dict_parses_pyxtal_data_source(tmp_path):
+    d = _single_run_dict()
+    del d["fetch"]  # not required for data_source="pyxtal"
+    d["data_source"] = "pyxtal"
+    d["pyxtal"] = {
+        "families": ["cubic"],
+        "structures_per_family": 20,
+        "distribution": "random",
+        "n_species": 2,
+    }
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+
+    assert config.data_source == "pyxtal"
+    assert config.fetch is None
+    assert config.pyxtal == PyxtalConfig(
+        families=["cubic"],
+        structures_per_family=20,
+        distribution="random",
+        n_species=2,
+    )
+
+
+def test_run_config_from_dict_still_requires_crystal_systems_for_fetch(tmp_path):
+    d = _single_run_dict()
+    del d["fetch"]["crystal_systems"]
+    with pytest.raises(KeyError):
+        load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+
+
+def test_run_config_from_dict_requires_fetch_block_for_fetch_source(tmp_path):
+    d = _single_run_dict()
+    del d["fetch"]
+    with pytest.raises(KeyError):
+        load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+
+
+def test_run_config_to_dict_roundtrips_pyxtal_data_source(tmp_path):
+    d = _single_run_dict()
+    del d["fetch"]
+    d["data_source"] = "pyxtal"
+    d["pyxtal"] = {"spacegroups": [225, 1], "structures_per_spacegroup": 3}
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+
+    saved_path = _write_yaml(tmp_path / "saved.yaml", run_config_to_dict(config))
+    reloaded = load_run_config(saved_path)
+
+    assert reloaded == config
+    assert reloaded.data_source == "pyxtal"
+    assert reloaded.fetch is None
+    assert reloaded.pyxtal.spacegroups == [225, 1]
+    assert reloaded.pyxtal.structures_per_spacegroup == 3
+
+
+def test_pyxtal_config_seed_defaults_to_none(tmp_path):
+    d = _single_run_dict()
+    del d["fetch"]
+    d["data_source"] = "pyxtal"
+    d["pyxtal"] = {"spacegroups": [225], "structures_per_spacegroup": 1}
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+    assert config.pyxtal.seed is None
+
+
+def test_pyxtal_config_seed_roundtrips(tmp_path):
+    d = _single_run_dict()
+    del d["fetch"]
+    d["data_source"] = "pyxtal"
+    d["pyxtal"] = {"spacegroups": [225], "structures_per_spacegroup": 1, "seed": 123}
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+    assert config.pyxtal.seed == 123
+
+    saved_path = _write_yaml(tmp_path / "saved.yaml", run_config_to_dict(config))
+    reloaded = load_run_config(saved_path)
+    assert reloaded.pyxtal.seed == 123
+
+
+def test_run_config_to_dict_omits_pyxtal_block_for_fetch_source(tmp_path):
+    config_path = _write_yaml(tmp_path / "run.yaml", _single_run_dict())
+    config = load_run_config(config_path)
+    saved = run_config_to_dict(config)
+    assert "pyxtal" not in saved
+    assert "fetch" in saved
+
+
+def test_expand_sweep_can_vary_data_source(tmp_path):
+    """Sweeping "data_source" (fetch vs pyxtal) works via the same generic
+    grid mechanism as model_kind -- no special-casing needed in expand_sweep.
+    """
+    base = _sweep_base()
+    base["pyxtal"] = {"structures_per_spacegroup": 2, "spacegroups": [225]}
+    sweep_dict = {"base": base, "grid": {"data_source": ["fetch", "pyxtal"]}}
+    sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
+    runs = expand_sweep(sweep)
+    assert {r.data_source for r in runs} == {"fetch", "pyxtal"}
 
 
 def test_expand_sweep_can_vary_model_kind(tmp_path):
@@ -122,14 +257,14 @@ def test_flatten_config_dict_produces_dotted_paths():
     flat = flatten_config_dict(
         {
             "seed": 7,
-            "data": {"crystal_systems": ["cubic"], "limit_per_system": 5},
+            "fetch": {"crystal_systems": ["cubic"], "limit_per_system": 5},
             "vae": {"encoder_hidden_dim": [16, 8], "latent_dim": 2},
         }
     )
     assert flat == {
         "seed": 7,
-        "data.crystal_systems": ["cubic"],
-        "data.limit_per_system": 5,
+        "fetch.crystal_systems": ["cubic"],
+        "fetch.limit_per_system": 5,
         "vae.encoder_hidden_dim": [16, 8],
         "vae.latent_dim": 2,
     }
@@ -174,7 +309,7 @@ def _sweep_base():
     return {
         "seed": 1,
         "output_dir": "runs",
-        "data": {"crystal_systems": ["cubic"], "limit_per_system": 5},
+        "fetch": {"crystal_systems": ["cubic"], "limit_per_system": 5},
         "soap": {"r_cut": 4.0, "n_max": 2, "l_max": 2},
         "vae": {"encoder_hidden_dim": [16], "latent_dim": 3},
         "train": {"epochs": 1, "batch_size": 4},
@@ -185,7 +320,7 @@ def test_load_sweep_config_and_expand(tmp_path):
     sweep_dict = {
         "base": _sweep_base(),
         "grid": {
-            "data.crystal_systems": [["cubic"], ["cubic", "hexagonal"]],
+            "fetch.crystal_systems": [["cubic"], ["cubic", "hexagonal"]],
             "vae.encoder_hidden_dim": [[16], [16, 8]],
         },
     }
@@ -201,7 +336,9 @@ def test_load_sweep_config_and_expand(tmp_path):
     assert len(runs) == 4
     assert all(isinstance(r, RunConfig) for r in runs)
 
-    combos = {(tuple(r.crystal_systems), tuple(r.vae.encoder_hidden_dim)) for r in runs}
+    combos = {
+        (tuple(r.fetch.crystal_systems), tuple(r.vae.encoder_hidden_dim)) for r in runs
+    }
     assert combos == {
         (("cubic",), (16,)),
         (("cubic",), (16, 8)),
@@ -217,13 +354,21 @@ def test_load_sweep_config_and_expand(tmp_path):
     assert all(r.aux_heads == AuxHeadsConfig(mode="none") for r in runs)
 
 
+def test_sweep_api_key_reads_from_fetch_block(tmp_path):
+    base = _sweep_base()
+    base["fetch"]["api_key"] = "secret"
+    sweep_dict = {"base": base, "grid": {}}
+    sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
+    assert sweep.api_key == "secret"
+
+
 def test_expand_sweep_with_empty_grid_returns_single_base_run(tmp_path):
     sweep_dict = {"base": _sweep_base()}
     sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
     runs = expand_sweep(sweep)
 
     assert len(runs) == 1
-    assert runs[0].crystal_systems == ["cubic"]
+    assert runs[0].fetch.crystal_systems == ["cubic"]
     assert runs[0].vae.encoder_hidden_dim == [16]
 
 
@@ -251,7 +396,7 @@ def test_expand_sweep_can_vary_any_dotted_path(tmp_path):
     assert {r.train.learning_rate for r in runs} == {0.001, 0.0005}
     assert {r.train.beta for r in runs} == {1.0, 2.0}
     # Everything not in the grid stays shared across every expanded run.
-    assert all(r.crystal_systems == ["cubic"] for r in runs)
+    assert all(r.fetch.crystal_systems == ["cubic"] for r in runs)
 
 
 def test_sweep_config_invalid_aux_heads_mode_raises_on_expand(tmp_path):
@@ -267,11 +412,11 @@ def test_sweep_config_invalid_aux_heads_mode_raises_on_expand(tmp_path):
 def test_expand_sweep_family_only_expands_lambda_family_axis(tmp_path):
     base = _sweep_base()
     base["aux_heads"] = {"mode": "family_only"}
-    base["data"]["crystal_systems"] = ["cubic"]
+    base["fetch"]["crystal_systems"] = ["cubic"]
     sweep_dict = {
         "base": base,
         "grid": {
-            "data.crystal_systems": [["cubic"], ["cubic", "hexagonal"]],
+            "fetch.crystal_systems": [["cubic"], ["cubic", "hexagonal"]],
             "aux_heads.lambda_family": [0.5, 1.0, 2.0],
         },
     }

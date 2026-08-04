@@ -8,11 +8,11 @@
 base:
   seed: 42
   output_dir: runs
-  api_key: null
 
-  data:
+  fetch:
     crystal_systems: [cubic, hexagonal]
     limit_per_system: 15
+    api_key: null
 
   soap:
     r_cut: 5.0
@@ -30,7 +30,7 @@ base:
 
   # family_and_spacegroup adds both heads on z, with the spacegroup head
   # conditioned on family via masking. Requires >= 2 crystal systems in every
-  # data.crystal_systems value below so there is more than one family class
+  # fetch.crystal_systems value below so there is more than one family class
   # to learn.
   aux_heads:
     mode: family_and_spacegroup
@@ -47,7 +47,7 @@ base:
 # 2 crystal-system sets x 2 hidden-layer configs x 2 lambda_family x 2
 # lambda_spacegroup = 16 runs.
 grid:
-  data.crystal_systems:
+  fetch.crystal_systems:
     - [cubic, hexagonal]
     - [cubic, hexagonal, tetragonal]
   vae.encoder_hidden_dim:

@@ -5,6 +5,9 @@ fixed set of PNG comparison plots -- overlaid loss curves, final-metric-vs-
 hyperparameter plots for whichever hyperparameters actually varied across the
 runs, a grid of latent-space scatter plots, and (when auxiliary heads were
 used) a classification-accuracy comparison -- into ``<sweep_dir>/comparison/``.
+Each ``plot_*`` function also accepts a ``csv_path`` to write the exact data
+backing that plot, so ``generate_comparison_report`` produces a CSV alongside
+every PNG (same basename, ``.csv`` instead of ``.png``).
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import matplotlib.pyplot as plt
 import numpy as np
 
+from dim_red.analysis.plotting import plot_spacegroup_histogram
 from dim_red.pca import PCA
 from dim_red.pipeline.config import (
     RunConfig,
@@ -36,9 +40,9 @@ _CRYSTAL_SYSTEM_ABBREV_LEN = 3
 
 # Config fields never worth treating as a "hyperparameter" to plot/label by:
 # constant across a sweep's runs by construction (output_dir), unique per
-# run rather than swept (name), or sensitive (api_key -- excluded so it can
-# never end up in a plot title/filename even if it somehow varied).
-_NON_HYPERPARAM_KEYS = {"api_key", "output_dir", "name"}
+# run rather than swept (name), or sensitive (fetch.api_key -- excluded so it
+# can never end up in a plot title/filename even if it somehow varied).
+_NON_HYPERPARAM_KEYS = {"fetch.api_key", "output_dir", "name"}
 
 
 def _abbreviate_crystal_systems(systems: List[str]) -> str:
@@ -54,16 +58,70 @@ def _hashable(value: Any) -> Any:
     return value
 
 
+def _write_csv(
+    path: Union[str, Path], fieldnames: List[str], rows: List[Dict[str, Any]]
+) -> None:
+    """Write ``rows`` (a list of ``{fieldname: value}`` dicts) as CSV,
+    the tidy/long-format data backing one of this module's comparison plots.
+    """
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    logger.info("Saved plot data to %s", path)
+
+
 def _format_hyperparam_value(path: str, value: Any) -> Any:
     """Render a flattened config value for display: abbreviate crystal
     systems, join other lists with "-", and pass numeric/scalar values
     through unchanged so numeric plotting/sorting still works.
     """
-    if path == "data.crystal_systems":
+    if path == "fetch.crystal_systems":
         return _abbreviate_crystal_systems(value)
     if isinstance(value, list):
         return "-".join(str(v) for v in value)
     return value
+
+
+# Short forms for the hyperparameter *names* themselves (as opposed to their
+# values, handled by ``_format_hyperparam_value``) -- mirrors the prefixes
+# ``dim_red.pipeline.single_run.make_run_name`` already uses for run
+# directory names (hd, cs, aux, lf, lsg), extended to the rest of RunConfig
+# so any swept field gets a short, plot/CSV-friendly key. Anything not listed
+# here falls back to its unabbreviated config field name.
+_HYPERPARAM_KEY_ABBREV = {
+    "crystal_systems": "cs",
+    "limit_per_system": "limit",
+    "encoder_hidden_dim": "hd",
+    "decoder_hidden_dim": "dhd",
+    "latent_dim": "ld",
+    "mirror": "mirror",
+    "epochs": "ep",
+    "batch_size": "bs",
+    "learning_rate": "lr",
+    "beta": "beta",
+    "val_ratio": "val_ratio",
+    "device": "device",
+    "mode": "aux",
+    "lambda_family": "lf",
+    "lambda_spacegroup": "lsg",
+    "head_hidden_dim": "hhd",
+    "seed": "seed",
+    "model": "model",
+    "data_source": "src",
+    "structures_per_family": "spf",
+    "structures_per_spacegroup": "sps",
+    "distribution": "dist",
+    "n_species": "nsp",
+}
+
+
+def _abbreviate_hyperparam_key(path: str) -> str:
+    """Short form of a dotted hyperparameter path's leaf name, e.g.
+    ``"vae.encoder_hidden_dim"`` -> ``"hd"``, for compact run labels.
+    """
+    key = path.rsplit(".", 1)[-1]
+    return _HYPERPARAM_KEY_ABBREV.get(key, key)
 
 
 @dataclass
@@ -148,11 +206,12 @@ def varying_hyperparams(runs: List[RunData]) -> List[str]:
 
 def run_labels(runs: List[RunData]) -> Dict[Path, str]:
     """Compact, plot-safe label per run, built from whichever hyperparameters
-    actually vary across ``runs`` (e.g. ``"encoder_hidden_dim=128-64_lambda_family=1"``)
-    -- so legends/titles reflect whatever was actually swept, for any
-    parameter, instead of a fixed hidden-dims/crystal-systems assumption.
-    Falls back to the run directory name if nothing varies (e.g. a
-    single-run "sweep").
+    actually vary across ``runs`` (e.g. ``"hd=128-64_lf=1"``, using the same
+    short parameter-name abbreviations as run directory names -- see
+    ``_HYPERPARAM_KEY_ABBREV``) -- so legends/titles/CSV rows reflect whatever
+    was actually swept, for any parameter, instead of a fixed hidden-dims/
+    crystal-systems assumption. Falls back to the run directory name if
+    nothing varies (e.g. a single-run "sweep").
     """
     varying = varying_hyperparams(runs)
     if not varying:
@@ -161,7 +220,7 @@ def run_labels(runs: List[RunData]) -> Dict[Path, str]:
     for run in runs:
         flat = run.flat_config
         parts = [
-            f"{key.rsplit('.', 1)[-1]}={_format_hyperparam_value(key, flat[key])}"
+            f"{_abbreviate_hyperparam_key(key)}={_format_hyperparam_value(key, flat[key])}"
             for key in varying
         ]
         labels[run.run_dir] = "_".join(parts)
@@ -202,11 +261,28 @@ def plot_loss_curves(
     runs: List[RunData],
     metrics: List[str] = ("train_loss", "val_loss"),
     save_path: Optional[Union[str, Path]] = None,
+    csv_path: Optional[Union[str, Path]] = None,
 ) -> None:
     """Overlay every run's loss curve, one subplot per metric in ``metrics``,
     one line per run.
     """
     labels = run_labels(runs)
+
+    if csv_path:
+        rows = [
+            {
+                "run": labels[run.run_dir],
+                "epoch": int(epoch),
+                "metric": metric,
+                "value": float(value),
+            }
+            for run in runs
+            for metric in metrics
+            if metric in run.loss_history
+            for epoch, value in zip(run.loss_history["epoch"], run.loss_history[metric])
+        ]
+        _write_csv(csv_path, ["run", "epoch", "metric", "value"], rows)
+
     fig, axes = plt.subplots(
         1, len(metrics), figsize=(6 * len(metrics), 5), squeeze=False
     )
@@ -273,6 +349,7 @@ def plot_final_metric_vs_hyperparam(
     hyperparam: str,
     metric: str = "val_loss",
     save_path: Optional[Union[str, Path]] = None,
+    csv_path: Optional[Union[str, Path]] = None,
 ) -> None:
     """Plot each run's final (last-epoch) ``metric`` against its value of
     ``hyperparam``, aggregated (mean +/- std) over however many runs share
@@ -284,6 +361,20 @@ def plot_final_metric_vs_hyperparam(
     """
     groups = final_metric_groups(runs, hyperparam, metric)
     is_numeric = all(isinstance(k, (int, float)) for k in groups)
+
+    if csv_path:
+        run_label_map = run_labels(runs)
+        rows = [
+            {
+                "run": run_label_map[run.run_dir],
+                hyperparam: _format_hyperparam_value(
+                    hyperparam, run.flat_config[hyperparam]
+                ),
+                metric: float(run.loss_history[metric][-1]),
+            }
+            for run in runs
+        ]
+        _write_csv(csv_path, ["run", hyperparam, metric], rows)
     keys = sorted(groups) if is_numeric else sorted(groups, key=str)
     means = [float(np.mean(groups[k])) for k in keys]
     stds = [float(np.std(groups[k])) for k in keys]
@@ -387,8 +478,43 @@ def compute_embedding_baselines(
     return source.run_dir.name, point_labels, baselines
 
 
+def plot_spacegroup_family_histogram(
+    runs: List[RunData],
+    save_path: Optional[Union[str, Path]] = None,
+    csv_path: Optional[Union[str, Path]] = None,
+) -> None:
+    """Bar chart of spacegroup counts across the fetched dataset, colored by
+    crystal family -- see ``dim_red.analysis.plotting.plot_spacegroup_histogram``.
+
+    Computed once from the first run's saved ``spacegroups``/``labels``
+    arrays (every run in ``run_single`` always saves these), same
+    "compute once, from the first run" convention as
+    ``compute_embedding_baselines``'s PCA/UMAP baseline: every run sharing
+    that dataset (same crystal systems) would give an identical histogram.
+    """
+    source = runs[0]
+    spacegroups = source.embeddings["spacegroups"].tolist()
+    families = source.embeddings["labels"].tolist()
+
+    if csv_path:
+        rows = [
+            {"spacegroup": sg, "family": family}
+            for sg, family in zip(spacegroups, families)
+        ]
+        _write_csv(csv_path, ["spacegroup", "family"], rows)
+
+    plot_spacegroup_histogram(
+        spacegroups,
+        families,
+        title=f"Spacegroup distribution ({source.run_dir.name}'s dataset)",
+        save_path=str(save_path) if save_path else None,
+    )
+
+
 def plot_latent_space_grid(
-    runs: List[RunData], save_path: Optional[Union[str, Path]] = None
+    runs: List[RunData],
+    save_path: Optional[Union[str, Path]] = None,
+    csv_path: Optional[Union[str, Path]] = None,
 ) -> None:
     """Grid of 2D latent-space scatter plots, colored by label. When at
     least 2 hyperparameters vary across ``runs``, the grid's rows/columns
@@ -469,11 +595,27 @@ def plot_latent_space_grid(
         total_rows, grid_cols, figsize=(5 * grid_cols, 4.5 * total_rows), squeeze=False
     )
 
+    csv_rows: List[Dict[str, Any]] = []
+
     for (row, col), cell_runs in cells.items():
         ax = axes[row][col]
         run = cell_runs[0]
         coords = run.embeddings["embeddings"]
         point_labels = run.embeddings["labels"]
+        if csv_path:
+            run_name = run_label_map[run.run_dir]
+            csv_rows.extend(
+                {
+                    "source": run_name,
+                    "row": row,
+                    "col": col,
+                    "is_baseline": False,
+                    "dim_0": float(coords[i, 0]),
+                    "dim_1": float(coords[i, 1]),
+                    "label": str(point_labels[i]),
+                }
+                for i in range(coords.shape[0])
+            )
         for i, label in enumerate(sorted(set(point_labels.tolist()))):
             mask = point_labels == label
             ax.scatter(
@@ -502,6 +644,19 @@ def plot_latent_space_grid(
         baseline_row = n_rows
         for i, (method_name, coords) in enumerate(baselines.items()):
             ax = axes[baseline_row][i]
+            if csv_path:
+                csv_rows.extend(
+                    {
+                        "source": f"{method_name} baseline",
+                        "row": baseline_row,
+                        "col": i,
+                        "is_baseline": True,
+                        "dim_0": float(coords[j, 0]),
+                        "dim_1": float(coords[j, 1]),
+                        "label": str(base_labels[j]),
+                    }
+                    for j in range(coords.shape[0])
+                )
             for j, label in enumerate(sorted(set(base_labels.tolist()))):
                 mask = base_labels == label
                 ax.scatter(
@@ -543,6 +698,13 @@ def plot_latent_space_grid(
     fig.suptitle(suptitle, fontsize=14, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.94])
 
+    if csv_path:
+        _write_csv(
+            csv_path,
+            ["source", "row", "col", "is_baseline", "dim_0", "dim_1", "label"],
+            csv_rows,
+        )
+
     if save_path:
         fig.savefig(save_path, dpi=200, bbox_inches="tight")
         logger.info("Saved latent-space grid comparison to %s", save_path)
@@ -566,7 +728,9 @@ def _aux_accuracies(run: RunData) -> Dict[str, float]:
 
 
 def plot_aux_accuracy_comparison(
-    runs: List[RunData], save_path: Optional[Union[str, Path]] = None
+    runs: List[RunData],
+    save_path: Optional[Union[str, Path]] = None,
+    csv_path: Optional[Union[str, Path]] = None,
 ) -> None:
     """Grouped bar chart of family/spacegroup classification accuracy across
     the runs that had auxiliary heads active. Runs without aux heads are
@@ -580,6 +744,14 @@ def plot_aux_accuracy_comparison(
             "No runs with auxiliary heads active; skipping accuracy comparison"
         )
         return
+
+    if csv_path:
+        rows = [
+            {"run": label, "metric": metric, "accuracy": accuracy}
+            for label, accs in per_run_accs
+            for metric, accuracy in accs.items()
+        ]
+        _write_csv(csv_path, ["run", "metric", "accuracy"], rows)
 
     metric_names = sorted({m for _, accs in per_run_accs for m in accs})
     labels = [label for label, _ in per_run_accs]
@@ -607,26 +779,46 @@ def plot_aux_accuracy_comparison(
 
 
 def generate_comparison_report(
-    sweep_dir: Union[str, Path], output_dir: Optional[Union[str, Path]] = None
+    sweep_dir: Union[str, Path],
+    output_dir: Optional[Union[str, Path]] = None,
+    write_data_files: bool = False,
 ) -> Path:
     """Discover every run under ``sweep_dir`` and render the full comparison
     suite (loss curves, final-metric-vs-hyperparameter plots for every loss
     component -- total/recon/KL and, when active, the aux-head cross-entropy
-    terms -- against whatever hyperparameter varied, a latent-space grid with
-    a PCA/UMAP baseline comparison, and an aux-heads accuracy comparison if
-    applicable) into ``output_dir`` (default: ``<sweep_dir>/comparison``).
+    terms -- against whatever hyperparameter varied, a spacegroup histogram
+    colored by family, a latent-space grid with a PCA/UMAP baseline
+    comparison, and an aux-heads accuracy comparison if applicable) into
+    ``output_dir`` (default: ``<sweep_dir>/comparison``).
+
+    Args:
+        sweep_dir: Directory containing completed run subdirectories.
+        output_dir: Where to write the comparison PNGs (and CSVs, if
+            ``write_data_files``). Defaults to ``<sweep_dir>/comparison``.
+        write_data_files: If True, also write each plot's underlying data to
+            a CSV file of the same name (e.g. ``loss_curves.png`` /
+            ``loss_curves.csv``), so the numbers behind a plot can be
+            inspected or reprocessed without parsing the image. Off by
+            default -- only the PNGs are written.
 
     Returns:
-        The directory the comparison PNGs were written to.
+        The directory the comparison PNGs (and CSVs) were written to.
     """
     sweep_dir = Path(sweep_dir)
     runs = load_runs(sweep_dir)
     output_dir = Path(output_dir) if output_dir else sweep_dir / "comparison"
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    def _csv_path(name: str) -> Optional[Path]:
+        return output_dir / name if write_data_files else None
+
     logger.info("Comparing %d run(s) from %s", len(runs), sweep_dir)
 
-    plot_loss_curves(runs, save_path=output_dir / "loss_curves.png")
+    plot_loss_curves(
+        runs,
+        save_path=output_dir / "loss_curves.png",
+        csv_path=_csv_path("loss_curves.csv"),
+    )
 
     if len(runs) > 1:
         varying = varying_hyperparams(runs)
@@ -638,12 +830,26 @@ def generate_comparison_report(
                     hyperparam,
                     metric=metric,
                     save_path=output_dir / f"final_{metric}_vs_{safe_name}.png",
+                    csv_path=_csv_path(f"final_{metric}_vs_{safe_name}.csv"),
                 )
     else:
         logger.info("Only one run found; skipping final-metric-vs-hyperparameter plots")
 
-    plot_latent_space_grid(runs, save_path=output_dir / "latent_space_grid.png")
-    plot_aux_accuracy_comparison(runs, save_path=output_dir / "aux_heads_accuracy.png")
+    plot_spacegroup_family_histogram(
+        runs,
+        save_path=output_dir / "spacegroup_histogram.png",
+        csv_path=_csv_path("spacegroup_histogram.csv"),
+    )
+    plot_latent_space_grid(
+        runs,
+        save_path=output_dir / "latent_space_grid.png",
+        csv_path=_csv_path("latent_space_grid.csv"),
+    )
+    plot_aux_accuracy_comparison(
+        runs,
+        save_path=output_dir / "aux_heads_accuracy.png",
+        csv_path=_csv_path("aux_heads_accuracy.csv"),
+    )
 
     logger.info("Comparison report saved to %s", output_dir)
     return output_dir

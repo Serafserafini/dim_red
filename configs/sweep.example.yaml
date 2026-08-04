@@ -12,11 +12,11 @@
 base:
   seed: 42
   output_dir: runs
-  api_key: null
 
-  data:
+  fetch:
     crystal_systems: [cubic]
     limit_per_system: 15
+    api_key: null
 
   soap:
     r_cut: 5.0
@@ -51,7 +51,7 @@ base:
 # "train.learning_rate: [0.001, 0.0005]" would multiply the run count by 2,
 # or "seed: [0, 1, 2]" to repeat every combination with different seeds.
 grid:
-  data.crystal_systems:
+  fetch.crystal_systems:
     - [cubic]
     - [cubic, hexagonal]
     - [cubic, hexagonal, tetragonal]

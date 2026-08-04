@@ -3,11 +3,12 @@
 
 seed: 42
 output_dir: runs
-api_key: null # falls back to the MP_API_KEY environment variable
+data_source: fetch # "fetch" (default, Materials Project) or "pyxtal"
 
-data:
+fetch:
   crystal_systems: [cubic, hexagonal]
   limit_per_system: 15
+  api_key: null # falls back to the MP_API_KEY environment variable
 
 soap:
   r_cut: 5.0

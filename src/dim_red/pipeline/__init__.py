@@ -8,6 +8,7 @@ from importlib import import_module
 __all__ = [
     "RunConfig",
     "SweepConfig",
+    "PyxtalConfig",
     "load_run_config",
     "load_sweep_config",
     "run_single",
@@ -18,7 +19,13 @@ __all__ = [
 
 def __getattr__(name: str):
     """Lazily resolve public pipeline symbols to keep import cost minimal."""
-    if name in {"RunConfig", "SweepConfig", "load_run_config", "load_sweep_config"}:
+    if name in {
+        "RunConfig",
+        "SweepConfig",
+        "PyxtalConfig",
+        "load_run_config",
+        "load_sweep_config",
+    }:
         config = import_module("dim_red.pipeline.config")
         return getattr(config, name)
     if name == "run_single":

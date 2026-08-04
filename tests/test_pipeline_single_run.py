@@ -11,11 +11,14 @@ import numpy as np
 import pytest
 import yaml
 from ase import Atoms
+from ase.io import read as read_atoms
 
 pytest.importorskip("jax")
 
 from dim_red.pipeline.config import (
     AuxHeadsConfig,
+    FetchConfig,
+    PyxtalConfig,
     RunConfig,
     SoapConfig,
     TrainSettings,
@@ -34,8 +37,7 @@ def _fake_atoms(symbol: str, material_id: str, spacegroup: int = None) -> Atoms:
 
 def _make_config(tmp_path, name=None) -> RunConfig:
     return RunConfig(
-        crystal_systems=["cubic"],
-        limit_per_system=8,
+        fetch=FetchConfig(crystal_systems=["cubic"], limit_per_system=8),
         soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
         vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
         train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
@@ -66,13 +68,14 @@ def test_run_single_writes_expected_artifacts(tmp_path):
     assert (run_dir / "config.yaml").exists()
     assert (run_dir / "run.log").exists()
     assert (run_dir / "loss_history.csv").exists()
+    assert (run_dir / "dataset.extxyz").exists()
     assert (run_dir / "embeddings.npz").exists()
     assert (run_dir / "embeddings_plot.png").exists()
     assert (run_dir / "model_params.msgpack").exists()
 
     with open(run_dir / "config.yaml") as f:
         saved = yaml.safe_load(f)
-    assert saved["data"]["crystal_systems"] == ["cubic"]
+    assert saved["fetch"]["crystal_systems"] == ["cubic"]
     assert saved["vae"]["encoder_hidden_dim"] == [4]
 
     embeddings = np.load(run_dir / "embeddings.npz")
@@ -82,6 +85,14 @@ def test_run_single_writes_expected_artifacts(tmp_path):
     assert embeddings["material_ids"].shape[0] == n_total
     assert set(embeddings["split"].tolist()) == {"train", "val"}
     assert (embeddings["split"] == "val").sum() == 2  # val_ratio=0.25 of 8 samples
+
+    # dataset.extxyz holds the exact structures used, same order/count as
+    # embeddings.npz's arrays.
+    dataset_atoms = read_atoms(run_dir / "dataset.extxyz", index=":")
+    assert len(dataset_atoms) == n_total
+    assert [a.info["material_id"] for a in dataset_atoms] == embeddings[
+        "material_ids"
+    ].tolist()
 
     with open(run_dir / "loss_history.csv") as f:
         header = f.readline().strip().split(",")
@@ -109,8 +120,7 @@ def test_run_single_auto_name_encodes_swept_params(tmp_path):
 
 def test_run_single_autoencoder_writes_expected_artifacts(tmp_path):
     config = RunConfig(
-        crystal_systems=["cubic"],
-        limit_per_system=8,
+        fetch=FetchConfig(crystal_systems=["cubic"], limit_per_system=8),
         soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
         vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
         train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
@@ -144,8 +154,7 @@ def test_run_single_autoencoder_writes_expected_artifacts(tmp_path):
 
 def test_run_single_autoencoder_and_vae_dont_collide_in_same_sweep_dir(tmp_path):
     base_kwargs = dict(
-        crystal_systems=["cubic"],
-        limit_per_system=8,
+        fetch=FetchConfig(crystal_systems=["cubic"], limit_per_system=8),
         soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
         vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
         train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
@@ -165,6 +174,55 @@ def test_run_single_autoencoder_and_vae_dont_collide_in_same_sweep_dir(tmp_path)
     assert "model-" not in vae_run_dir.name  # default "vae" stays untagged
 
 
+def test_run_single_pyxtal_data_source_writes_expected_artifacts(tmp_path):
+    pytest.importorskip("pyxtal")
+
+    config = RunConfig(
+        soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
+        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
+        train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
+        seed=0,
+        output_dir=str(tmp_path / "runs"),
+        data_source="pyxtal",
+        pyxtal=PyxtalConfig(spacegroups=[225], structures_per_spacegroup=8),
+    )
+
+    n_samples, n_features = 8, 5
+    fake_atoms = []
+    for i in range(n_samples):
+        atoms = Atoms("Cu", positions=[[0.0, 0.0, 0.0]])
+        atoms.info["material_id"] = f"pyxtal-225-{i}"
+        atoms.info["spacegroup"] = 225
+        atoms.info["family"] = "Cubic"
+        fake_atoms.append(atoms)
+    rng = np.random.default_rng(0)
+    fake_soap = rng.normal(size=(n_samples, n_features)).astype(np.float32)
+
+    with (
+        patch("dim_red.generate.generate_structures", return_value=fake_atoms),
+        patch("dim_red.pipeline.dataset_cache.compute_soap", return_value=fake_soap),
+    ):
+        run_dir = run_single(config)
+
+    assert "pyxtal-225" in run_dir.name
+    assert (run_dir / "embeddings.npz").exists()
+    assert (run_dir / "dataset.extxyz").exists()
+
+    with open(run_dir / "config.yaml") as f:
+        saved = yaml.safe_load(f)
+    assert saved["data_source"] == "pyxtal"
+    assert saved["pyxtal"]["spacegroups"] == [225]
+
+    embeddings = np.load(run_dir / "embeddings.npz")
+    assert embeddings["embeddings"].shape == (n_samples, 2)
+    assert set(embeddings["labels"].tolist()) == {"Cubic"}
+
+    dataset_atoms = read_atoms(run_dir / "dataset.extxyz", index=":")
+    assert len(dataset_atoms) == n_samples
+    assert {a.info["family"] for a in dataset_atoms} == {"Cubic"}
+    assert set(embeddings["spacegroups"].tolist()) == {225}
+
+
 def test_run_single_reuses_dataset_cache_across_runs(tmp_path):
     config_a = _make_config(tmp_path, name="run-a")
     config_b = _make_config(tmp_path, name="run-b")
@@ -181,8 +239,7 @@ def test_run_single_reuses_dataset_cache_across_runs(tmp_path):
 
 def test_run_single_family_and_spacegroup_aux_heads(tmp_path):
     config = RunConfig(
-        crystal_systems=["cubic", "hexagonal"],
-        limit_per_system=10,
+        fetch=FetchConfig(crystal_systems=["cubic", "hexagonal"], limit_per_system=10),
         soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
         vae=VAEArchConfig(encoder_hidden_dim=[8], latent_dim=2),
         train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.2),
@@ -257,8 +314,7 @@ def test_run_single_family_and_spacegroup_aux_heads(tmp_path):
 
 def test_run_single_autoencoder_family_only_aux_heads(tmp_path):
     config = RunConfig(
-        crystal_systems=["cubic", "hexagonal"],
-        limit_per_system=8,
+        fetch=FetchConfig(crystal_systems=["cubic", "hexagonal"], limit_per_system=8),
         soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
         vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
         train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
@@ -305,8 +361,7 @@ def test_run_single_autoencoder_family_only_aux_heads(tmp_path):
 
 def test_run_single_family_only_aux_heads_no_spacegroup_artifacts(tmp_path):
     config = RunConfig(
-        crystal_systems=["cubic", "hexagonal"],
-        limit_per_system=8,
+        fetch=FetchConfig(crystal_systems=["cubic", "hexagonal"], limit_per_system=8),
         soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
         vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
         train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),

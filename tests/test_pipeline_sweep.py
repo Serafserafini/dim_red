@@ -26,7 +26,7 @@ def _make_sweep_config(tmp_path) -> SweepConfig:
     base = {
         "seed": 0,
         "output_dir": str(tmp_path / "runs"),
-        "data": {"crystal_systems": ["cubic"], "limit_per_system": 8},
+        "fetch": {"crystal_systems": ["cubic"], "limit_per_system": 8},
         "soap": {"r_cut": 3.0, "n_max": 2, "l_max": 2},
         "vae": {"encoder_hidden_dim": [4], "latent_dim": 2},
         "train": {"epochs": 1, "batch_size": 4, "val_ratio": 0.25},
@@ -101,7 +101,7 @@ def test_run_sweep_can_vary_a_training_hyperparam_not_in_any_named_axis(tmp_path
     base = {
         "seed": 0,
         "output_dir": str(tmp_path / "runs"),
-        "data": {"crystal_systems": ["cubic"], "limit_per_system": 8},
+        "fetch": {"crystal_systems": ["cubic"], "limit_per_system": 8},
         "soap": {"r_cut": 3.0, "n_max": 2, "l_max": 2},
         "vae": {"encoder_hidden_dim": [4], "latent_dim": 2},
         "train": {"epochs": 1, "batch_size": 4, "val_ratio": 0.25},
@@ -125,7 +125,7 @@ def test_run_sweep_can_vary_model_kind(tmp_path):
     base = {
         "seed": 0,
         "output_dir": str(tmp_path / "runs"),
-        "data": {"crystal_systems": ["cubic"], "limit_per_system": 8},
+        "fetch": {"crystal_systems": ["cubic"], "limit_per_system": 8},
         "soap": {"r_cut": 3.0, "n_max": 2, "l_max": 2},
         "vae": {"encoder_hidden_dim": [4], "latent_dim": 2},
         "train": {"epochs": 1, "batch_size": 4, "val_ratio": 0.25},

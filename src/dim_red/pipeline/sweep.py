@@ -73,11 +73,17 @@ def run_sweep(
 
     run_dirs = []
     for i, config in enumerate(run_configs, start=1):
+        data_scope = (
+            config.fetch.crystal_systems
+            if config.data_source == "fetch"
+            else config.pyxtal
+        )
         logger.info(
-            "[%d/%d] crystal_systems=%s hidden_dims=%s",
+            "[%d/%d] data_source=%s scope=%s hidden_dims=%s",
             i,
             len(run_configs),
-            config.crystal_systems,
+            config.data_source,
+            data_scope,
             config.vae.encoder_hidden_dim,
         )
         config = dataclasses.replace(config, output_dir=str(sweep_dir))

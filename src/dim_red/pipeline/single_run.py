@@ -2,19 +2,21 @@
 Executes one fetch -> SOAP -> model training pass from a RunConfig and
 persists every artifact needed for later analysis: the config used, the
 trained model, per-epoch loss curves (total/recon, plus KL for a VAE and
-family/spacegroup cross-entropy when auxiliary heads are active), the latent
-embeddings of every point in the dataset used for training (with soft-masked
-auxiliary head predictions when active), and a 2D scatter plot of those
-embeddings. ``config.model_kind`` selects between a VAE
-(``dim_red.vae``) and a deterministic Autoencoder (``dim_red.autoencoder``);
-both share the same architecture (``config.vae``) and aux-heads (
-``config.aux_heads``) schema, and expose the same training call shape.
+family/spacegroup cross-entropy when auxiliary heads are active), the exact
+structures used for training (``dataset.extxyz``), the latent embeddings of
+every point in the dataset used for training (with soft-masked auxiliary
+head predictions when active), and a 2D scatter plot of those embeddings.
+``config.model_kind`` selects between a VAE (``dim_red.vae``) and a
+deterministic Autoencoder (``dim_red.autoencoder``); both share the same
+architecture (``config.vae``) and aux-heads (``config.aux_heads``) schema,
+and expose the same training call shape.
 """
 
 from __future__ import annotations
 
 import csv
 import logging
+import shutil
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 from unicodedata import name
@@ -31,7 +33,7 @@ from dim_red.autoencoder.model import apply_family_mask as ae_apply_family_mask
 from dim_red.autoencoder.training import TrainConfig as AETrainConfig
 from dim_red.autoencoder.training import train_autoencoder
 from dim_red.pipeline.config import RunConfig, run_config_to_dict
-from dim_red.pipeline.dataset_cache import get_or_build_dataset
+from dim_red.pipeline.dataset_cache import build_dataset_for_run
 from dim_red.vae.database import VAEDatabase
 from dim_red.vae.model import VAE
 from dim_red.vae.model import apply_family_mask as vae_apply_family_mask
@@ -53,12 +55,30 @@ def _slugify(values) -> str:
     return "-".join(str(v) for v in values)
 
 
+def _data_source_slug(config: RunConfig) -> str:
+    """The dataset-defining segment of a run name: ``cs-<crystal systems>``
+    for ``data_source == "fetch"``, or ``pyxtal-<scope>_nsp<n_species>`` for
+    ``data_source == "pyxtal"``.
+    """
+    if config.data_source == "pyxtal":
+        pc = config.pyxtal
+        if pc.spacegroups:
+            scope = _slugify(sorted(pc.spacegroups))
+        elif pc.families:
+            scope = _slugify(sorted(f.lower()[:3] for f in pc.families))
+        else:
+            scope = "all"
+        return f"pyxtal-{scope}_nsp{pc.n_species}"
+    cs = _slugify(sorted(cs.lower() for cs in config.fetch.crystal_systems))
+    return f"cs-{cs}"
+
+
 def make_run_name(config: RunConfig) -> str:
     """Build a run directory name encoding the swept parameters, unless the
     config sets an explicit ``name``.
 
     The name carries only the hyperparameters that distinguish this run
-    (hidden dims, crystal systems, aux-head lambdas, and the model kind when
+    (hidden dims, the data source, aux-head lambdas, and the model kind when
     it isn't the default ``"vae"``) -- no timestamp -- so sibling runs of the
     same sweep are identifiable by what they swept, not by when they ran.
     Tagging non-default ``model_kind`` values means a sweep varying it (e.g.
@@ -68,8 +88,7 @@ def make_run_name(config: RunConfig) -> str:
     if config.name:
         return config.name
     hd = _slugify(config.vae.encoder_hidden_dim)
-    cs = _slugify(sorted(cs.lower() for cs in config.crystal_systems))
-    name = f"hd-{hd}_cs-{cs}"
+    name = f"hd-{hd}_{_data_source_slug(config)}"
     if config.model_kind != "vae":
         name = f"model-{config.model_kind}_{name}"
     aux = config.aux_heads
@@ -180,12 +199,14 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
 
     Returns:
         Path to the run directory containing ``config.yaml``,
-        ``model_params.msgpack``, ``loss_history.csv``, ``embeddings.npz``
-        (latent embeddings of every point in the training dataset, the raw
-        standardized SOAP ``features`` fed to the model, the true
-        ``spacegroups`` per point, plus ``family_probs``/``spacegroup_probs``
-        and their class vocabularies when auxiliary heads are active),
-        ``embeddings_plot.png`` and ``run.log``.
+        ``model_params.msgpack``, ``loss_history.csv``, ``dataset.extxyz``
+        (the exact structures used for training, same order as
+        ``embeddings.npz``'s arrays), ``embeddings.npz`` (latent embeddings
+        of every point in the training dataset, the raw standardized SOAP
+        ``features`` fed to the model, the true ``spacegroups`` per point,
+        plus ``family_probs``/``spacegroup_probs`` and their class
+        vocabularies when auxiliary heads are active), ``embeddings_plot.png``
+        and ``run.log``.
     """
     output_dir = Path(config.output_dir)
     run_dir = _make_unique_run_dir(output_dir, make_run_name(config))
@@ -203,14 +224,14 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
         resolved_cache_dir = (
             Path(cache_dir) if cache_dir else output_dir / "_dataset_cache"
         )
-        X, labels, material_ids, spacegroups = get_or_build_dataset(
-            crystal_systems=config.crystal_systems,
-            soap_kwargs=config.soap.as_kwargs(),
-            limit_per_system=config.limit_per_system,
-            cache_dir=resolved_cache_dir,
-            api_key=config.api_key,
+        X, labels, material_ids, spacegroups, structures_path = build_dataset_for_run(
+            config, cache_dir=resolved_cache_dir
         )
         logger.info("Dataset ready: X.shape=%s, %d samples", X.shape, len(labels))
+
+        dataset_path = run_dir / "dataset.extxyz"
+        shutil.copyfile(structures_path, dataset_path)
+        logger.info("Saved training dataset structures to %s", dataset_path)
 
         aux_mode = config.aux_heads.mode
         use_family = aux_mode != "none"
@@ -396,7 +417,7 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
                 labels,
                 title=(
                     f"HD={'->'.join(str(dim) for dim in config.vae.encoder_hidden_dim)}, "
-                    f"CS={'-'.join(cs[:3] for cs in config.crystal_systems)}"
+                    f"{_data_source_slug(config)}"
                 ),
                 save_path=str(plot_path),
                 xlabel="Latent Dimension 1",

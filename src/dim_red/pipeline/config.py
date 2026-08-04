@@ -19,6 +19,7 @@ logger = logging.getLogger("dim_red.pipeline")
 
 _AUX_HEADS_MODES = ("none", "family_only", "family_and_spacegroup")
 _MODEL_KINDS = ("vae", "autoencoder")
+_DATA_SOURCES = ("fetch", "pyxtal")
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,67 @@ class SoapConfig:
             "normalize_distances": self.normalize_distances,
             "species": self.species,
         }
+
+
+@dataclass(frozen=True)
+class FetchConfig:
+    """Config for ``RunConfig.data_source == "fetch"``: queries Materials
+    Project for real structures. Symmetric with ``PyxtalConfig``'s role as
+    the data-source-specific config block for ``data_source == "pyxtal"``.
+
+    Attributes:
+        crystal_systems: Crystal systems to fetch (as accepted by
+            ``dim_red.fetch.fetch_structures_by_crystal_system``). Required
+            (non-empty) when actually used as ``RunConfig.fetch``; YAML
+            configs must set it explicitly for ``data_source: fetch``, same
+            strictness as before this block existed.
+        limit_per_system: Max structures fetched per crystal system.
+        api_key: Materials Project API key (falls back to ``MP_API_KEY``).
+    """
+
+    crystal_systems: List[str] = field(default_factory=list)
+    limit_per_system: int = 15
+    api_key: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class PyxtalConfig:
+    """Config for ``RunConfig.data_source == "pyxtal"``: builds the dataset
+    with ``dim_red.generate`` (synthetic, symmetry-valid structures) instead
+    of fetching from Materials Project. Mirrors
+    ``dim_red.generate.GenerationConfig``'s fields one-to-one, kept as an
+    independent (pyxtal-free) dataclass here so ``dim_red.pipeline.config``
+    stays importable without ``pyxtal`` installed -- the actual
+    ``dim_red.generate`` import happens lazily in
+    ``dim_red.pipeline.dataset_cache``, only when a run actually uses this
+    data source.
+
+    Exactly one of ``structures_per_spacegroup``/``structures_per_family``
+    must be set, same rule as ``GenerationConfig``; this isn't validated here
+    (kept dependency-free) but will raise when the run actually builds its
+    dataset.
+
+    Attributes:
+        seed: Seed for reproducible generation (species selection, the
+            "random" distribution mode, and pyxtal's own RNG). If ``None``
+            (default), falls back to ``RunConfig.seed``. Set this explicitly
+            to pin the generated dataset independently of ``RunConfig.seed``
+            -- e.g. when sweeping other hyperparameters (including
+            ``RunConfig.seed`` itself, for repeated-seed training runs) while
+            keeping every run on the exact same dataset.
+    """
+
+    families: Optional[List[str]] = None
+    spacegroups: Optional[List[int]] = None
+    structures_per_spacegroup: Optional[int] = None
+    structures_per_family: Optional[int] = None
+    distribution: str = "uniform"
+    n_species: int = 1
+    species_pool: Optional[List[str]] = None
+    candidate_num_ions: Optional[List[int]] = None
+    factor: float = 1.1
+    max_count: int = 5
+    seed: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -115,7 +177,7 @@ class AuxHeadsConfig:
 
 @dataclass(frozen=True)
 class RunConfig:
-    """Fully resolved configuration for a single fetch -> SOAP -> model run.
+    """Fully resolved configuration for a single dataset -> SOAP -> model run.
 
     Attributes:
         model_kind: Which model to train: ``"vae"`` (default, a
@@ -125,25 +187,42 @@ class RunConfig:
             hidden dims, latent dim, mirror) and their aux-head settings from
             ``aux_heads`` -- identical schema either way, see
             ``dim_red.pipeline.single_run.run_single``.
+        data_source: How the dataset (before SOAP) is built: ``"fetch"``
+            (default -- the ``fetch`` config block queries Materials
+            Project) or ``"pyxtal"`` (the ``pyxtal`` config block builds a
+            synthetic dataset with ``dim_red.generate`` instead). Exactly
+            one of ``fetch``/``pyxtal`` is required, matching
+            ``data_source`` -- symmetric config blocks for the two data
+            sources. See ``dim_red.pipeline.dataset_cache``.
+        fetch: Required when ``data_source == "fetch"``, otherwise unused.
+        pyxtal: Required when ``data_source == "pyxtal"``, otherwise unused.
     """
 
-    crystal_systems: List[str]
-    limit_per_system: int
     soap: SoapConfig
     vae: VAEArchConfig
     train: TrainSettings
     aux_heads: AuxHeadsConfig = field(default_factory=AuxHeadsConfig)
     seed: int = 42
     output_dir: str = "runs"
-    api_key: Optional[str] = None
     name: Optional[str] = None
     model_kind: str = "vae"
+    data_source: str = "fetch"
+    fetch: Optional[FetchConfig] = None
+    pyxtal: Optional[PyxtalConfig] = None
 
     def __post_init__(self):
         if self.model_kind not in _MODEL_KINDS:
             raise ValueError(
                 f"model_kind must be one of {_MODEL_KINDS}, got {self.model_kind!r}"
             )
+        if self.data_source not in _DATA_SOURCES:
+            raise ValueError(
+                f"data_source must be one of {_DATA_SOURCES}, got {self.data_source!r}"
+            )
+        if self.data_source == "fetch" and self.fetch is None:
+            raise ValueError("data_source='fetch' requires a 'fetch' config block.")
+        if self.data_source == "pyxtal" and self.pyxtal is None:
+            raise ValueError("data_source='pyxtal' requires a 'pyxtal' config block.")
 
 
 @dataclass(frozen=True)
@@ -155,7 +234,7 @@ class SweepConfig:
     Any ``RunConfig`` field can be swept this way -- not just a fixed set of
     named axes -- since each grid key is just a path into that same nested
     dict, e.g. ``"vae.encoder_hidden_dim"``, ``"train.learning_rate"``,
-    ``"aux_heads.lambda_family"``, ``"data.crystal_systems"``, or a
+    ``"aux_heads.lambda_family"``, ``"fetch.crystal_systems"``, or a
     top-level field like ``"seed"``.
     """
 
@@ -168,7 +247,7 @@ class SweepConfig:
 
     @property
     def api_key(self) -> Optional[str]:
-        return self.base.get("api_key")
+        return self.base.get("fetch", {}).get("api_key")
 
 
 def _dataclass_from_dict(cls, d: Dict[str, Any]):
@@ -190,23 +269,46 @@ def load_yaml(path: Union[str, Path]) -> Dict[str, Any]:
 
 
 def run_config_from_dict(d: Dict[str, Any]) -> RunConfig:
-    data = d.get("data", {})
+    data_source = str(d.get("data_source", "fetch"))
     soap = _dataclass_from_dict(SoapConfig, d.get("soap", {}))
     vae = _dataclass_from_dict(VAEArchConfig, d.get("vae", {}))
     train = _dataclass_from_dict(TrainSettings, d.get("train", {}))
     aux_heads = _dataclass_from_dict(AuxHeadsConfig, d.get("aux_heads", {}))
+    pyxtal_config = (
+        _dataclass_from_dict(PyxtalConfig, d["pyxtal"]) if "pyxtal" in d else None
+    )
+
+    fetch_config: Optional[FetchConfig] = None
+    if "fetch" in d:
+        fetch_dict = d["fetch"]
+        # "crystal_systems" is only required when it's actually used
+        # (data_source == "fetch"); a "fetch" block left over in a sweep's
+        # base config for a pyxtal-mode run doesn't need it set.
+        crystal_systems = (
+            list(fetch_dict["crystal_systems"])
+            if data_source == "fetch"
+            else list(fetch_dict.get("crystal_systems", []))
+        )
+        fetch_config = FetchConfig(
+            crystal_systems=crystal_systems,
+            limit_per_system=int(fetch_dict.get("limit_per_system", 15)),
+            api_key=fetch_dict.get("api_key"),
+        )
+    elif data_source == "fetch":
+        raise KeyError("crystal_systems")
+
     return RunConfig(
-        crystal_systems=list(data["crystal_systems"]),
-        limit_per_system=int(data.get("limit_per_system", 15)),
         soap=soap,
         vae=vae,
         train=train,
         aux_heads=aux_heads,
         seed=int(d.get("seed", 42)),
         output_dir=str(d.get("output_dir", "runs")),
-        api_key=d.get("api_key"),
         name=d.get("name"),
         model_kind=str(d.get("model", "vae")),
+        data_source=data_source,
+        fetch=fetch_config,
+        pyxtal=pyxtal_config,
     )
 
 
@@ -218,21 +320,22 @@ def run_config_to_dict(config: RunConfig) -> Dict[str, Any]:
     """Serialize a RunConfig back into the same nested shape ``load_run_config``
     expects, so a saved ``config.yaml`` can be fed straight back in for a rerun.
     """
-    return {
+    result = {
         "seed": config.seed,
         "output_dir": config.output_dir,
-        "api_key": config.api_key,
         "name": config.name,
         "model": config.model_kind,
-        "data": {
-            "crystal_systems": config.crystal_systems,
-            "limit_per_system": config.limit_per_system,
-        },
+        "data_source": config.data_source,
         "soap": dataclasses.asdict(config.soap),
         "vae": dataclasses.asdict(config.vae),
         "train": dataclasses.asdict(config.train),
         "aux_heads": dataclasses.asdict(config.aux_heads),
     }
+    if config.fetch is not None:
+        result["fetch"] = dataclasses.asdict(config.fetch)
+    if config.pyxtal is not None:
+        result["pyxtal"] = dataclasses.asdict(config.pyxtal)
+    return result
 
 
 def load_sweep_config(path: Union[str, Path]) -> SweepConfig:

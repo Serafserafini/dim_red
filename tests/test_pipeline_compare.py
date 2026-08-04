@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 from dim_red.pipeline.compare import (
+    _abbreviate_hyperparam_key,
     available_loss_metrics,
     compute_embedding_baselines,
     discover_runs,
@@ -24,11 +25,13 @@ from dim_red.pipeline.compare import (
     plot_final_metric_vs_hyperparam,
     plot_latent_space_grid,
     plot_loss_curves,
+    plot_spacegroup_family_histogram,
     run_labels,
     varying_hyperparams,
 )
 from dim_red.pipeline.config import (
     AuxHeadsConfig,
+    FetchConfig,
     RunConfig,
     SoapConfig,
     TrainSettings,
@@ -89,8 +92,7 @@ def _write_run(
         else AuxHeadsConfig()
     )
     config = RunConfig(
-        crystal_systems=crystal_systems,
-        limit_per_system=8,
+        fetch=FetchConfig(crystal_systems=crystal_systems, limit_per_system=8),
         soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
         vae=VAEArchConfig(encoder_hidden_dim=hidden_dim, latent_dim=2),
         train=TrainSettings(
@@ -172,7 +174,7 @@ def test_crystal_systems_hyperparam_is_abbreviated(tmp_path):
         d / "run-a", [4], ["cubic", "hexagonal", "monoclinic", "orthorhombic"], 1.0
     )
     runs = load_runs(d)
-    groups = final_metric_groups(runs, "data.crystal_systems")
+    groups = final_metric_groups(runs, "fetch.crystal_systems")
     # Long crystal-system names truncated to 3 letters each, not the full
     # names, so axis labels/titles built from this value stay plot-safe.
     (key,) = groups.keys()
@@ -189,8 +191,25 @@ def test_run_labels_abbreviates_crystal_systems_and_stays_short(tmp_path):
     assert set(labels) == {run_dir_a, run_dir_b}
     assert "monoclinic" not in labels[run_dir_a]  # full names not used
     assert "mon" in labels[run_dir_a]  # abbreviation is
+    # Hyperparameter *names* are also abbreviated (hd, cs), same short forms
+    # as run-directory names, not the full config field names.
+    assert "encoder_hidden_dim" not in labels[run_dir_a]
+    assert "crystal_systems" not in labels[run_dir_a]
+    assert "hd=128-64-32" in labels[run_dir_a]
+    assert "cs=" in labels[run_dir_a]
     for label in labels.values():
         assert len(label) < 80
+
+
+def test_abbreviate_hyperparam_key_uses_short_forms():
+    assert _abbreviate_hyperparam_key("vae.encoder_hidden_dim") == "hd"
+    assert _abbreviate_hyperparam_key("fetch.crystal_systems") == "cs"
+    assert _abbreviate_hyperparam_key("aux_heads.lambda_family") == "lf"
+    assert _abbreviate_hyperparam_key("train.learning_rate") == "lr"
+
+
+def test_abbreviate_hyperparam_key_falls_back_to_full_name_when_unknown():
+    assert _abbreviate_hyperparam_key("some.unmapped_field") == "unmapped_field"
 
 
 def test_run_labels_falls_back_to_directory_name_when_nothing_varies(tmp_path):
@@ -206,6 +225,19 @@ def test_plot_loss_curves_writes_file(sweep_dir, tmp_path):
     out = tmp_path / "loss_curves.png"
     plot_loss_curves(runs, save_path=out)
     assert out.exists()
+
+
+def test_plot_loss_curves_writes_csv(sweep_dir, tmp_path):
+    runs = load_runs(sweep_dir)
+    out = tmp_path / "loss_curves.csv"
+    plot_loss_curves(runs, csv_path=out)
+    assert out.exists()
+    with open(out, newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert set(rows[0]) == {"run", "epoch", "metric", "value"}
+    # 2 runs x 3 epochs x 2 default metrics (train_loss, val_loss).
+    assert len(rows) == 2 * 3 * 2
+    assert {row["metric"] for row in rows} == {"train_loss", "val_loss"}
 
 
 def test_final_metric_groups_groups_multiple_runs_per_value(tmp_path):
@@ -226,7 +258,7 @@ def test_final_metric_groups_groups_multiple_runs_per_value(tmp_path):
         )
 
     runs = load_runs(d)
-    groups = final_metric_groups(runs, "data.crystal_systems")
+    groups = final_metric_groups(runs, "fetch.crystal_systems")
 
     assert set(groups) == {"cub", "hex"}
     assert len(groups["cub"]) == 3
@@ -246,10 +278,44 @@ def test_plot_final_metric_vs_hyperparam_writes_file(sweep_dir, tmp_path):
     assert out.exists()
 
 
+def test_plot_final_metric_vs_hyperparam_writes_csv(sweep_dir, tmp_path):
+    runs = load_runs(sweep_dir)
+    out = tmp_path / "final_vs_hd.csv"
+    plot_final_metric_vs_hyperparam(
+        runs, "vae.encoder_hidden_dim", metric="val_loss", csv_path=out
+    )
+    assert out.exists()
+    with open(out, newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert set(rows[0]) == {"run", "vae.encoder_hidden_dim", "val_loss"}
+    assert len(rows) == len(runs)
+
+
 def test_plot_final_metric_vs_hyperparam_rejects_unknown_key(sweep_dir):
     runs = load_runs(sweep_dir)
     with pytest.raises(ValueError, match="Unknown hyperparam"):
         plot_final_metric_vs_hyperparam(runs, "not_a_real_key")
+
+
+def test_plot_spacegroup_family_histogram_writes_file(sweep_dir, tmp_path):
+    runs = load_runs(sweep_dir)
+    out = tmp_path / "spacegroup_histogram.png"
+    plot_spacegroup_family_histogram(runs, save_path=out)
+    assert out.exists()
+
+
+def test_plot_spacegroup_family_histogram_writes_csv(sweep_dir, tmp_path):
+    runs = load_runs(sweep_dir)
+    out = tmp_path / "spacegroup_histogram.csv"
+    plot_spacegroup_family_histogram(runs, csv_path=out)
+    assert out.exists()
+    with open(out, newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert set(rows[0]) == {"spacegroup", "family"}
+    # Computed once, from the first run's dataset only (6 points, fixture's
+    # default n), not once per run.
+    assert len(rows) == 6
+    assert {row["family"] for row in rows} == {"Cubic"}
 
 
 def test_plot_latent_space_grid_writes_file(sweep_dir, tmp_path):
@@ -259,6 +325,27 @@ def test_plot_latent_space_grid_writes_file(sweep_dir, tmp_path):
     assert out.exists()
 
 
+def test_plot_latent_space_grid_writes_csv(sweep_dir, tmp_path):
+    runs = load_runs(sweep_dir)
+    out = tmp_path / "latent_grid.csv"
+    plot_latent_space_grid(runs, csv_path=out)
+    assert out.exists()
+    with open(out, newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert set(rows[0]) == {
+        "source",
+        "row",
+        "col",
+        "is_baseline",
+        "dim_0",
+        "dim_1",
+        "label",
+    }
+    # 2 runs x 6 points each; no baseline (fixture doesn't save "features").
+    assert len(rows) == 2 * 6
+    assert all(row["is_baseline"] == "False" for row in rows)
+
+
 def test_latent_grid_axes_returns_none_with_fewer_than_two_varying(sweep_dir):
     runs = load_runs(sweep_dir)  # only vae.encoder_hidden_dim varies
     assert latent_grid_axes(runs) is None
@@ -266,12 +353,12 @@ def test_latent_grid_axes_returns_none_with_fewer_than_two_varying(sweep_dir):
 
 def test_latent_grid_axes_picks_two_largest_cardinality_axes(tmp_path):
     d = tmp_path / "20260729-1"
-    # vae.encoder_hidden_dim: 3 distinct values; data.crystal_systems: 2.
+    # vae.encoder_hidden_dim: 3 distinct values; fetch.crystal_systems: 2.
     for hd in ([4], [8], [16]):
         for cs in (["cubic"], ["hexagonal"]):
             _write_run(d / f"hd-{hd[0]}_cs-{cs[0]}", hd, cs, 1.0)
     runs = load_runs(d)
-    assert latent_grid_axes(runs) == ("vae.encoder_hidden_dim", "data.crystal_systems")
+    assert latent_grid_axes(runs) == ("vae.encoder_hidden_dim", "fetch.crystal_systems")
 
 
 def test_plot_latent_space_grid_lays_out_two_axes_as_rows_and_cols(tmp_path):
@@ -341,6 +428,25 @@ def test_plot_latent_space_grid_includes_baseline_row_when_features_present(tmp_
     assert out.exists()
 
 
+def test_plot_latent_space_grid_csv_includes_baseline_rows_when_features_present(
+    tmp_path,
+):
+    d = tmp_path / "20260729-1"
+    _write_run(d / "hd-4_cs-cubic", [4], ["cubic"], 1.0, n=10, n_features=6)
+    _write_run(d / "hd-8_cs-cubic", [8], ["cubic"], 0.5, n=10, n_features=6)
+    runs = load_runs(d)
+    out = tmp_path / "latent_grid.csv"
+
+    plot_latent_space_grid(runs, csv_path=out)
+    assert out.exists()
+    with open(out, newline="") as f:
+        rows = list(csv.DictReader(f))
+    baseline_sources = {row["source"] for row in rows if row["is_baseline"] == "True"}
+    assert "PCA baseline" in baseline_sources
+    non_baseline_rows = [row for row in rows if row["is_baseline"] == "False"]
+    assert len(non_baseline_rows) == 2 * 10
+
+
 def test_plot_aux_accuracy_skipped_without_aux_heads(sweep_dir, tmp_path):
     runs = load_runs(sweep_dir)
     out = tmp_path / "aux_acc.png"
@@ -357,12 +463,33 @@ def test_plot_aux_accuracy_written_when_aux_heads_present(tmp_path):
     assert out.exists()
 
 
+def test_plot_aux_accuracy_csv_skipped_without_aux_heads(sweep_dir, tmp_path):
+    runs = load_runs(sweep_dir)
+    out = tmp_path / "aux_acc.csv"
+    plot_aux_accuracy_comparison(runs, csv_path=out)
+    assert not out.exists()
+
+
+def test_plot_aux_accuracy_csv_written_when_aux_heads_present(tmp_path):
+    d = tmp_path / "20260729-2"
+    _write_run(d / "hd-4_cs-cubic", [4], ["cubic"], val_loss_final=1.0, with_aux=True)
+    runs = load_runs(d)
+    out = tmp_path / "aux_acc.csv"
+    plot_aux_accuracy_comparison(runs, csv_path=out)
+    assert out.exists()
+    with open(out, newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert set(rows[0]) == {"run", "metric", "accuracy"}
+    assert rows[0]["metric"] == "family"
+
+
 def test_generate_comparison_report_writes_expected_files(sweep_dir):
-    report_dir = generate_comparison_report(sweep_dir)
+    report_dir = generate_comparison_report(sweep_dir, write_data_files=True)
     assert report_dir == sweep_dir / "comparison"
     assert (report_dir / "loss_curves.png").exists()
+    assert (report_dir / "loss_curves.csv").exists()
     # Every available loss metric (not just val_loss) gets its own
-    # final-metric-vs-hyperparameter plot.
+    # final-metric-vs-hyperparameter plot, with a matching CSV of the data.
     for metric in [
         "train_loss",
         "val_loss",
@@ -372,9 +499,25 @@ def test_generate_comparison_report_writes_expected_files(sweep_dir):
         "val_kl",
     ]:
         assert (report_dir / f"final_{metric}_vs_vae_encoder_hidden_dim.png").exists()
+        assert (report_dir / f"final_{metric}_vs_vae_encoder_hidden_dim.csv").exists()
+    assert (report_dir / "spacegroup_histogram.png").exists()
+    assert (report_dir / "spacegroup_histogram.csv").exists()
     assert (report_dir / "latent_space_grid.png").exists()
-    # No aux heads in this fixture -> no accuracy comparison written.
+    assert (report_dir / "latent_space_grid.csv").exists()
+    # No aux heads in this fixture -> no accuracy comparison written (PNG or CSV).
     assert not (report_dir / "aux_heads_accuracy.png").exists()
+    assert not (report_dir / "aux_heads_accuracy.csv").exists()
+
+
+def test_generate_comparison_report_skips_csvs_by_default(sweep_dir):
+    report_dir = generate_comparison_report(sweep_dir)
+    assert report_dir == sweep_dir / "comparison"
+    # PNGs are always written...
+    assert (report_dir / "loss_curves.png").exists()
+    assert (report_dir / "spacegroup_histogram.png").exists()
+    assert (report_dir / "latent_space_grid.png").exists()
+    # ...but no CSV data files unless write_data_files=True is passed.
+    assert not any(report_dir.glob("*.csv"))
 
 
 def test_generate_comparison_report_includes_aux_ce_metrics_when_active(tmp_path):

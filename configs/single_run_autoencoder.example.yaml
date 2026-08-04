@@ -7,13 +7,13 @@
 
 seed: 42
 output_dir: runs
-api_key: null # falls back to the MP_API_KEY environment variable
 
 model: autoencoder # "vae" (default) or "autoencoder"
 
-data:
+fetch:
   crystal_systems: [cubic, hexagonal]
   limit_per_system: 15
+  api_key: null # falls back to the MP_API_KEY environment variable
 
 soap:
   r_cut: 5.0
