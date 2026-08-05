@@ -113,6 +113,9 @@ _HYPERPARAM_KEY_ABBREV = {
     "structures_per_spacegroup": "sps",
     "distribution": "dist",
     "n_species": "nsp",
+    "patience": "pat",
+    "min_delta": "mdelta",
+    "restore_best_weights": "restore",
 }
 
 
@@ -443,8 +446,42 @@ def latent_grid_axes(runs: List[RunData]) -> Optional[tuple]:
     return ranked[0], ranked[1]
 
 
+@dataclass(frozen=True)
+class LatentUmapParams:
+    """UMAP hyperparameters for projecting non-2D latent embeddings down to
+    2D for ``plot_latent_space_grid`` (and, for consistency within one
+    report, the same params also drive ``compute_embedding_baselines``'s
+    UMAP baseline). Every field left ``None`` (the default) leaves that
+    hyperparameter at ``umap-learn``'s own default -- see
+    ``dim_red.umap.UMAP``.
+    """
+
+    n_neighbors: Optional[int] = None
+    min_dist: Optional[float] = None
+    metric: Optional[str] = None
+    random_state: Optional[int] = None
+
+
+def _make_umap(n_components: int, umap_params: Optional[LatentUmapParams]):
+    """Build a ``dim_red.umap.UMAP`` instance from ``umap_params`` (``None``
+    treated the same as an all-defaults ``LatentUmapParams()``). Imports
+    ``dim_red.umap`` lazily so callers that never need it (e.g. every run's
+    latent space already being 2D) don't require ``umap-learn`` installed.
+    """
+    from dim_red.umap import UMAP
+
+    params = umap_params or LatentUmapParams()
+    return UMAP(
+        n_components=n_components,
+        n_neighbors=params.n_neighbors,
+        min_dist=params.min_dist,
+        metric=params.metric,
+        random_state=params.random_state,
+    )
+
+
 def compute_embedding_baselines(
-    runs: List[RunData],
+    runs: List[RunData], umap_params: Optional[LatentUmapParams] = None
 ) -> Optional[Tuple[str, np.ndarray, Dict[str, np.ndarray]]]:
     """Fit classical baselines (PCA, and UMAP if ``umap-learn`` is installed),
     both to 2 components, on the first available run's saved standardized
@@ -452,6 +489,11 @@ def compute_embedding_baselines(
     to compare the learned latent space against. Every run sharing that
     dataset (same crystal systems/SOAP settings) would give an identical
     baseline, so only one is computed rather than one per run.
+
+    Args:
+        runs: Runs to search for a saved ``features`` array.
+        umap_params: Hyperparameters for the UMAP baseline (see
+            ``LatentUmapParams``); ``None`` uses ``umap-learn``'s defaults.
 
     Returns:
         ``(source_run_name, labels, {method_name: coords})``, or ``None``
@@ -470,11 +512,11 @@ def compute_embedding_baselines(
     point_labels = source.embeddings["labels"]
     baselines: Dict[str, np.ndarray] = {"PCA": PCA(n_components=2).fit_transform(X)}
     try:
-        from dim_red.umap import UMAP
+        umap = _make_umap(n_components=2, umap_params=umap_params)
     except ImportError:
         logger.warning("umap-learn not installed; skipping UMAP baseline")
     else:
-        baselines["UMAP"] = UMAP(n_components=2).fit_transform(X)
+        baselines["UMAP"] = umap.fit_transform(X)
     return source.run_dir.name, point_labels, baselines
 
 
@@ -511,10 +553,45 @@ def plot_spacegroup_family_histogram(
     )
 
 
+def _project_run_to_2d(
+    run: RunData, umap_params: Optional[LatentUmapParams]
+) -> Tuple[Optional[np.ndarray], bool]:
+    """This run's latent embeddings, as 2D coordinates ready to scatter-plot.
+
+    Already-2D embeddings pass through unchanged. Anything else (1D, 3D+)
+    is UMAP-projected down to 2D with ``umap_params`` -- so a run's own
+    latent space stays representative (unlike naively plotting only its
+    first two raw dimensions, which drops information and isn't a real
+    projection at all).
+
+    Returns:
+        ``(coords, was_projected)``. ``coords`` is ``None`` (with a warning)
+        if a projection was needed but ``umap-learn`` isn't installed --
+        that run must then be dropped from the grid entirely, since there's
+        no other way to make its non-2D embeddings plottable.
+    """
+    embeddings = run.embeddings["embeddings"]
+    if embeddings.shape[1] == 2:
+        return embeddings, False
+    try:
+        umap = _make_umap(n_components=2, umap_params=umap_params)
+    except ImportError:
+        logger.warning(
+            "Run %s has %d-dimensional latent embeddings and umap-learn is "
+            "not installed to project them down to 2D; skipping it from the "
+            "latent-space grid.",
+            run.run_dir.name,
+            embeddings.shape[1],
+        )
+        return None, False
+    return umap.fit_transform(embeddings), True
+
+
 def plot_latent_space_grid(
     runs: List[RunData],
     save_path: Optional[Union[str, Path]] = None,
     csv_path: Optional[Union[str, Path]] = None,
+    umap_params: Optional[LatentUmapParams] = None,
 ) -> None:
     """Grid of 2D latent-space scatter plots, colored by label. When at
     least 2 hyperparameters vary across ``runs``, the grid's rows/columns
@@ -523,10 +600,17 @@ def plot_latent_space_grid(
     rows, so the figure comes out wider than it is tall rather than the
     reverse. A run's position reflects its actual hyperparameter values
     instead of an arbitrary flat sequence; falls back to a flat grid when
-    fewer than 2 hyperparameters vary. Runs whose latent space isn't 2D are
-    skipped. If more than one run lands in the same (row, col) cell (a 3rd+
-    axis also varies), only the first (by run directory name) is shown there
-    and the rest are dropped, with a warning.
+    fewer than 2 hyperparameters vary. If more than one run lands in the
+    same (row, col) cell (a 3rd+ axis also varies), only the first (by run
+    directory name) is shown there and the rest are dropped, with a warning.
+
+    Runs whose latent space isn't 2D are UMAP-projected down to 2D for this
+    plot (with ``umap_params``, see ``LatentUmapParams`` -- ``None`` uses
+    ``umap-learn``'s own defaults) rather than skipped or truncated to their
+    first two raw dimensions; such subplots are annotated "(UMAP)" so it's
+    clear they show a projection, not the raw latent coordinates. A run is
+    only actually dropped if it needs projecting and ``umap-learn`` isn't
+    installed.
 
     An extra row is appended with PCA (and UMAP, if installed) fit to the
     same standardized features the model was trained on -- see
@@ -534,9 +618,21 @@ def plot_latent_space_grid(
     visually compared against classical dimensionality reduction. Skipped
     (with a warning) if no run has saved features (older runs).
     """
-    plottable = [r for r in runs if r.embeddings["embeddings"].shape[1] >= 2]
+    plottable = []
+    projected_coords: Dict[Path, np.ndarray] = {}
+    was_projected: Dict[Path, bool] = {}
+    for r in runs:
+        coords, projected = _project_run_to_2d(r, umap_params)
+        if coords is None:
+            continue
+        plottable.append(r)
+        projected_coords[r.run_dir] = coords
+        was_projected[r.run_dir] = projected
     if not plottable:
-        logger.warning("No runs with latent_dim >= 2; skipping latent-space grid")
+        logger.warning(
+            "No runs could be shown in 2D (missing umap-learn for non-2D "
+            "latent spaces); skipping latent-space grid"
+        )
         return
 
     run_label_map = run_labels(plottable)
@@ -586,7 +682,7 @@ def plot_latent_space_grid(
             )
         n_rows, n_cols = len(row_order), len(col_order)
 
-    baselines_info = compute_embedding_baselines(plottable)
+    baselines_info = compute_embedding_baselines(plottable, umap_params=umap_params)
     n_baselines = len(baselines_info[2]) if baselines_info else 0
     grid_cols = max(n_cols, n_baselines) if baselines_info else n_cols
     total_rows = n_rows + (1 if baselines_info else 0)
@@ -600,7 +696,8 @@ def plot_latent_space_grid(
     for (row, col), cell_runs in cells.items():
         ax = axes[row][col]
         run = cell_runs[0]
-        coords = run.embeddings["embeddings"]
+        coords = projected_coords[run.run_dir]
+        projected = was_projected[run.run_dir]
         point_labels = run.embeddings["labels"]
         if csv_path:
             run_name = run_label_map[run.run_dir]
@@ -610,6 +707,7 @@ def plot_latent_space_grid(
                     "row": row,
                     "col": col,
                     "is_baseline": False,
+                    "projected_umap": projected,
                     "dim_0": float(coords[i, 0]),
                     "dim_1": float(coords[i, 1]),
                     "label": str(point_labels[i]),
@@ -630,7 +728,25 @@ def plot_latent_space_grid(
         if row_titles is None:
             # Flat grid: row/col headers don't exist, so each subplot needs
             # its own label to identify which run it is.
-            ax.set_title(run_label_map[run.run_dir], fontsize=8)
+            title = run_label_map[run.run_dir]
+            if projected:
+                title += " (UMAP)"
+            ax.set_title(title, fontsize=8)
+        elif projected:
+            # Row/col grid: no per-subplot title slot, so a small corner
+            # annotation is the only way to flag a UMAP-projected (non-2D
+            # latent space) subplot instead of letting it look like raw
+            # latent coordinates.
+            ax.annotate(
+                "UMAP",
+                xy=(0.02, 0.98),
+                xycoords="axes fraction",
+                ha="left",
+                va="top",
+                fontsize=7,
+                style="italic",
+                alpha=0.6,
+            )
         ax.legend(fontsize=6)
         ax.grid(True, linestyle="--", alpha=0.4)
 
@@ -651,6 +767,7 @@ def plot_latent_space_grid(
                         "row": baseline_row,
                         "col": i,
                         "is_baseline": True,
+                        "projected_umap": method_name == "UMAP",
                         "dim_0": float(coords[j, 0]),
                         "dim_1": float(coords[j, 1]),
                         "label": str(base_labels[j]),
@@ -701,7 +818,16 @@ def plot_latent_space_grid(
     if csv_path:
         _write_csv(
             csv_path,
-            ["source", "row", "col", "is_baseline", "dim_0", "dim_1", "label"],
+            [
+                "source",
+                "row",
+                "col",
+                "is_baseline",
+                "projected_umap",
+                "dim_0",
+                "dim_1",
+                "label",
+            ],
             csv_rows,
         )
 
@@ -782,14 +908,17 @@ def generate_comparison_report(
     sweep_dir: Union[str, Path],
     output_dir: Optional[Union[str, Path]] = None,
     write_data_files: bool = False,
+    umap_params: Optional[LatentUmapParams] = None,
 ) -> Path:
     """Discover every run under ``sweep_dir`` and render the full comparison
-    suite (loss curves, final-metric-vs-hyperparameter plots for every loss
-    component -- total/recon/KL and, when active, the aux-head cross-entropy
-    terms -- against whatever hyperparameter varied, a spacegroup histogram
-    colored by family, a latent-space grid with a PCA/UMAP baseline
-    comparison, and an aux-heads accuracy comparison if applicable) into
-    ``output_dir`` (default: ``<sweep_dir>/comparison``).
+    suite (loss curves -- one subplot per loss-history column common to every
+    run, e.g. total/recon/KL and, when active, the aux-head cross-entropy or
+    SupCon terms, not just the total -- final-metric-vs-hyperparameter plots
+    for those same components against whatever hyperparameter varied, a
+    spacegroup histogram colored by family, a latent-space grid (any non-2D
+    run projected to 2D via UMAP, see ``plot_latent_space_grid``) with a
+    PCA/UMAP baseline comparison, and an aux-heads accuracy comparison if
+    applicable) into ``output_dir`` (default: ``<sweep_dir>/comparison``).
 
     Args:
         sweep_dir: Directory containing completed run subdirectories.
@@ -800,6 +929,10 @@ def generate_comparison_report(
             ``loss_curves.csv``), so the numbers behind a plot can be
             inspected or reprocessed without parsing the image. Off by
             default -- only the PNGs are written.
+        umap_params: Hyperparameters (``LatentUmapParams``) for the UMAP
+            projection used in the latent-space grid, both for non-2D runs
+            and the UMAP baseline. ``None`` (default) uses ``umap-learn``'s
+            own defaults.
 
     Returns:
         The directory the comparison PNGs (and CSVs) were written to.
@@ -816,6 +949,7 @@ def generate_comparison_report(
 
     plot_loss_curves(
         runs,
+        metrics=available_loss_metrics(runs),
         save_path=output_dir / "loss_curves.png",
         csv_path=_csv_path("loss_curves.csv"),
     )
@@ -844,6 +978,7 @@ def generate_comparison_report(
         runs,
         save_path=output_dir / "latent_space_grid.png",
         csv_path=_csv_path("latent_space_grid.csv"),
+        umap_params=umap_params,
     )
     plot_aux_accuracy_comparison(
         runs,

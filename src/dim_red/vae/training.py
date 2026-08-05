@@ -35,6 +35,21 @@ class TrainConfig:
             passed to ``train_vae``. Ignored otherwise.
         seed: Seed controlling batch shuffling and random latent sampling.
         device: JAX backend string (for example ``"cpu"`` or ``"gpu"``).
+        early_stopping: If True, stop training once ``val_loss`` (the full
+            weighted objective) hasn't improved by more than
+            ``early_stopping_min_delta`` for ``early_stopping_patience``
+            consecutive epochs. Disabled by default (current behavior
+            unchanged) -- the monitored metric is always ``val_loss``, not
+            configurable.
+        early_stopping_patience: Consecutive non-improving epochs tolerated
+            before stopping. Ignored unless ``early_stopping`` is True.
+        early_stopping_min_delta: Minimum decrease in ``val_loss`` counted
+            as an improvement. Ignored unless ``early_stopping`` is True.
+        early_stopping_restore_best: If True (default), the returned
+            ``model.params`` are the best-``val_loss`` epoch's rather than
+            necessarily the last epoch trained -- whether training stopped
+            early or ran the full ``epochs``. Ignored unless
+            ``early_stopping`` is True.
     """
 
     epochs: int = 20
@@ -45,6 +60,10 @@ class TrainConfig:
     lambda_spacegroup: float = 0.0
     seed: int = 42
     device: str = "cpu"
+    early_stopping: bool = False
+    early_stopping_patience: int = 10
+    early_stopping_min_delta: float = 0.0
+    early_stopping_restore_best: bool = True
 
 
 def vae_loss(
@@ -301,14 +320,15 @@ def train_vae(
             ``dim_red.vae.model.apply_family_mask``.
 
     Returns:
-        Dictionary with per-epoch losses. Always contains ``"train_loss"``,
-        ``"train_recon"``, ``"train_kl"``, ``"val_loss"``, ``"val_recon"``
-        and ``"val_kl"`` (the ``*_loss`` entries are the full weighted
-        objective actually optimized; ``*_recon``/``*_kl``/etc. are its
-        unweighted components). Also contains ``"train_family_ce"``/
-        ``"val_family_ce"`` when family ids are given, and
-        ``"train_spacegroup_ce"``/``"val_spacegroup_ce"`` when spacegroup
-        ids are given.
+        Dictionary with per-epoch losses, one entry per epoch actually run
+        (shorter than ``config.epochs`` if ``config.early_stopping`` stopped
+        training early). Always contains ``"train_loss"``, ``"train_recon"``,
+        ``"train_kl"``, ``"val_loss"``, ``"val_recon"`` and ``"val_kl"`` (the
+        ``*_loss`` entries are the full weighted objective actually
+        optimized; ``*_recon``/``*_kl``/etc. are its unweighted components).
+        Also contains ``"train_family_ce"``/``"val_family_ce"`` when family
+        ids are given, and ``"train_spacegroup_ce"``/``"val_spacegroup_ce"``
+        when spacegroup ids are given.
 
     Raises:
         ValueError: If config values are invalid, no matching JAX device is
@@ -327,6 +347,10 @@ def train_vae(
         raise ValueError("lambda_family must be >= 0")
     if config.lambda_spacegroup < 0:
         raise ValueError("lambda_spacegroup must be >= 0")
+    if config.early_stopping_patience <= 0:
+        raise ValueError("early_stopping_patience must be a positive integer")
+    if config.early_stopping_min_delta < 0:
+        raise ValueError("early_stopping_min_delta must be >= 0")
 
     has_family = train_family_ids is not None
     has_spacegroup = train_spacegroup_ids is not None
@@ -425,6 +449,10 @@ def train_vae(
     opt_state = tx.init(model.params)
     params = model.params
 
+    best_val_loss = float("inf")
+    best_params = None
+    epochs_without_improvement = 0
+
     for _ in range(config.epochs):
         train_losses, train_recons, train_kls = [], [], []
         train_family_ces, train_spacegroup_ces = [], []
@@ -491,5 +519,23 @@ def train_vae(
             history["train_spacegroup_ce"].append(float(np.mean(train_spacegroup_ces)))
             history["val_spacegroup_ce"].append(float(val_spacegroup_ce))
 
+        if config.early_stopping:
+            current_val_loss = history["val_loss"][-1]
+            if current_val_loss < best_val_loss - config.early_stopping_min_delta:
+                best_val_loss = current_val_loss
+                epochs_without_improvement = 0
+                if config.early_stopping_restore_best:
+                    best_params = params
+            else:
+                epochs_without_improvement += 1
+                if epochs_without_improvement >= config.early_stopping_patience:
+                    break
+
+    if (
+        config.early_stopping
+        and config.early_stopping_restore_best
+        and best_params is not None
+    ):
+        params = best_params
     model.params = params
     return history

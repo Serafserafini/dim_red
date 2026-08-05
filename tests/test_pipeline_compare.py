@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 from dim_red.pipeline.compare import (
+    LatentUmapParams,
     _abbreviate_hyperparam_key,
     available_loss_metrics,
     compute_embedding_baselines,
@@ -83,6 +84,7 @@ def _write_run(
     n=6,
     learning_rate=1e-3,
     n_features=None,
+    latent_dim=2,
 ):
     run_dir.mkdir(parents=True)
 
@@ -94,7 +96,7 @@ def _write_run(
     config = RunConfig(
         fetch=FetchConfig(crystal_systems=crystal_systems, limit_per_system=8),
         soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        vae=VAEArchConfig(encoder_hidden_dim=hidden_dim, latent_dim=2),
+        vae=VAEArchConfig(encoder_hidden_dim=hidden_dim, latent_dim=latent_dim),
         train=TrainSettings(
             epochs=3, batch_size=4, val_ratio=0.25, learning_rate=learning_rate
         ),
@@ -111,7 +113,7 @@ def _write_run(
     )
 
     rng = np.random.default_rng(0)
-    embeddings = rng.normal(size=(n, 2)).astype(np.float32)
+    embeddings = rng.normal(size=(n, latent_dim)).astype(np.float32)
     labels = np.array([crystal_systems[0].capitalize()] * n)
     payload = dict(
         embeddings=embeddings,
@@ -235,9 +237,42 @@ def test_plot_loss_curves_writes_csv(sweep_dir, tmp_path):
     with open(out, newline="") as f:
         rows = list(csv.DictReader(f))
     assert set(rows[0]) == {"run", "epoch", "metric", "value"}
-    # 2 runs x 3 epochs x 2 default metrics (train_loss, val_loss).
+    # 2 runs x 3 epochs x 2 default metrics (train_loss, val_loss) -- calling
+    # plot_loss_curves directly, with no explicit `metrics`, stays just the
+    # total: generate_comparison_report is the one that now asks for every
+    # available metric explicitly (see below).
     assert len(rows) == 2 * 3 * 2
     assert {row["metric"] for row in rows} == {"train_loss", "val_loss"}
+
+
+def test_generate_comparison_report_loss_curves_include_all_available_metrics(
+    sweep_dir,
+):
+    """The `compare` command's loss_curves.png/.csv must plot every loss
+    component common to all runs (recon/kl here), not just the total.
+    """
+    report_dir = generate_comparison_report(sweep_dir, write_data_files=True)
+    with open(report_dir / "loss_curves.csv", newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert {row["metric"] for row in rows} == {
+        "train_loss",
+        "val_loss",
+        "train_recon",
+        "val_recon",
+        "train_kl",
+        "val_kl",
+    }
+
+
+def test_generate_comparison_report_loss_curves_include_aux_ce_terms(tmp_path):
+    d = tmp_path / "20260729-3"
+    _write_run(d / "hd-4_cs-cubic", [4], ["cubic"], val_loss_final=1.0, with_aux=True)
+    _write_run(d / "hd-8_cs-cubic", [8], ["cubic"], val_loss_final=0.5, with_aux=True)
+
+    report_dir = generate_comparison_report(d, write_data_files=True)
+    with open(report_dir / "loss_curves.csv", newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert {"train_family_ce", "val_family_ce"} <= {row["metric"] for row in rows}
 
 
 def test_final_metric_groups_groups_multiple_runs_per_value(tmp_path):
@@ -337,6 +372,7 @@ def test_plot_latent_space_grid_writes_csv(sweep_dir, tmp_path):
         "row",
         "col",
         "is_baseline",
+        "projected_umap",
         "dim_0",
         "dim_1",
         "label",
@@ -344,6 +380,8 @@ def test_plot_latent_space_grid_writes_csv(sweep_dir, tmp_path):
     # 2 runs x 6 points each; no baseline (fixture doesn't save "features").
     assert len(rows) == 2 * 6
     assert all(row["is_baseline"] == "False" for row in rows)
+    # Fixture runs are already 2D -- no UMAP projection needed.
+    assert all(row["projected_umap"] == "False" for row in rows)
 
 
 def test_latent_grid_axes_returns_none_with_fewer_than_two_varying(sweep_dir):
@@ -445,6 +483,115 @@ def test_plot_latent_space_grid_csv_includes_baseline_rows_when_features_present
     assert "PCA baseline" in baseline_sources
     non_baseline_rows = [row for row in rows if row["is_baseline"] == "False"]
     assert len(non_baseline_rows) == 2 * 10
+
+
+def test_plot_latent_space_grid_projects_non_2d_embeddings_via_umap(tmp_path):
+    d = tmp_path / "20260729-1"
+    _write_run(d / "hd-4_cs-cubic", [4], ["cubic"], 1.0, n=30, latent_dim=5)
+    runs = load_runs(d)
+    out_png = tmp_path / "latent_grid.png"
+    out_csv = tmp_path / "latent_grid.csv"
+
+    plot_latent_space_grid(
+        runs,
+        save_path=out_png,
+        csv_path=out_csv,
+        umap_params=LatentUmapParams(n_neighbors=5),
+    )
+    assert out_png.exists()
+
+    with open(out_csv, newline="") as f:
+        rows = list(csv.DictReader(f))
+    non_baseline_rows = [row for row in rows if row["is_baseline"] == "False"]
+    assert len(non_baseline_rows) == 30
+    assert all(row["projected_umap"] == "True" for row in non_baseline_rows)
+    # Projected down to exactly 2D regardless of the original 5D embedding.
+    for row in non_baseline_rows:
+        float(row["dim_0"])
+        float(row["dim_1"])
+
+
+def test_plot_latent_space_grid_mixed_2d_and_non_2d_runs(tmp_path):
+    d = tmp_path / "20260729-1"
+    _write_run(d / "hd-4_cs-cubic", [4], ["cubic"], 1.0, n=15, latent_dim=2)
+    _write_run(d / "hd-8_cs-cubic", [8], ["cubic"], 0.5, n=15, latent_dim=4)
+    runs = load_runs(d)
+    out_csv = tmp_path / "latent_grid.csv"
+
+    plot_latent_space_grid(runs, csv_path=out_csv)
+
+    with open(out_csv, newline="") as f:
+        rows = list(csv.DictReader(f))
+    by_source = {}
+    for row in rows:
+        if row["is_baseline"] == "False":
+            by_source.setdefault(row["source"], set()).add(row["projected_umap"])
+    # Exactly one run needed projecting, the other stayed as-is.
+    assert sorted(v.pop() for v in by_source.values()) == ["False", "True"]
+
+
+def test_plot_latent_space_grid_skips_run_when_umap_unavailable(
+    tmp_path, monkeypatch, caplog
+):
+    d = tmp_path / "20260729-1"
+    _write_run(d / "hd-4_cs-cubic", [4], ["cubic"], 1.0, n=10, latent_dim=5)
+    runs = load_runs(d)
+
+    import dim_red.pipeline.compare as compare_module
+
+    def _raise_import_error(*args, **kwargs):
+        raise ImportError("umap-learn not installed")
+
+    monkeypatch.setattr(compare_module, "_make_umap", _raise_import_error)
+
+    out = tmp_path / "latent_grid.png"
+    with caplog.at_level("WARNING", logger="dim_red.pipeline"):
+        plot_latent_space_grid(runs, save_path=out)
+
+    assert not out.exists()
+    assert any("No runs could be shown in 2D" in rec.message for rec in caplog.records)
+
+
+def test_compute_embedding_baselines_forwards_umap_params(tmp_path, monkeypatch):
+    d = tmp_path / "20260729-1"
+    _write_run(d / "hd-4_cs-cubic", [4], ["cubic"], 1.0, n=10, n_features=6)
+    runs = load_runs(d)
+
+    captured = {}
+    import dim_red.umap as umap_module
+
+    original_init = umap_module.UMAP.__init__
+
+    def _spy_init(self, *args, **kwargs):
+        captured.update(kwargs)
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(umap_module.UMAP, "__init__", _spy_init)
+
+    params = LatentUmapParams(
+        n_neighbors=3, min_dist=0.4, metric="cosine", random_state=7
+    )
+    compute_embedding_baselines(runs, umap_params=params)
+
+    assert captured["n_neighbors"] == 3
+    assert captured["min_dist"] == 0.4
+    assert captured["metric"] == "cosine"
+    assert captured["random_state"] == 7
+
+
+def test_generate_comparison_report_forwards_umap_params(tmp_path):
+    d = tmp_path / "20260729-1"
+    _write_run(d / "hd-4_cs-cubic", [4], ["cubic"], 1.0, n=20, latent_dim=3)
+    _write_run(d / "hd-8_cs-cubic", [8], ["cubic"], 0.5, n=20, latent_dim=3)
+
+    report_dir = generate_comparison_report(
+        d, write_data_files=True, umap_params=LatentUmapParams(n_neighbors=5)
+    )
+    assert (report_dir / "latent_space_grid.png").exists()
+    with open(report_dir / "latent_space_grid.csv", newline="") as f:
+        rows = list(csv.DictReader(f))
+    non_baseline_rows = [row for row in rows if row["is_baseline"] == "False"]
+    assert all(row["projected_umap"] == "True" for row in non_baseline_rows)
 
 
 def test_plot_aux_accuracy_skipped_without_aux_heads(sweep_dir, tmp_path):

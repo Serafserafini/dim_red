@@ -1,0 +1,88 @@
+# Example config for a single pyxtal -> SOAP -> SupCon encoder run: no
+# decoder/KL, the encoder is trained directly with a Supervised Contrastive
+# loss on family and/or spacegroup labels (mode below) so structures with
+# similar labels end up nearby in latent space. See CLAUDE.md/dim_red.supcon.
+# Run with: python -m dim_red.pipeline.cli --config configs/single_run_supcon.example.yaml
+# or:       dimred-run configs/single_run_supcon.example.yaml
+
+seed: 42
+output_dir: runs
+model: supcon # "vae" (default), "autoencoder", or "supcon"
+data_source: pyxtal # "fetch" (Materials Project) or "pyxtal" -- pyxtal used
+# here since it always generates known family/spacegroup labels for every
+# structure, exactly what the SupCon loss needs.
+
+# "fetch" (crystal_systems/limit_per_system/api_key) is unused with
+# data_source: pyxtal -- omitted here.
+
+pyxtal:
+  families: [cubic, hexagonal, orthorhombic]
+  structures_per_family: 40
+  distribution: uniform
+  n_species: 2
+  seed: 42
+
+soap:
+  r_cut: 5.0
+  n_max: 4
+  l_max: 3
+  sigma: 0.5
+  element_agnostic: false
+  normalize_distances: false
+  species: null # auto-detected from the generated structures
+
+# Same encoder-architecture schema as vae/autoencoder (decoder_hidden_dim/
+# mirror below are simply ignored for model: supcon -- there's no decoder).
+vae:
+  encoder_hidden_dim: [128, 64]
+  decoder_hidden_dim: null
+  latent_dim: 2
+  mirror: true
+
+# "aux_heads" (the vae/autoencoder classifier-head config block) is unused
+# for model: supcon -- omitted here, see "supcon" below instead.
+supcon:
+  # Which label level(s) to contrast on: "family_only", "spacegroup_only",
+  # or "family_and_spacegroup" (both, weighted below).
+  mode: family_and_spacegroup
+  lambda_family: 1.0
+  lambda_spacegroup: 1.0
+  tau: 0.1
+  # Weight of an optional embedding-norm regularizer (mean squared L2 norm
+  # of z), added to the total loss. Unlike lambda_family/lambda_spacegroup,
+  # not gated by mode -- always in effect when non-zero. 0.0 (default,
+  # shown here) disables it. Worth raising above 0 if z's norm grows
+  # unbounded during training (watch train_norm_penalty/val_norm_penalty in
+  # loss_history.csv) -- supcon_loss's distance-based similarity has no
+  # built-in scale normalization to prevent that on its own.
+  lambda_norm: 0.0
+
+# How training batches are built (validation batches always stay random,
+# regardless of this setting). "random" (default, shown here -- a plain
+# shuffle) or "balanced" (a family/spacegroup-stratified sampler that
+# guarantees positives are available for the SupCon loss even on
+# less-balanced datasets -- see dim_red.supcon.sampling). Example balanced
+# block, commented out:
+# batching:
+#   strategy: balanced
+#   balanced_params:
+#     P: null   # null -> all families present in the training split
+#     K: 32     # examples per family per batch -> batch_size = P*K
+#     S: 8      # spacegroups per family per batch; null -> family-only
+batching:
+  strategy: random
+
+train:
+  epochs: 20
+  batch_size: 32
+  learning_rate: 0.001 # unused by the VeLO optimizer, kept for API compatibility
+  val_ratio: 0.2
+  device: cpu
+  # Optional early stopping (same mechanism for vae/autoencoder/supcon):
+  # stop once val_loss hasn't improved by more than min_delta for `patience`
+  # consecutive epochs. Disabled by default (enabled: false, shown here).
+  early_stopping:
+    enabled: false
+    patience: 10
+    min_delta: 0.0
+    restore_best_weights: true

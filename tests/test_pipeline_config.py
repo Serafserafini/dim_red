@@ -8,10 +8,14 @@ import yaml
 
 from dim_red.pipeline.config import (
     AuxHeadsConfig,
+    BalancedBatchingParams,
+    BatchingConfig,
+    EarlyStoppingConfig,
     FetchConfig,
     PyxtalConfig,
     RunConfig,
     SoapConfig,
+    SupConConfig,
     TrainSettings,
     VAEArchConfig,
     expand_sweep,
@@ -303,6 +307,307 @@ def test_run_config_to_dict_roundtrips_aux_heads(tmp_path):
 
     assert reloaded == config
     assert reloaded.aux_heads.mode == "family_and_spacegroup"
+
+
+def test_run_config_defaults_supcon_block(tmp_path):
+    config_path = _write_yaml(tmp_path / "run.yaml", _single_run_dict())
+    config = load_run_config(config_path)
+    assert config.supcon == SupConConfig(mode="family_and_spacegroup")
+
+
+def test_supcon_config_rejects_invalid_mode():
+    with pytest.raises(ValueError, match="supcon.mode must be one of"):
+        SupConConfig(mode="bogus")
+
+
+@pytest.mark.parametrize(
+    "mode", ["family_only", "spacegroup_only", "family_and_spacegroup"]
+)
+def test_supcon_config_accepts_all_valid_modes(mode):
+    assert SupConConfig(mode=mode).mode == mode
+
+
+def test_run_config_parses_model_kind_supcon(tmp_path):
+    d = _single_run_dict()
+    d["model"] = "supcon"
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+    assert config.model_kind == "supcon"
+
+
+def test_run_config_parses_supcon_block(tmp_path):
+    d = _single_run_dict()
+    d["model"] = "supcon"
+    d["supcon"] = {"mode": "spacegroup_only", "lambda_spacegroup": 2.0, "tau": 0.05}
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+
+    assert config.supcon.mode == "spacegroup_only"
+    assert config.supcon.lambda_spacegroup == 2.0
+    assert config.supcon.tau == 0.05
+    # Untouched field keeps its default.
+    assert config.supcon.lambda_family == 1.0
+
+
+def test_supcon_config_lambda_norm_defaults_to_zero(tmp_path):
+    config_path = _write_yaml(tmp_path / "run.yaml", _single_run_dict())
+    config = load_run_config(config_path)
+    assert config.supcon.lambda_norm == 0.0
+
+
+def test_run_config_parses_supcon_lambda_norm(tmp_path):
+    d = _single_run_dict()
+    d["model"] = "supcon"
+    d["supcon"] = {"lambda_norm": 0.25}
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+    assert config.supcon.lambda_norm == 0.25
+
+
+def test_run_config_to_dict_roundtrips_supcon_lambda_norm(tmp_path):
+    d = _single_run_dict()
+    d["model"] = "supcon"
+    d["supcon"] = {"lambda_norm": 0.4}
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+
+    saved_path = _write_yaml(tmp_path / "saved.yaml", run_config_to_dict(config))
+    reloaded = load_run_config(saved_path)
+
+    assert reloaded == config
+    assert reloaded.supcon.lambda_norm == 0.4
+
+
+def test_expand_sweep_can_vary_supcon_lambda_norm(tmp_path):
+    base = _single_run_dict()
+    base["model"] = "supcon"
+    sweep_dict = {
+        "base": base,
+        "grid": {"supcon.lambda_norm": [0.0, 0.1, 0.5]},
+    }
+    sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
+    runs = expand_sweep(sweep)
+    assert {r.supcon.lambda_norm for r in runs} == {0.0, 0.1, 0.5}
+
+
+def test_run_config_to_dict_roundtrips_supcon_block(tmp_path):
+    d = _single_run_dict()
+    d["model"] = "supcon"
+    d["supcon"] = {"mode": "family_only", "lambda_family": 0.7, "tau": 0.2}
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+
+    saved_path = _write_yaml(tmp_path / "saved.yaml", run_config_to_dict(config))
+    reloaded = load_run_config(saved_path)
+
+    assert reloaded == config
+    assert reloaded.model_kind == "supcon"
+    assert reloaded.supcon.mode == "family_only"
+    assert reloaded.supcon.tau == 0.2
+
+
+def test_expand_sweep_can_vary_supcon_mode(tmp_path):
+    base = _single_run_dict()
+    base["model"] = "supcon"
+    sweep_dict = {
+        "base": base,
+        "grid": {
+            "supcon.mode": ["family_only", "spacegroup_only", "family_and_spacegroup"]
+        },
+    }
+    sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
+    runs = expand_sweep(sweep)
+
+    assert {r.supcon.mode for r in runs} == {
+        "family_only",
+        "spacegroup_only",
+        "family_and_spacegroup",
+    }
+    assert all(r.model_kind == "supcon" for r in runs)
+
+
+def test_sweep_config_invalid_supcon_mode_raises_on_expand(tmp_path):
+    base = _single_run_dict()
+    base["model"] = "supcon"
+    sweep_dict = {"base": base, "grid": {"supcon.mode": ["bogus"]}}
+    sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
+    with pytest.raises(ValueError, match="supcon.mode must be one of"):
+        expand_sweep(sweep)
+
+
+def test_run_config_defaults_batching_random(tmp_path):
+    config_path = _write_yaml(tmp_path / "run.yaml", _single_run_dict())
+    config = load_run_config(config_path)
+    assert config.batching == BatchingConfig(strategy="random")
+
+
+def test_batching_config_rejects_invalid_strategy():
+    with pytest.raises(ValueError, match="batching.strategy must be one of"):
+        BatchingConfig(strategy="bogus")
+
+
+def test_batching_config_balanced_requires_positive_k():
+    with pytest.raises(
+        ValueError, match="balanced_params.K must be a positive integer"
+    ):
+        BatchingConfig(strategy="balanced")
+    with pytest.raises(
+        ValueError, match="balanced_params.K must be a positive integer"
+    ):
+        BatchingConfig(strategy="balanced", balanced_params=BalancedBatchingParams(K=0))
+
+
+def test_batching_config_balanced_with_valid_k_is_accepted():
+    config = BatchingConfig(
+        strategy="balanced", balanced_params=BalancedBatchingParams(P=4, K=16, S=3)
+    )
+    assert config.balanced_params.P == 4
+    assert config.balanced_params.K == 16
+    assert config.balanced_params.S == 3
+
+
+def test_run_config_parses_batching_block(tmp_path):
+    d = _single_run_dict()
+    d["model"] = "supcon"
+    d["batching"] = {
+        "strategy": "balanced",
+        "balanced_params": {"P": 2, "K": 8, "S": None},
+    }
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+
+    assert config.batching.strategy == "balanced"
+    assert config.batching.balanced_params.P == 2
+    assert config.batching.balanced_params.K == 8
+    assert config.batching.balanced_params.S is None
+
+
+def test_run_config_to_dict_roundtrips_batching_block(tmp_path):
+    d = _single_run_dict()
+    d["model"] = "supcon"
+    d["batching"] = {
+        "strategy": "balanced",
+        "balanced_params": {"P": None, "K": 12, "S": 4},
+    }
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+
+    saved_path = _write_yaml(tmp_path / "saved.yaml", run_config_to_dict(config))
+    reloaded = load_run_config(saved_path)
+
+    assert reloaded == config
+    assert reloaded.batching.strategy == "balanced"
+    assert reloaded.batching.balanced_params.K == 12
+    assert reloaded.batching.balanced_params.S == 4
+
+
+def test_existing_config_without_batching_block_still_loads(tmp_path):
+    """Backward compatibility: a config predating the batching feature (no
+    "batching:" key at all) must still load fine, defaulting to "random".
+    """
+    d = _single_run_dict()
+    assert "batching" not in d
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+    assert config.batching.strategy == "random"
+
+
+def test_expand_sweep_can_vary_batching_strategy(tmp_path):
+    base = _single_run_dict()
+    base["model"] = "supcon"
+    base["batching"] = {"balanced_params": {"K": 8}}
+    sweep_dict = {
+        "base": base,
+        "grid": {"batching.strategy": ["random", "balanced"]},
+    }
+    sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
+    runs = expand_sweep(sweep)
+
+    assert {r.batching.strategy for r in runs} == {"random", "balanced"}
+
+
+def test_sweep_config_invalid_batching_strategy_raises_on_expand(tmp_path):
+    sweep_dict = {
+        "base": _single_run_dict(),
+        "grid": {"batching.strategy": ["bogus"]},
+    }
+    sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
+    with pytest.raises(ValueError, match="batching.strategy must be one of"):
+        expand_sweep(sweep)
+
+
+def test_run_config_defaults_early_stopping_disabled(tmp_path):
+    config_path = _write_yaml(tmp_path / "run.yaml", _single_run_dict())
+    config = load_run_config(config_path)
+    assert config.train.early_stopping == EarlyStoppingConfig(enabled=False)
+
+
+def test_early_stopping_config_rejects_non_positive_patience():
+    with pytest.raises(ValueError, match="early_stopping.patience must be a positive"):
+        EarlyStoppingConfig(patience=0)
+    with pytest.raises(ValueError, match="early_stopping.patience must be a positive"):
+        EarlyStoppingConfig(patience=-1)
+
+
+def test_early_stopping_config_rejects_negative_min_delta():
+    with pytest.raises(ValueError, match="early_stopping.min_delta must be >= 0"):
+        EarlyStoppingConfig(min_delta=-0.1)
+
+
+def test_run_config_parses_train_early_stopping_block(tmp_path):
+    d = _single_run_dict()
+    d["train"]["early_stopping"] = {
+        "enabled": True,
+        "patience": 5,
+        "min_delta": 0.01,
+        "restore_best_weights": False,
+    }
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+
+    assert config.train.early_stopping.enabled is True
+    assert config.train.early_stopping.patience == 5
+    assert config.train.early_stopping.min_delta == 0.01
+    assert config.train.early_stopping.restore_best_weights is False
+    # Rest of the "train" block still parses normally alongside the nested
+    # early_stopping sub-block.
+    assert config.train.epochs == 3
+
+
+def test_run_config_to_dict_roundtrips_early_stopping(tmp_path):
+    d = _single_run_dict()
+    d["train"]["early_stopping"] = {"enabled": True, "patience": 7}
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+
+    saved_path = _write_yaml(tmp_path / "saved.yaml", run_config_to_dict(config))
+    reloaded = load_run_config(saved_path)
+
+    assert reloaded == config
+    assert reloaded.train.early_stopping.enabled is True
+    assert reloaded.train.early_stopping.patience == 7
+    # Untouched field keeps its default.
+    assert reloaded.train.early_stopping.min_delta == 0.0
+
+
+def test_existing_config_without_early_stopping_block_still_loads(tmp_path):
+    """Backward compatibility: a config predating this feature (no
+    "early_stopping:" key under "train:" at all) must still load fine.
+    """
+    d = _single_run_dict()
+    assert "early_stopping" not in d["train"]
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+    assert config.train.early_stopping.enabled is False
+
+
+def test_expand_sweep_can_vary_early_stopping_patience(tmp_path):
+    sweep_dict = {
+        "base": _single_run_dict(),
+        "grid": {"train.early_stopping.patience": [3, 5, 10]},
+    }
+    sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
+    runs = expand_sweep(sweep)
+    assert {r.train.early_stopping.patience for r in runs} == {3, 5, 10}
+
+
+def test_sweep_config_invalid_early_stopping_patience_raises_on_expand(tmp_path):
+    sweep_dict = {
+        "base": _single_run_dict(),
+        "grid": {"train.early_stopping.patience": [0]},
+    }
+    sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
+    with pytest.raises(ValueError, match="early_stopping.patience must be a positive"):
+        expand_sweep(sweep)
 
 
 def _sweep_base():

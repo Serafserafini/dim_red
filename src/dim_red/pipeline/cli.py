@@ -101,13 +101,28 @@ def _str_to_bool(value: str) -> bool:
 
 
 def _do_compare(
-    sweep_dir: str, output_dir: Optional[str], data_file: bool = False
+    sweep_dir: str,
+    output_dir: Optional[str],
+    data_file: bool = False,
+    umap_n_neighbors: Optional[int] = None,
+    umap_min_dist: Optional[float] = None,
+    umap_metric: Optional[str] = None,
+    umap_random_state: Optional[int] = None,
 ) -> Path:
-    from dim_red.pipeline.compare import generate_comparison_report
+    from dim_red.pipeline.compare import LatentUmapParams, generate_comparison_report
 
     _configure_console_logging()
+    umap_params = LatentUmapParams(
+        n_neighbors=umap_n_neighbors,
+        min_dist=umap_min_dist,
+        metric=umap_metric,
+        random_state=umap_random_state,
+    )
     report_dir = generate_comparison_report(
-        sweep_dir, output_dir=output_dir, write_data_files=data_file
+        sweep_dir,
+        output_dir=output_dir,
+        write_data_files=data_file,
+        umap_params=umap_params,
     )
     print(f"Comparison report saved to {report_dir}")
     return report_dir
@@ -161,6 +176,40 @@ def rerun_command(argv=None) -> None:
     _do_rerun(args.run_dir, args.cache_dir)
 
 
+def _add_umap_args(parser: argparse.ArgumentParser) -> None:
+    """Shared ``--umap-*`` flags for the latent-space grid's UMAP projection
+    (applied to non-2D runs and the UMAP baseline) -- used by both
+    ``compare_command`` and the flag-based ``_build_parser``. All default to
+    ``None``, which leaves that hyperparameter at ``umap-learn``'s own
+    default (see ``dim_red.pipeline.compare.LatentUmapParams``).
+    """
+    parser.add_argument(
+        "--umap-n-neighbors",
+        type=int,
+        default=None,
+        help="UMAP n_neighbors for the latent-space grid (default: umap-learn's own, 15).",
+    )
+    parser.add_argument(
+        "--umap-min-dist",
+        type=float,
+        default=None,
+        help="UMAP min_dist for the latent-space grid (default: umap-learn's own, 0.1).",
+    )
+    parser.add_argument(
+        "--umap-metric",
+        type=str,
+        default=None,
+        help="UMAP metric for the latent-space grid (default: umap-learn's own, euclidean).",
+    )
+    parser.add_argument(
+        "--umap-random-state",
+        type=int,
+        default=None,
+        help="UMAP random_state for the latent-space grid (default: umap-learn's own, "
+        "non-deterministic).",
+    )
+
+
 def compare_command(argv=None) -> None:
     """``dimred-compare <sweep_dir>``: render the comparison-plot suite for a sweep."""
     parser = argparse.ArgumentParser(
@@ -186,8 +235,17 @@ def compare_command(argv=None) -> None:
         help="Also write the data behind each comparison plot to a CSV file "
         "next to its PNG (default: false, PNGs only).",
     )
+    _add_umap_args(parser)
     args = parser.parse_args(argv)
-    _do_compare(args.sweep_dir, args.output_dir, args.data_file)
+    _do_compare(
+        args.sweep_dir,
+        args.output_dir,
+        args.data_file,
+        umap_n_neighbors=args.umap_n_neighbors,
+        umap_min_dist=args.umap_min_dist,
+        umap_metric=args.umap_metric,
+        umap_random_state=args.umap_random_state,
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -232,6 +290,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="With --compare: also write the data behind each comparison "
         "plot to a CSV file next to its PNG (default: false, PNGs only).",
     )
+    _add_umap_args(parser)
     return parser
 
 
@@ -244,7 +303,15 @@ def main(argv=None) -> None:
     args = parser.parse_args(argv)
 
     if args.compare:
-        _do_compare(args.compare, None, args.data_file)
+        _do_compare(
+            args.compare,
+            None,
+            args.data_file,
+            umap_n_neighbors=args.umap_n_neighbors,
+            umap_min_dist=args.umap_min_dist,
+            umap_metric=args.umap_metric,
+            umap_random_state=args.umap_random_state,
+        )
         return
 
     if args.rerun:

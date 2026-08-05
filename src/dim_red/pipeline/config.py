@@ -18,7 +18,8 @@ import yaml
 logger = logging.getLogger("dim_red.pipeline")
 
 _AUX_HEADS_MODES = ("none", "family_only", "family_and_spacegroup")
-_MODEL_KINDS = ("vae", "autoencoder")
+_SUPCON_MODES = ("family_only", "spacegroup_only", "family_and_spacegroup")
+_MODEL_KINDS = ("vae", "autoencoder", "supcon")
 _DATA_SOURCES = ("fetch", "pyxtal")
 
 
@@ -129,6 +130,42 @@ class VAEArchConfig:
 
 
 @dataclass(frozen=True)
+class EarlyStoppingConfig:
+    """Early-stopping settings, shared uniformly across all three model
+    kinds (``vae``/``autoencoder``/``supcon``) since every training loop's
+    history always has a ``"val_loss"`` key -- the monitored metric here,
+    not configurable in this first pass.
+
+    Mirrors ``vae.training.TrainConfig``/``autoencoder.training.TrainConfig``/
+    ``supcon.training.TrainConfig``'s ``early_stopping*`` fields one-to-one;
+    ``pipeline.single_run.run_single`` reads this block and populates those
+    fields on whichever ``TrainConfig`` the active ``model_kind`` uses.
+
+    Attributes:
+        enabled: If True, stop training once ``val_loss`` hasn't improved by
+            more than ``min_delta`` for ``patience`` consecutive epochs.
+            Disabled by default (current behavior unchanged).
+        patience: Consecutive non-improving epochs tolerated before stopping.
+        min_delta: Minimum decrease in ``val_loss`` counted as an improvement.
+        restore_best_weights: If True (default), the trained model's params
+            are the best-``val_loss`` epoch's rather than necessarily the
+            last epoch trained -- whether training stopped early or ran the
+            full ``TrainSettings.epochs``.
+    """
+
+    enabled: bool = False
+    patience: int = 10
+    min_delta: float = 0.0
+    restore_best_weights: bool = True
+
+    def __post_init__(self):
+        if self.patience <= 0:
+            raise ValueError("early_stopping.patience must be a positive integer")
+        if self.min_delta < 0:
+            raise ValueError("early_stopping.min_delta must be >= 0")
+
+
+@dataclass(frozen=True)
 class TrainSettings:
     """Training hyperparameters, plus the train/val split ratio.
 
@@ -142,6 +179,7 @@ class TrainSettings:
     beta: float = 1.0
     val_ratio: float = 0.2
     device: str = "cpu"
+    early_stopping: EarlyStoppingConfig = field(default_factory=EarlyStoppingConfig)
 
 
 @dataclass(frozen=True)
@@ -176,17 +214,132 @@ class AuxHeadsConfig:
 
 
 @dataclass(frozen=True)
+class SupConConfig:
+    """Config for ``RunConfig.model_kind == "supcon"``: a two-level (family
+    and/or spacegroup) Supervised Contrastive loss trained directly on the
+    encoder's latent ``z`` -- no classifier heads involved, unlike
+    ``AuxHeadsConfig`` (whose ``mode`` this mirrors the shape of).
+
+    Attributes:
+        mode: Which label level(s) to contrast on: ``"family_only"``,
+            ``"spacegroup_only"``, or ``"family_and_spacegroup"`` (default).
+            Unlike ``AuxHeadsConfig.mode``, ``"spacegroup_only"`` is valid
+            here -- the two SupCon terms are independent (no family ->
+            spacegroup masking needed), so there's no reason a spacegroup
+            term would require a family term to also be active.
+        lambda_family: Weight of the family-level SupCon term. Ignored when
+            ``mode == "spacegroup_only"``.
+        lambda_spacegroup: Weight of the spacegroup-level SupCon term.
+            Ignored when ``mode == "family_only"``.
+        tau: Temperature dividing cosine similarities before the softmax
+            inside the SupCon loss.
+        lambda_norm: Weight of the embedding-norm regularizer (mean squared
+            L2 norm of the batch's latent ``z``), added to the total loss
+            alongside the family/spacegroup terms -- unlike those, it's not
+            gated by ``mode`` (it doesn't depend on labels at all, so it's
+            always in effect whenever it's non-zero). ``0.0`` (default)
+            disables it, matching the pre-regularizer behavior exactly. See
+            ``dim_red.supcon.training.norm_penalty`` for why this matters:
+            ``supcon_loss``'s squared-Euclidean-distance similarity has no
+            built-in scale normalization, so nothing otherwise discourages
+            the encoder from inflating ``z``'s norm without bound.
+    """
+
+    mode: str = "family_and_spacegroup"
+    lambda_family: float = 1.0
+    lambda_spacegroup: float = 1.0
+    tau: float = 0.1
+    lambda_norm: float = 0.0
+
+    def __post_init__(self):
+        if self.mode not in _SUPCON_MODES:
+            raise ValueError(
+                f"supcon.mode must be one of {_SUPCON_MODES}, got {self.mode!r}"
+            )
+
+
+@dataclass(frozen=True)
+class BalancedBatchingParams:
+    """Parameters for ``BatchingConfig.strategy == "balanced"``: batches are
+    built as ``P`` families x ``K`` examples per family (optionally further
+    stratified into ``S`` spacegroups per family, ``K / S`` examples each),
+    instead of a plain random shuffle -- see ``dim_red.supcon.sampling``.
+
+    Attributes:
+        P: Number of crystal families included per batch. ``None`` (default)
+            means all families present in the training split.
+        K: Number of examples per family per batch. Required (must be a
+            positive integer) when ``BatchingConfig.strategy == "balanced"``.
+        S: Number of distinct spacegroups sampled per family per batch.
+            ``None`` (default) skips spacegroup stratification -- batches are
+            balanced by family only.
+    """
+
+    P: Optional[int] = None
+    K: Optional[int] = None
+    S: Optional[int] = None
+
+
+_BATCHING_STRATEGIES = ("random", "balanced")
+
+
+@dataclass(frozen=True)
+class BatchingConfig:
+    """How ``dim_red.supcon.training.train_supcon`` forms training
+    mini-batches. Only meaningful for ``RunConfig.model_kind == "supcon"``
+    (ignored otherwise, same treatment as ``aux_heads``/``supcon`` being
+    ignored for the model kinds they don't apply to).
+
+    Attributes:
+        strategy: ``"random"`` (default -- a plain shuffle, unchanged
+            behavior) or ``"balanced"`` (a family/spacegroup-stratified
+            sampler, see ``BalancedBatchingParams``). Validation batches
+            always stay ``"random"`` regardless of this setting -- only
+            training batches are affected.
+        balanced_params: Required (with a valid ``K``) when
+            ``strategy == "balanced"``; ignored for ``"random"``.
+    """
+
+    strategy: str = "random"
+    balanced_params: BalancedBatchingParams = field(
+        default_factory=BalancedBatchingParams
+    )
+
+    def __post_init__(self):
+        if self.strategy not in _BATCHING_STRATEGIES:
+            raise ValueError(
+                f"batching.strategy must be one of {_BATCHING_STRATEGIES}, "
+                f"got {self.strategy!r}"
+            )
+        if self.strategy == "balanced":
+            k = self.balanced_params.K
+            if k is None or k <= 0:
+                raise ValueError(
+                    "batching.balanced_params.K must be a positive integer "
+                    "when batching.strategy == 'balanced'"
+                )
+
+
+@dataclass(frozen=True)
 class RunConfig:
     """Fully resolved configuration for a single dataset -> SOAP -> model run.
 
     Attributes:
         model_kind: Which model to train: ``"vae"`` (default, a
-            variational autoencoder trained with a KL term/``beta``) or
-            ``"autoencoder"`` (a deterministic autoencoder, no KL/``beta``).
-            Both read their architecture from ``vae`` (encoder/decoder
-            hidden dims, latent dim, mirror) and their aux-head settings from
-            ``aux_heads`` -- identical schema either way, see
-            ``dim_red.pipeline.single_run.run_single``.
+            variational autoencoder trained with a KL term/``beta``),
+            ``"autoencoder"`` (a deterministic autoencoder, no KL/``beta``),
+            or ``"supcon"`` (an encoder-only model with no decoder/KL, trained
+            with a Supervised Contrastive loss on family/spacegroup labels
+            instead of reconstruction -- see ``dim_red.supcon``). All three
+            read their encoder architecture from ``vae`` (``encoder_hidden_dim``,
+            ``latent_dim`` -- ``decoder_hidden_dim``/``mirror`` are ignored by
+            ``"supcon"``, same treatment ``"autoencoder"`` gives ``beta``).
+            ``"vae"``/``"autoencoder"`` read their aux-head settings from
+            ``aux_heads``; ``"supcon"`` reads its loss settings from
+            ``supcon`` instead (``aux_heads`` is ignored for it), and its
+            training-batch sampling strategy from ``batching`` (ignored for
+            ``"vae"``/``"autoencoder"``, which always use a plain shuffle).
+            See ``dim_red.pipeline.single_run.run_single``.
         data_source: How the dataset (before SOAP) is built: ``"fetch"``
             (default -- the ``fetch`` config block queries Materials
             Project) or ``"pyxtal"`` (the ``pyxtal`` config block builds a
@@ -202,6 +355,8 @@ class RunConfig:
     vae: VAEArchConfig
     train: TrainSettings
     aux_heads: AuxHeadsConfig = field(default_factory=AuxHeadsConfig)
+    supcon: SupConConfig = field(default_factory=SupConConfig)
+    batching: BatchingConfig = field(default_factory=BatchingConfig)
     seed: int = 42
     output_dir: str = "runs"
     name: Optional[str] = None
@@ -272,8 +427,23 @@ def run_config_from_dict(d: Dict[str, Any]) -> RunConfig:
     data_source = str(d.get("data_source", "fetch"))
     soap = _dataclass_from_dict(SoapConfig, d.get("soap", {}))
     vae = _dataclass_from_dict(VAEArchConfig, d.get("vae", {}))
-    train = _dataclass_from_dict(TrainSettings, d.get("train", {}))
+    train_dict = d.get("train", {})
+    train_early_stopping = _dataclass_from_dict(
+        EarlyStoppingConfig, train_dict.get("early_stopping", {})
+    )
+    train = _dataclass_from_dict(
+        TrainSettings, {k: v for k, v in train_dict.items() if k != "early_stopping"}
+    )
+    train = dataclasses.replace(train, early_stopping=train_early_stopping)
     aux_heads = _dataclass_from_dict(AuxHeadsConfig, d.get("aux_heads", {}))
+    supcon = _dataclass_from_dict(SupConConfig, d.get("supcon", {}))
+    batching_dict = d.get("batching", {})
+    batching = BatchingConfig(
+        strategy=str(batching_dict.get("strategy", "random")),
+        balanced_params=_dataclass_from_dict(
+            BalancedBatchingParams, batching_dict.get("balanced_params", {})
+        ),
+    )
     pyxtal_config = (
         _dataclass_from_dict(PyxtalConfig, d["pyxtal"]) if "pyxtal" in d else None
     )
@@ -302,6 +472,8 @@ def run_config_from_dict(d: Dict[str, Any]) -> RunConfig:
         vae=vae,
         train=train,
         aux_heads=aux_heads,
+        supcon=supcon,
+        batching=batching,
         seed=int(d.get("seed", 42)),
         output_dir=str(d.get("output_dir", "runs")),
         name=d.get("name"),
@@ -330,6 +502,8 @@ def run_config_to_dict(config: RunConfig) -> Dict[str, Any]:
         "vae": dataclasses.asdict(config.vae),
         "train": dataclasses.asdict(config.train),
         "aux_heads": dataclasses.asdict(config.aux_heads),
+        "supcon": dataclasses.asdict(config.supcon),
+        "batching": dataclasses.asdict(config.batching),
     }
     if config.fetch is not None:
         result["fetch"] = dataclasses.asdict(config.fetch)

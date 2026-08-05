@@ -6,6 +6,7 @@ import pytest
 
 pytest.importorskip("jax")
 
+import jax
 import numpy as np
 
 from dim_red.autoencoder.model import Autoencoder
@@ -224,4 +225,143 @@ def test_train_autoencoder_family_ids_must_be_given_with_val_ids():
     with pytest.raises(ValueError, match="must be given together"):
         train_autoencoder(
             model, train_db, val_db, config, train_family_ids=family_ids[train_idx]
+        )
+
+
+def test_train_autoencoder_early_stopping_disabled_runs_full_epochs():
+    train_db, val_db = _make_split_db(n=40)
+    model = Autoencoder(
+        input_dim=5,
+        encoder_hidden_dim=[8],
+        decoder_hidden_dim=None,
+        latent_dim=2,
+        seed=0,
+    )
+    config = TrainConfig(epochs=4, batch_size=8, seed=0, device="cpu")
+    history = train_autoencoder(model, train_db, val_db, config)
+    assert len(history["train_loss"]) == 4
+
+
+def test_train_autoencoder_early_stopping_stops_before_configured_epochs():
+    train_db, val_db = _make_split_db(n=40)
+    model = Autoencoder(
+        input_dim=5,
+        encoder_hidden_dim=[8],
+        decoder_hidden_dim=None,
+        latent_dim=2,
+        seed=0,
+    )
+    config = TrainConfig(
+        epochs=30,
+        batch_size=8,
+        seed=0,
+        device="cpu",
+        early_stopping=True,
+        early_stopping_patience=2,
+    )
+    history = train_autoencoder(model, train_db, val_db, config)
+    n_epochs_run = len(history["train_loss"])
+    assert n_epochs_run < config.epochs
+    assert len(history["val_loss"]) == n_epochs_run
+    best_epoch_idx = int(np.argmin(history["val_loss"]))
+    assert best_epoch_idx <= n_epochs_run - 1 - config.early_stopping_patience
+
+
+def test_train_autoencoder_early_stopping_restore_best_changes_final_params():
+    train_db, val_db = _make_split_db(n=40)
+
+    model_restore = Autoencoder(
+        input_dim=5,
+        encoder_hidden_dim=[8],
+        decoder_hidden_dim=None,
+        latent_dim=2,
+        seed=0,
+    )
+    config_restore = TrainConfig(
+        epochs=30,
+        batch_size=8,
+        seed=0,
+        device="cpu",
+        early_stopping=True,
+        early_stopping_patience=2,
+        early_stopping_restore_best=True,
+    )
+    history_restore = train_autoencoder(model_restore, train_db, val_db, config_restore)
+
+    model_no_restore = Autoencoder(
+        input_dim=5,
+        encoder_hidden_dim=[8],
+        decoder_hidden_dim=None,
+        latent_dim=2,
+        seed=0,
+    )
+    config_no_restore = TrainConfig(
+        epochs=30,
+        batch_size=8,
+        seed=0,
+        device="cpu",
+        early_stopping=True,
+        early_stopping_patience=2,
+        early_stopping_restore_best=False,
+    )
+    history_no_restore = train_autoencoder(
+        model_no_restore, train_db, val_db, config_no_restore
+    )
+
+    assert history_restore["val_loss"] == history_no_restore["val_loss"]
+    n_epochs_run = len(history_restore["val_loss"])
+    assert n_epochs_run < config_restore.epochs
+
+    best_epoch_idx = int(np.argmin(history_restore["val_loss"]))
+    assert best_epoch_idx != n_epochs_run - 1
+
+    leaves_restore = jax.tree_util.tree_leaves(model_restore.params)
+    leaves_no_restore = jax.tree_util.tree_leaves(model_no_restore.params)
+    assert any(
+        not np.array_equal(np.asarray(a), np.asarray(b))
+        for a, b in zip(leaves_restore, leaves_no_restore)
+    )
+
+
+def test_train_autoencoder_early_stopping_rejects_invalid_patience():
+    with pytest.raises(ValueError, match="early_stopping_patience"):
+        train_autoencoder(
+            Autoencoder(
+                input_dim=5,
+                encoder_hidden_dim=[8],
+                decoder_hidden_dim=None,
+                latent_dim=2,
+                seed=0,
+            ),
+            *_make_split_db(n=40),
+            TrainConfig(
+                epochs=1,
+                batch_size=8,
+                seed=0,
+                device="cpu",
+                early_stopping=True,
+                early_stopping_patience=0,
+            ),
+        )
+
+
+def test_train_autoencoder_early_stopping_rejects_negative_min_delta():
+    with pytest.raises(ValueError, match="early_stopping_min_delta"):
+        train_autoencoder(
+            Autoencoder(
+                input_dim=5,
+                encoder_hidden_dim=[8],
+                decoder_hidden_dim=None,
+                latent_dim=2,
+                seed=0,
+            ),
+            *_make_split_db(n=40),
+            TrainConfig(
+                epochs=1,
+                batch_size=8,
+                seed=0,
+                device="cpu",
+                early_stopping=True,
+                early_stopping_min_delta=-1.0,
+            ),
         )

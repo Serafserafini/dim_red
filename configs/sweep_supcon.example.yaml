@@ -1,0 +1,70 @@
+# Example sweep config for the SupCon encoder, using the generic "base" +
+# "grid" sweep schema (see sweep.example.yaml for the general explanation): a
+# grid over encoder hidden-layer configs x tau x supcon.mode x
+# batching.strategy, so this single sweep also compares the 1-level
+# ("*_only") vs 2-level ("family_and_spacegroup") SupCon variants, and
+# "random" vs "balanced" batching, side by side at parity of every other
+# hyperparameter.
+# Run with: python -m dim_red.pipeline.cli --config configs/sweep_supcon.example.yaml --sweep
+# or:       dimred-sweep configs/sweep_supcon.example.yaml
+
+base:
+  seed: 42
+  output_dir: runs
+  model: supcon
+  data_source: pyxtal
+
+  pyxtal:
+    families: [cubic, hexagonal, orthorhombic]
+    structures_per_family: 40
+    distribution: uniform
+    n_species: 2
+    seed: 42
+
+  soap:
+    r_cut: 5.0
+    n_max: 4
+    l_max: 3
+    sigma: 0.5
+    element_agnostic: false
+    normalize_distances: false
+    species: null
+
+  vae:
+    encoder_hidden_dim: [128]
+    latent_dim: 2
+    mirror: true
+
+  supcon:
+    mode: family_and_spacegroup
+    lambda_family: 1.0
+    lambda_spacegroup: 1.0
+    tau: 0.1
+    # Embedding-norm regularizer weight, disabled by default; sweepable via
+    # "supcon.lambda_norm" like any other dotted-path field below.
+    lambda_norm: 0.0
+
+  # K/S here only take effect for the runs where the grid below picks
+  # batching.strategy: balanced (BatchingConfig requires a positive K in
+  # that case); harmlessly ignored for the "random" runs.
+  batching:
+    strategy: random
+    balanced_params: {P: null, K: 16, S: 4}
+
+  train:
+    epochs: 20
+    batch_size: 32
+    learning_rate: 0.001
+    val_ratio: 0.2
+    device: cpu
+
+# 2 hidden-layer configs x 2 tau values x 3 modes x 2 batching strategies =
+# 24 runs. Since only soap/pyxtal settings affect the dataset cache key, all
+# 24 runs share one cached dataset build.
+grid:
+  vae.encoder_hidden_dim:
+    - [128]
+    - [128, 64]
+  supcon.tau: [0.05, 0.1]
+  supcon.mode: [family_only, spacegroup_only, family_and_spacegroup]
+  batching.strategy: [random, balanced]

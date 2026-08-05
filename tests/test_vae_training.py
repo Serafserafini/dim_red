@@ -6,6 +6,7 @@ import pytest
 
 pytest.importorskip("jax")
 
+import jax
 import numpy as np
 
 from dim_red.vae.database import VAEDatabase
@@ -241,4 +242,192 @@ def test_train_vae_family_ids_must_be_given_with_val_ids():
     with pytest.raises(ValueError, match="must be given together"):
         train_vae(
             model, train_db, val_db, config, train_family_ids=family_ids[train_idx]
+        )
+
+
+def test_train_vae_early_stopping_disabled_runs_full_epochs():
+    train_db, val_db = _make_split_db(n=40)
+    model = VAE(
+        input_dim=5,
+        encoder_hidden_dim=[8],
+        decoder_hidden_dim=None,
+        latent_dim=2,
+        seed=0,
+    )
+    config = TrainConfig(epochs=4, batch_size=8, seed=0, device="cpu")
+    history = train_vae(model, train_db, val_db, config)
+    assert len(history["train_loss"]) == 4
+
+
+def test_train_vae_early_stopping_stops_before_configured_epochs():
+    train_db, val_db = _make_split_db(n=40)
+    model = VAE(
+        input_dim=5,
+        encoder_hidden_dim=[8],
+        decoder_hidden_dim=None,
+        latent_dim=2,
+        seed=0,
+    )
+    config = TrainConfig(
+        epochs=30,
+        batch_size=8,
+        seed=0,
+        device="cpu",
+        early_stopping=True,
+        early_stopping_patience=2,
+    )
+    history = train_vae(model, train_db, val_db, config)
+    n_epochs_run = len(history["train_loss"])
+    assert n_epochs_run < config.epochs
+    assert len(history["val_loss"]) == n_epochs_run
+    # The best val_loss must have been reached strictly before the last
+    # early_stopping_patience epochs -- that's exactly why training stopped.
+    best_epoch_idx = int(np.argmin(history["val_loss"]))
+    assert best_epoch_idx <= n_epochs_run - 1 - config.early_stopping_patience
+
+
+def test_train_vae_early_stopping_min_delta_requires_larger_improvement():
+    """A large min_delta makes small improvements not count, so training
+    should stop earlier (or equal) than with min_delta=0 given the same seed.
+    """
+    train_db, val_db = _make_split_db(n=40)
+
+    model_loose = VAE(
+        input_dim=5,
+        encoder_hidden_dim=[8],
+        decoder_hidden_dim=None,
+        latent_dim=2,
+        seed=0,
+    )
+    config_loose = TrainConfig(
+        epochs=30,
+        batch_size=8,
+        seed=0,
+        device="cpu",
+        early_stopping=True,
+        early_stopping_patience=2,
+        early_stopping_min_delta=0.0,
+    )
+    history_loose = train_vae(model_loose, train_db, val_db, config_loose)
+
+    model_strict = VAE(
+        input_dim=5,
+        encoder_hidden_dim=[8],
+        decoder_hidden_dim=None,
+        latent_dim=2,
+        seed=0,
+    )
+    config_strict = TrainConfig(
+        epochs=30,
+        batch_size=8,
+        seed=0,
+        device="cpu",
+        early_stopping=True,
+        early_stopping_patience=2,
+        early_stopping_min_delta=10.0,
+    )
+    history_strict = train_vae(model_strict, train_db, val_db, config_strict)
+
+    assert len(history_strict["train_loss"]) <= len(history_loose["train_loss"])
+
+
+def test_train_vae_early_stopping_restore_best_changes_final_params():
+    train_db, val_db = _make_split_db(n=40)
+
+    model_restore = VAE(
+        input_dim=5,
+        encoder_hidden_dim=[8],
+        decoder_hidden_dim=None,
+        latent_dim=2,
+        seed=0,
+    )
+    config_restore = TrainConfig(
+        epochs=30,
+        batch_size=8,
+        seed=0,
+        device="cpu",
+        early_stopping=True,
+        early_stopping_patience=2,
+        early_stopping_restore_best=True,
+    )
+    history_restore = train_vae(model_restore, train_db, val_db, config_restore)
+
+    model_no_restore = VAE(
+        input_dim=5,
+        encoder_hidden_dim=[8],
+        decoder_hidden_dim=None,
+        latent_dim=2,
+        seed=0,
+    )
+    config_no_restore = TrainConfig(
+        epochs=30,
+        batch_size=8,
+        seed=0,
+        device="cpu",
+        early_stopping=True,
+        early_stopping_patience=2,
+        early_stopping_restore_best=False,
+    )
+    history_no_restore = train_vae(
+        model_no_restore, train_db, val_db, config_no_restore
+    )
+
+    # Same trajectory either way -- restore_best only changes which
+    # snapshot ends up in model.params, not the training run itself.
+    assert history_restore["val_loss"] == history_no_restore["val_loss"]
+    n_epochs_run = len(history_restore["val_loss"])
+    assert n_epochs_run < config_restore.epochs  # confirm it actually stopped early
+
+    best_epoch_idx = int(np.argmin(history_restore["val_loss"]))
+    assert best_epoch_idx != n_epochs_run - 1  # the best epoch wasn't the last one
+
+    leaves_restore = jax.tree_util.tree_leaves(model_restore.params)
+    leaves_no_restore = jax.tree_util.tree_leaves(model_no_restore.params)
+    assert any(
+        not np.array_equal(np.asarray(a), np.asarray(b))
+        for a, b in zip(leaves_restore, leaves_no_restore)
+    )
+
+
+def test_train_vae_early_stopping_rejects_invalid_patience():
+    with pytest.raises(ValueError, match="early_stopping_patience"):
+        train_vae(
+            VAE(
+                input_dim=5,
+                encoder_hidden_dim=[8],
+                decoder_hidden_dim=None,
+                latent_dim=2,
+                seed=0,
+            ),
+            *_make_split_db(n=40),
+            TrainConfig(
+                epochs=1,
+                batch_size=8,
+                seed=0,
+                device="cpu",
+                early_stopping=True,
+                early_stopping_patience=0,
+            ),
+        )
+
+
+def test_train_vae_early_stopping_rejects_negative_min_delta():
+    with pytest.raises(ValueError, match="early_stopping_min_delta"):
+        train_vae(
+            VAE(
+                input_dim=5,
+                encoder_hidden_dim=[8],
+                decoder_hidden_dim=None,
+                latent_dim=2,
+                seed=0,
+            ),
+            *_make_split_db(n=40),
+            TrainConfig(
+                epochs=1,
+                batch_size=8,
+                seed=0,
+                device="cpu",
+                early_stopping=True,
+                early_stopping_min_delta=-1.0,
+            ),
         )
