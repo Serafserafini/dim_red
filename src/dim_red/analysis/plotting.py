@@ -66,6 +66,108 @@ def plot_reduced_space(
     plt.close()
 
 
+def plot_applied_structures(
+    X_original: np.ndarray,
+    original_labels: List[str],
+    X_new: np.ndarray,
+    new_labels: Optional[List[str]] = None,
+    title: str = "Applied structures in latent space",
+    save_path: Optional[str] = None,
+    xlabel: str = "Latent Dimension 1",
+    ylabel: str = "Latent Dimension 2",
+) -> None:
+    """Scatter an original dataset's 2D coordinates (colored by label, same
+    style as ``plot_reduced_space``) with a second set of points overlaid as
+    larger, black-edged stars -- e.g. new structures encoded with an
+    already-trained model (see ``dim_red.pipeline.inference``), so they can
+    be visually compared against where the training data itself landed.
+
+    Both point sets must already be 2D; projecting a non-2D latent space
+    (e.g. via UMAP) is the caller's responsibility, same division of concerns
+    as ``dim_red.pipeline.compare``'s own use of ``plot_reduced_space``.
+
+    Args:
+        X_original: Original dataset's 2D coordinates, shape ``(n, 2)``.
+        original_labels: Label per original point, same length as ``X_original``.
+        X_new: New points' 2D coordinates, shape ``(m, 2)``.
+        new_labels: Label per new point, same length as ``X_new``. Sharing a
+            label with an ``original_labels`` entry reuses that label's
+            color (just drawn as a star instead of a circle); a label not
+            seen in ``original_labels`` gets its own new color. ``None``
+            (default) groups every new point under a single "Applied
+            structure" legend entry.
+        title: The plot title.
+        save_path: If provided, saves the plot to this filepath; otherwise the figure is shown (interactively, or captured inline in a notebook).
+        xlabel: Label for the x-axis (first coordinate).
+        ylabel: Label for the y-axis (second coordinate).
+
+    Raises:
+        ValueError: If ``X_original``/``X_new`` aren't 2D coordinates, ``X_new``
+            is empty, or ``new_labels`` doesn't match ``X_new``'s length.
+    """
+    if X_original.shape[1] < 2 or X_new.shape[1] < 2:
+        raise ValueError("X_original and X_new must have at least 2 components.")
+    if X_new.shape[0] == 0:
+        raise ValueError("X_new must contain at least one point.")
+    if new_labels is None:
+        new_labels = ["Applied structure"] * X_new.shape[0]
+    elif len(new_labels) != X_new.shape[0]:
+        raise ValueError("new_labels must have the same length as X_new.")
+
+    unique_labels = sorted(set(original_labels) | set(new_labels))
+    cmap = plt.get_cmap("tab10")
+    color_for = {label: cmap(i % 10) for i, label in enumerate(unique_labels)}
+
+    plt.figure(figsize=(10, 8))
+
+    for label in sorted(set(original_labels)):
+        mask = [lbl == label for lbl in original_labels]
+        coords = X_original[mask]
+        plt.scatter(
+            coords[:, 0],
+            coords[:, 1],
+            label=label,
+            color=color_for[label],
+            alpha=0.5,
+            edgecolors="w",
+            s=60,
+            zorder=2,
+        )
+
+    for label in sorted(set(new_labels)):
+        mask = [lbl == label for lbl in new_labels]
+        coords = X_new[mask]
+        plt.scatter(
+            coords[:, 0],
+            coords[:, 1],
+            label=f"{label} (applied)",
+            color=color_for[label],
+            marker="*",
+            s=300,
+            edgecolors="black",
+            linewidths=1.2,
+            zorder=3,
+        )
+
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.title(title, fontsize=14, fontweight="bold", pad=15)
+    plt.legend(frameon=True, facecolor="white", edgecolor="none", fontsize=8)
+    plt.grid(True, linestyle="--", alpha=0.5)
+
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=300)
+        print(f"Plot saved successfully to {save_path}")
+    else:
+        # No file requested -- assume interactive/notebook use, where the
+        # figure must still be open when the inline backend captures it.
+        plt.show()
+
+    plt.close()
+
+
 def plot_spacegroup_histogram(
     spacegroups: Sequence[Optional[int]],
     families: Sequence[str],

@@ -462,7 +462,7 @@ class LatentUmapParams:
     random_state: Optional[int] = None
 
 
-def _make_umap(n_components: int, umap_params: Optional[LatentUmapParams]):
+def make_umap(n_components: int, umap_params: Optional[LatentUmapParams]):
     """Build a ``dim_red.umap.UMAP`` instance from ``umap_params`` (``None``
     treated the same as an all-defaults ``LatentUmapParams()``). Imports
     ``dim_red.umap`` lazily so callers that never need it (e.g. every run's
@@ -512,7 +512,7 @@ def compute_embedding_baselines(
     point_labels = source.embeddings["labels"]
     baselines: Dict[str, np.ndarray] = {"PCA": PCA(n_components=2).fit_transform(X)}
     try:
-        umap = _make_umap(n_components=2, umap_params=umap_params)
+        umap = make_umap(n_components=2, umap_params=umap_params)
     except ImportError:
         logger.warning("umap-learn not installed; skipping UMAP baseline")
     else:
@@ -574,7 +574,7 @@ def _project_run_to_2d(
     if embeddings.shape[1] == 2:
         return embeddings, False
     try:
-        umap = _make_umap(n_components=2, umap_params=umap_params)
+        umap = make_umap(n_components=2, umap_params=umap_params)
     except ImportError:
         logger.warning(
             "Run %s has %d-dimensional latent embeddings and umap-learn is "

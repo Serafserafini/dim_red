@@ -19,6 +19,7 @@ logger = logging.getLogger("dim_red.pipeline")
 
 _AUX_HEADS_MODES = ("none", "family_only", "family_and_spacegroup")
 _SUPCON_MODES = ("family_only", "spacegroup_only", "family_and_spacegroup")
+_SUPCON_DISTANCES = ("euclidean", "cosine")
 _MODEL_KINDS = ("vae", "autoencoder", "supcon")
 _DATA_SOURCES = ("fetch", "pyxtal")
 
@@ -110,6 +111,85 @@ class PyxtalConfig:
     factor: float = 1.1
     max_count: int = 5
     seed: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class AugmentationConfig:
+    """Config for ``RunConfig.augmentation``: optional structure-level data
+    augmentation applied to every fetched/generated structure before SOAP
+    featurization -- positional jitter (simulated thermal noise, small random
+    displacements of every atom) and/or vacancy removal (randomly deleting
+    atoms), each independently probability-gated. ``None`` (``RunConfig``'s
+    default) disables augmentation entirely, current behavior unchanged.
+    Applies uniformly regardless of ``data_source`` -- both ``fetch`` and
+    ``pyxtal`` produce a plain ``List[Atoms]`` before SOAP.
+
+    Mirrors ``dim_red.augmentation.AugmentationConfig``'s fields one-to-one,
+    kept as an independent dataclass here (like ``PyxtalConfig`` mirrors
+    ``GenerationConfig``) so ``dim_red.pipeline.config`` doesn't pull in
+    ``dim_red.augmentation``'s import chain (which imports ``dim_red.fetch``,
+    and so ``mp_api``/``pymatgen``, unconditionally) just to parse a config --
+    the actual ``dim_red.augmentation`` import happens in
+    ``dim_red.pipeline.dataset_cache``, which already depends on those
+    unconditionally regardless of ``data_source``.
+
+    Every augmented copy is guaranteed to have at least one of jitter/vacancy
+    actually applied to it -- see ``dim_red.augmentation.AugmentationConfig``'s
+    docstring, including the corollary for when only one mechanism is
+    configured at all.
+
+    Attributes:
+        n_augmented: Number of augmented copies generated per structure.
+        keep_original: Whether the unmodified structure is also kept
+            alongside its augmented copies.
+        jitter_probability: Probability, per augmented copy, that positional
+            jitter (thermal noise) is applied to it at all.
+        jitter_std: Standard deviation (Angstroms) of the Gaussian noise
+            added to atomic positions when jitter is applied.
+        vacancy_probability: Probability, per augmented copy, that vacancy
+            removal is applied to it at all.
+        vacancy_atom_probability: Probability that any individual atom is
+            removed, once a copy has been selected for vacancy removal.
+        max_vacancies: Maximum number of atoms removed per augmented copy
+            when vacancy removal applies. ``None`` (default) leaves it
+            uncapped, short of the structure's own floor of 1 remaining atom.
+        supercell_radius: If set (Angstroms), every structure is first
+            expanded into a supercell large enough to fit a sphere of this
+            radius before any jitter/vacancy is applied -- meant for unit
+            cells too small to meaningfully augment (e.g. pyxtal can
+            generate cells holding as few as 1-2 atoms). ``None`` (default)
+            skips this step entirely, current behavior unchanged. See
+            ``dim_red.augmentation.make_supercell_for_radius``.
+        seed: Seed for reproducible augmentation. If ``None`` (default),
+            falls back to ``RunConfig.seed`` -- same convention as
+            ``PyxtalConfig.seed``.
+    """
+
+    n_augmented: int = 1
+    keep_original: bool = True
+    jitter_probability: float = 0.5
+    jitter_std: float = 0.05
+    vacancy_probability: float = 0.0
+    vacancy_atom_probability: float = 0.05
+    max_vacancies: Optional[int] = None
+    supercell_radius: Optional[float] = None
+    seed: Optional[int] = None
+
+    def __post_init__(self):
+        if self.n_augmented < 0:
+            raise ValueError("augmentation.n_augmented must be >= 0")
+        if not 0.0 <= self.jitter_probability <= 1.0:
+            raise ValueError("augmentation.jitter_probability must be in [0, 1]")
+        if not 0.0 <= self.vacancy_probability <= 1.0:
+            raise ValueError("augmentation.vacancy_probability must be in [0, 1]")
+        if not 0.0 <= self.vacancy_atom_probability <= 1.0:
+            raise ValueError("augmentation.vacancy_atom_probability must be in [0, 1]")
+        if self.jitter_std < 0:
+            raise ValueError("augmentation.jitter_std must be >= 0")
+        if self.max_vacancies is not None and self.max_vacancies < 0:
+            raise ValueError("augmentation.max_vacancies must be >= 0")
+        if self.supercell_radius is not None and self.supercell_radius <= 0:
+            raise ValueError("augmentation.supercell_radius must be > 0")
 
 
 @dataclass(frozen=True)
@@ -231,8 +311,14 @@ class SupConConfig:
             ``mode == "spacegroup_only"``.
         lambda_spacegroup: Weight of the spacegroup-level SupCon term.
             Ignored when ``mode == "family_only"``.
-        tau: Temperature dividing cosine similarities before the softmax
-            inside the SupCon loss.
+        tau: Temperature dividing similarities before the softmax inside the
+            SupCon loss.
+        distance: Which similarity ``dim_red.supcon.training.supcon_loss``
+            computes: ``"euclidean"`` (default -- negative squared Euclidean
+            distance, the original formulation here, unbounded scale) or
+            ``"cosine"`` (cosine similarity between L2-normalized ``z``
+            vectors, bounded to ``[-1, 1]``). Forwarded as-is to
+            ``dim_red.supcon.training.TrainConfig.distance``.
         lambda_norm: Weight of the embedding-norm regularizer (mean squared
             L2 norm of the batch's latent ``z``), added to the total loss
             alongside the family/spacegroup terms -- unlike those, it's not
@@ -240,21 +326,28 @@ class SupConConfig:
             always in effect whenever it's non-zero). ``0.0`` (default)
             disables it, matching the pre-regularizer behavior exactly. See
             ``dim_red.supcon.training.norm_penalty`` for why this matters:
-            ``supcon_loss``'s squared-Euclidean-distance similarity has no
+            with ``distance == "euclidean"`` (default), similarity has no
             built-in scale normalization, so nothing otherwise discourages
-            the encoder from inflating ``z``'s norm without bound.
+            the encoder from inflating ``z``'s norm without bound; largely
+            redundant with ``distance == "cosine"``.
     """
 
     mode: str = "family_and_spacegroup"
     lambda_family: float = 1.0
     lambda_spacegroup: float = 1.0
     tau: float = 0.1
+    distance: str = "euclidean"
     lambda_norm: float = 0.0
 
     def __post_init__(self):
         if self.mode not in _SUPCON_MODES:
             raise ValueError(
                 f"supcon.mode must be one of {_SUPCON_MODES}, got {self.mode!r}"
+            )
+        if self.distance not in _SUPCON_DISTANCES:
+            raise ValueError(
+                f"supcon.distance must be one of {_SUPCON_DISTANCES}, got "
+                f"{self.distance!r}"
             )
 
 
@@ -271,8 +364,10 @@ class BalancedBatchingParams:
         K: Number of examples per family per batch. Required (must be a
             positive integer) when ``BatchingConfig.strategy == "balanced"``.
         S: Number of distinct spacegroups sampled per family per batch.
-            ``None`` (default) skips spacegroup stratification -- batches are
-            balanced by family only.
+            ``None`` (default) uses *every* spacegroup present for that
+            family, splitting ``K`` as evenly as possible across all of them
+            -- not "skip stratification". Set an explicit integer to sample
+            only that many spacegroups per family instead.
     """
 
     P: Optional[int] = None
@@ -349,6 +444,11 @@ class RunConfig:
             sources. See ``dim_red.pipeline.dataset_cache``.
         fetch: Required when ``data_source == "fetch"``, otherwise unused.
         pyxtal: Required when ``data_source == "pyxtal"``, otherwise unused.
+        augmentation: Optional structure-level data augmentation (thermal-
+            noise-style positional jitter and/or vacancy removal) applied
+            after the dataset is built, before SOAP. ``None`` (default)
+            disables it, current behavior unchanged. Applies regardless of
+            ``data_source``. See ``AugmentationConfig``.
     """
 
     soap: SoapConfig
@@ -364,6 +464,7 @@ class RunConfig:
     data_source: str = "fetch"
     fetch: Optional[FetchConfig] = None
     pyxtal: Optional[PyxtalConfig] = None
+    augmentation: Optional[AugmentationConfig] = None
 
     def __post_init__(self):
         if self.model_kind not in _MODEL_KINDS:
@@ -447,6 +548,11 @@ def run_config_from_dict(d: Dict[str, Any]) -> RunConfig:
     pyxtal_config = (
         _dataclass_from_dict(PyxtalConfig, d["pyxtal"]) if "pyxtal" in d else None
     )
+    augmentation_config = (
+        _dataclass_from_dict(AugmentationConfig, d["augmentation"])
+        if "augmentation" in d
+        else None
+    )
 
     fetch_config: Optional[FetchConfig] = None
     if "fetch" in d:
@@ -481,6 +587,7 @@ def run_config_from_dict(d: Dict[str, Any]) -> RunConfig:
         data_source=data_source,
         fetch=fetch_config,
         pyxtal=pyxtal_config,
+        augmentation=augmentation_config,
     )
 
 
@@ -509,6 +616,8 @@ def run_config_to_dict(config: RunConfig) -> Dict[str, Any]:
         result["fetch"] = dataclasses.asdict(config.fetch)
     if config.pyxtal is not None:
         result["pyxtal"] = dataclasses.asdict(config.pyxtal)
+    if config.augmentation is not None:
+        result["augmentation"] = dataclasses.asdict(config.augmentation)
     return result
 
 

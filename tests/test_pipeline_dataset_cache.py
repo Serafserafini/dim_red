@@ -11,7 +11,8 @@ import pytest
 from ase import Atoms
 from ase.io import read as read_atoms
 
-from dim_red.pipeline.dataset_cache import get_or_build_dataset
+from dim_red.augmentation import AugmentationConfig
+from dim_red.pipeline.dataset_cache import _cache_key, get_or_build_dataset
 
 
 def _fake_atoms(symbol: str, material_id: str, spacegroup: int) -> Atoms:
@@ -206,10 +207,90 @@ def test_get_or_build_dataset_raises_when_nothing_fetched(tmp_path):
             )
 
 
+# --- augmentation ------------------------------------------------------------
+
+
+def test_get_or_build_dataset_applies_augmentation(tmp_path):
+    fake_atoms = [_fake_atoms("Cu", "mp-1", 225), _fake_atoms("Fe", "mp-2", 229)]
+    # 2 fetched structures x (1 original + 1 augmented copy) = 4 rows.
+    fake_soap = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]])
+    augmentation = AugmentationConfig(
+        n_augmented=1,
+        keep_original=True,
+        jitter_probability=1.0,
+        jitter_std=0.01,
+        vacancy_probability=0.0,
+        seed=0,
+    )
+
+    with (
+        patch(
+            "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
+            return_value=fake_atoms,
+        ) as mock_fetch,
+        patch("dim_red.pipeline.dataset_cache.compute_soap", return_value=fake_soap),
+    ):
+        X, labels, ids, sg, structures_path = get_or_build_dataset(
+            crystal_systems=["cubic"],
+            soap_kwargs={"r_cut": 3.0, "n_max": 2, "l_max": 2},
+            limit_per_system=2,
+            cache_dir=tmp_path,
+            augmentation=augmentation,
+        )
+
+    assert mock_fetch.call_count == 1
+    assert X.shape == (4, 2)
+    assert labels == ["Cubic"] * 4
+    assert len(ids) == 4
+    assert len(read_atoms(structures_path, index=":")) == 4
+
+
+def test_get_or_build_dataset_augmentation_changes_cache_key(tmp_path):
+    fake_atoms = [_fake_atoms("Cu", "mp-1", 225)]
+    augmentation = AugmentationConfig(n_augmented=1, jitter_probability=1.0, seed=0)
+
+    with (
+        patch(
+            "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
+            return_value=fake_atoms,
+        ) as mock_fetch,
+        patch(
+            "dim_red.pipeline.dataset_cache.compute_soap",
+            side_effect=[np.array([[1.0, 2.0]]), np.array([[1.0, 2.0], [3.0, 4.0]])],
+        ),
+    ):
+        get_or_build_dataset(
+            crystal_systems=["cubic"],
+            soap_kwargs={"r_cut": 3.0, "n_max": 2, "l_max": 2},
+            limit_per_system=2,
+            cache_dir=tmp_path,
+        )
+        get_or_build_dataset(
+            crystal_systems=["cubic"],
+            soap_kwargs={"r_cut": 3.0, "n_max": 2, "l_max": 2},
+            limit_per_system=2,
+            cache_dir=tmp_path,
+            augmentation=augmentation,
+        )
+
+    # Different augmentation settings -> different cache key -> fetch twice,
+    # two distinct cache files on disk.
+    assert mock_fetch.call_count == 2
+    assert len(list(tmp_path.glob("*.npz"))) == 2
+
+
+def test_cache_key_differs_with_and_without_augmentation():
+    soap_kwargs = {"r_cut": 3.0, "n_max": 2, "l_max": 2}
+    key_plain = _cache_key(["cubic"], 2, soap_kwargs)
+    key_aug = _cache_key(["cubic"], 2, soap_kwargs, AugmentationConfig(n_augmented=2))
+    assert key_plain != key_aug
+
+
 # --- pyxtal data source ------------------------------------------------------
 
 pytest.importorskip("pyxtal")
 
+from dim_red.pipeline.config import AugmentationConfig as PipelineAugmentationConfig
 from dim_red.pipeline.config import (
     FetchConfig,
     PyxtalConfig,
@@ -298,6 +379,33 @@ def test_get_or_build_pyxtal_dataset_different_seed_misses_cache(tmp_path):
         assert len(list(tmp_path.glob("*.extxyz"))) == 2
 
 
+def test_get_or_build_pyxtal_dataset_applies_augmentation(tmp_path):
+    fake_atoms = [_fake_generated_atoms("Cu", "pyxtal-225-0", 225, "Cubic")]
+    # 1 generated structure x (1 original + 1 augmented copy) = 2 rows.
+    fake_soap = np.array([[1.0, 2.0], [3.0, 4.0]])
+    pyxtal_config = PyxtalConfig(spacegroups=[225], structures_per_spacegroup=1)
+    augmentation = AugmentationConfig(n_augmented=1, jitter_probability=1.0, seed=0)
+
+    with (
+        patch(
+            "dim_red.generate.generate_structures", return_value=fake_atoms
+        ) as mock_generate,
+        patch("dim_red.pipeline.dataset_cache.compute_soap", return_value=fake_soap),
+    ):
+        X, labels, ids, sg, structures_path = get_or_build_pyxtal_dataset(
+            pyxtal_config=pyxtal_config,
+            seed=0,
+            soap_kwargs={"r_cut": 3.0, "n_max": 2, "l_max": 2},
+            cache_dir=tmp_path,
+            augmentation=augmentation,
+        )
+
+    assert mock_generate.call_count == 1
+    assert X.shape == (2, 2)
+    assert labels == ["Cubic", "Cubic"]
+    assert len(read_atoms(structures_path, index=":")) == 2
+
+
 def test_get_or_build_pyxtal_dataset_raises_when_nothing_generated(tmp_path):
     pyxtal_config = PyxtalConfig(spacegroups=[225], structures_per_spacegroup=1)
     with patch("dim_red.generate.generate_structures", return_value=[]):
@@ -305,7 +413,7 @@ def test_get_or_build_pyxtal_dataset_raises_when_nothing_generated(tmp_path):
             get_or_build_pyxtal_dataset(pyxtal_config, 0, {}, tmp_path)
 
 
-def _run_config(data_source="fetch", pyxtal_config=None):
+def _run_config(data_source="fetch", pyxtal_config=None, augmentation_config=None):
     return RunConfig(
         fetch=(
             FetchConfig(crystal_systems=["cubic"], limit_per_system=2)
@@ -318,6 +426,7 @@ def _run_config(data_source="fetch", pyxtal_config=None):
         seed=0,
         data_source=data_source,
         pyxtal=pyxtal_config,
+        augmentation=augmentation_config,
     )
 
 
@@ -436,3 +545,109 @@ def test_build_dataset_for_run_pyxtal_seed_overrides_run_seed(tmp_path):
     _, kwargs = mock_get.call_args
     assert kwargs["seed"] == 999
     assert kwargs["seed"] != config.seed
+
+
+def test_build_dataset_for_run_augmentation_defaults_to_none(tmp_path):
+    config = _run_config(data_source="fetch")
+    assert config.augmentation is None
+
+    with patch("dim_red.pipeline.dataset_cache.get_or_build_dataset") as mock_get:
+        mock_get.return_value = (
+            np.zeros((1, 1)),
+            ["Cubic"],
+            ["id"],
+            [225],
+            tmp_path / "fake.extxyz",
+        )
+        build_dataset_for_run(config, cache_dir=tmp_path)
+
+    _, kwargs = mock_get.call_args
+    assert kwargs["augmentation"] is None
+
+
+def test_build_dataset_for_run_forwards_augmentation_to_fetch(tmp_path):
+    fake_atoms = [_fake_atoms("Cu", "mp-1", 225)]
+    fake_soap = np.array([[1.0, 2.0], [3.0, 4.0]])
+    config = _run_config(
+        data_source="fetch",
+        augmentation_config=PipelineAugmentationConfig(
+            n_augmented=1, jitter_probability=1.0, seed=5
+        ),
+    )
+
+    with (
+        patch(
+            "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
+            return_value=fake_atoms,
+        ) as mock_fetch,
+        patch("dim_red.pipeline.dataset_cache.compute_soap", return_value=fake_soap),
+    ):
+        X, labels, ids, sg, structures_path = build_dataset_for_run(
+            config, cache_dir=tmp_path
+        )
+
+    assert mock_fetch.call_count == 1
+    assert X.shape == (2, 2)  # 1 fetched x (1 original + 1 augmented copy)
+
+
+def test_build_dataset_for_run_augmentation_seed_falls_back_to_run_seed(tmp_path):
+    config = _run_config(
+        data_source="fetch",
+        augmentation_config=PipelineAugmentationConfig(n_augmented=1),
+    )
+    assert config.augmentation.seed is None
+
+    with patch("dim_red.pipeline.dataset_cache.get_or_build_dataset") as mock_get:
+        mock_get.return_value = (
+            np.zeros((1, 1)),
+            ["Cubic"],
+            ["id"],
+            [225],
+            tmp_path / "fake.extxyz",
+        )
+        build_dataset_for_run(config, cache_dir=tmp_path)
+
+    _, kwargs = mock_get.call_args
+    assert kwargs["augmentation"].seed == config.seed
+
+
+def test_build_dataset_for_run_augmentation_seed_overrides_run_seed(tmp_path):
+    config = _run_config(
+        data_source="fetch",
+        augmentation_config=PipelineAugmentationConfig(n_augmented=1, seed=999),
+    )
+
+    with patch("dim_red.pipeline.dataset_cache.get_or_build_dataset") as mock_get:
+        mock_get.return_value = (
+            np.zeros((1, 1)),
+            ["Cubic"],
+            ["id"],
+            [225],
+            tmp_path / "fake.extxyz",
+        )
+        build_dataset_for_run(config, cache_dir=tmp_path)
+
+    _, kwargs = mock_get.call_args
+    assert kwargs["augmentation"].seed == 999
+
+
+def test_build_dataset_for_run_forwards_supercell_radius(tmp_path):
+    config = _run_config(
+        data_source="fetch",
+        augmentation_config=PipelineAugmentationConfig(
+            n_augmented=1, supercell_radius=5.0
+        ),
+    )
+
+    with patch("dim_red.pipeline.dataset_cache.get_or_build_dataset") as mock_get:
+        mock_get.return_value = (
+            np.zeros((1, 1)),
+            ["Cubic"],
+            ["id"],
+            [225],
+            tmp_path / "fake.extxyz",
+        )
+        build_dataset_for_run(config, cache_dir=tmp_path)
+
+    _, kwargs = mock_get.call_args
+    assert kwargs["augmentation"].supercell_radius == 5.0

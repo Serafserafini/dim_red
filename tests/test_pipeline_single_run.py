@@ -18,6 +18,7 @@ from ase.io import read as read_atoms
 pytest.importorskip("jax")
 
 from dim_red.pipeline.config import (
+    AugmentationConfig,
     AuxHeadsConfig,
     BalancedBatchingParams,
     BatchingConfig,
@@ -227,6 +228,98 @@ def test_run_single_pyxtal_data_source_writes_expected_artifacts(tmp_path):
     assert len(dataset_atoms) == n_samples
     assert {a.info["family"] for a in dataset_atoms} == {"Cubic"}
     assert set(embeddings["spacegroups"].tolist()) == {225}
+
+
+def test_run_single_augmentation_expands_dataset(tmp_path):
+    """RunConfig.augmentation (thermal-noise jitter / vacancies) runs before
+    SOAP, end-to-end: the fetched structures get expanded into
+    original+augmented copies, and every downstream artifact (dataset.extxyz,
+    embeddings.npz) reflects the larger, post-augmentation count.
+    """
+    n_fetched = 4
+    config = RunConfig(
+        fetch=FetchConfig(crystal_systems=["cubic"], limit_per_system=n_fetched),
+        soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
+        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
+        train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
+        augmentation=AugmentationConfig(
+            n_augmented=1, jitter_probability=1.0, jitter_std=0.05, seed=0
+        ),
+        seed=0,
+        output_dir=str(tmp_path / "runs"),
+    )
+    fake_atoms = [_fake_atoms("Cu", f"mp-{i}") for i in range(n_fetched)]
+
+    with (
+        patch(
+            "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
+            return_value=fake_atoms,
+        ),
+        patch(
+            "dim_red.pipeline.dataset_cache.compute_soap",
+            side_effect=_fake_compute_soap(),
+        ),
+    ):
+        run_dir = run_single(config)
+
+    n_total = n_fetched * 2  # 1 original + 1 augmented copy per fetched structure
+    embeddings = np.load(run_dir / "embeddings.npz")
+    assert embeddings["embeddings"].shape == (n_total, 2)
+    dataset_atoms = read_atoms(run_dir / "dataset.extxyz", index=":")
+    assert len(dataset_atoms) == n_total
+    assert sum(a.info["augmented"] for a in dataset_atoms) == n_fetched
+
+
+def test_run_single_augmentation_supercell_radius_expands_single_atom_structures(
+    tmp_path,
+):
+    """A 1-atom periodic cell (like pyxtal can generate) has almost nothing
+    for jitter/vacancy augmentation to work with -- supercell_radius should
+    expand every fetched structure first, end-to-end through run_single, so
+    downstream artifacts reflect structures with more than 1 atom each.
+    """
+    n_fetched = 2
+    config = RunConfig(
+        fetch=FetchConfig(crystal_systems=["cubic"], limit_per_system=n_fetched),
+        soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
+        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
+        train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
+        augmentation=AugmentationConfig(
+            n_augmented=1,
+            jitter_probability=1.0,
+            jitter_std=0.05,
+            supercell_radius=5.0,
+            seed=0,
+        ),
+        seed=0,
+        output_dir=str(tmp_path / "runs"),
+    )
+
+    def _fake_periodic_atoms(symbol, material_id):
+        atoms = Atoms(
+            symbol, positions=[[0.0, 0.0, 0.0]], cell=(2.0, 2.0, 2.0), pbc=True
+        )
+        atoms.info["material_id"] = material_id
+        return atoms
+
+    fake_atoms = [_fake_periodic_atoms("Cu", f"mp-{i}") for i in range(n_fetched)]
+
+    with (
+        patch(
+            "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
+            return_value=fake_atoms,
+        ),
+        patch(
+            "dim_red.pipeline.dataset_cache.compute_soap",
+            side_effect=_fake_compute_soap(),
+        ),
+    ):
+        run_dir = run_single(config)
+
+    dataset_atoms = read_atoms(run_dir / "dataset.extxyz", index=":")
+    assert len(dataset_atoms) == n_fetched * 2  # 1 original + 1 augmented each
+    # perpendicular width 2.0, radius 5.0 -> ceil(10/2)=5 repeats/axis -> 125 atoms.
+    assert all(len(a) == 125 for a in dataset_atoms)
 
 
 def test_run_single_reuses_dataset_cache_across_runs(tmp_path):

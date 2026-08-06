@@ -270,17 +270,16 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
             use_spacegroup = aux_mode == "family_and_spacegroup"
 
         # Balanced batching (SupCon only) always groups by family first, and
-        # optionally by spacegroup within family -- independent of whether
-        # those labels also drive a SupCon *loss* term (use_family/
-        # use_spacegroup above). E.g. mode="spacegroup_only" +
-        # batching.strategy="balanced" still needs family_ids built here,
+        # always by spacegroup within family too (every spacegroup present
+        # by default, or a capped subset via balanced_params.S) --
+        # independent of whether those labels also drive a SupCon *loss*
+        # term (use_family/use_spacegroup above). E.g. mode="spacegroup_only"
+        # + batching.strategy="balanced" still needs family_ids built here,
         # purely for batch construction, even though the family loss term
         # itself stays inactive.
         balanced_batching = is_supcon and config.batching.strategy == "balanced"
         need_family_ids = use_family or balanced_batching
-        need_spacegroup_ids = use_spacegroup or (
-            balanced_batching and config.batching.balanced_params.S is not None
-        )
+        need_spacegroup_ids = use_spacegroup or balanced_batching
 
         family_classes: List[str] = []
         spacegroup_classes: List[int] = []
@@ -413,19 +412,21 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
                 batch_size=config.train.batch_size,
                 learning_rate=config.train.learning_rate,
                 tau=config.supcon.tau,
+                distance=config.supcon.distance,
                 seed=config.seed,
                 device=config.train.device,
                 **early_stopping_kwargs,
             )
             logger.info(
                 "Training SupCon encoder: encoder_hidden_dim=%s latent_dim=%d epochs=%d "
-                "batch_size=%d tau=%.3f lambda_norm=%.3f mode=%s device=%s batching=%s%s "
-                "early_stopping=%s",
+                "batch_size=%d tau=%.3f distance=%s lambda_norm=%.3f mode=%s device=%s "
+                "batching=%s%s early_stopping=%s",
                 config.vae.encoder_hidden_dim,
                 config.vae.latent_dim,
                 config.train.epochs,
                 config.train.batch_size,
                 config.supcon.tau,
+                config.supcon.distance,
                 config.supcon.lambda_norm,
                 aux_mode,
                 config.train.device,
@@ -482,10 +483,7 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
                     family_ids[train_idx] if balanced_batching else None
                 ),
                 batching_spacegroup_ids=(
-                    spacegroup_ids[train_idx]
-                    if balanced_batching
-                    and config.batching.balanced_params.S is not None
-                    else None
+                    spacegroup_ids[train_idx] if balanced_batching else None
                 ),
                 batching_P=config.batching.balanced_params.P,
                 batching_K=config.batching.balanced_params.K,

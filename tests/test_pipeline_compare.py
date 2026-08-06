@@ -542,7 +542,7 @@ def test_plot_latent_space_grid_skips_run_when_umap_unavailable(
     def _raise_import_error(*args, **kwargs):
         raise ImportError("umap-learn not installed")
 
-    monkeypatch.setattr(compare_module, "_make_umap", _raise_import_error)
+    monkeypatch.setattr(compare_module, "make_umap", _raise_import_error)
 
     out = tmp_path / "latent_grid.png"
     with caplog.at_level("WARNING", logger="dim_red.pipeline"):

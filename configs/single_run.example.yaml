@@ -19,6 +19,32 @@ soap:
   normalize_distances: false
   species: null # auto-detected from the fetched structures
 
+# Optional structure-level data augmentation, applied right after
+# fetch/pyxtal and before SOAP -- positional jitter (simulated thermal
+# noise: small Gaussian displacements of every atom) and/or vacancy removal
+# (randomly deleting atoms). Omit this block entirely (default) to disable
+# augmentation, current behavior unchanged. Every augmented copy is
+# guaranteed to have at least one of the two actually applied to it (a copy
+# where neither probability roll succeeds still gets one forced on) -- so if
+# only one mechanism is configured at all (e.g. vacancy_probability: 0.0,
+# jitter left on), that one applies to every augmented copy regardless of
+# its own probability. Example, commented out:
+# augmentation:
+#   n_augmented: 1 # augmented copies generated per structure
+#   keep_original: true # also keep the unmodified structure alongside them
+#   jitter_probability: 0.5 # chance, per augmented copy, that jitter applies at all
+#   jitter_std: 0.05 # Angstroms
+#   vacancy_probability: 0.0 # chance, per augmented copy, that vacancy removal applies at all
+#   vacancy_atom_probability: 0.05 # chance any individual atom is removed, once selected
+#   max_vacancies: null # null -> uncapped, short of the structure's own floor of 1 atom
+#   supercell_radius: null # Angstroms; null -> skip supercell expansion. Set
+#     # this (e.g. equal to soap.r_cut above) to first expand every structure
+#     # into a supercell that fits a sphere of this radius before augmenting
+#     # -- useful for very small unit cells (pyxtal can generate cells with
+#     # as few as 1-2 atoms) that otherwise have almost nothing to jitter/
+#     # remove.
+#   seed: null # null -> falls back to the top-level `seed`
+
 vae:
   encoder_hidden_dim: [128, 64]
   decoder_hidden_dim: null # null -> mirrors the encoder

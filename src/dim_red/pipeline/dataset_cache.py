@@ -10,6 +10,13 @@ Two data sources are supported, selected by ``RunConfig.data_source``:
 ``dim_red.generate`` -- imported lazily, only when actually used, since
 ``pyxtal`` isn't a hard dim_red dependency). ``build_dataset_for_run``
 dispatches between the two from a ``RunConfig``.
+
+Both data sources optionally run their structures through
+``dim_red.augmentation.augment_structures`` (thermal-noise-style positional
+jitter and/or vacancy removal) right after fetch/generation and before SOAP,
+when ``RunConfig.augmentation`` is set -- see ``_resolve_augmentation``. The
+augmentation settings are folded into the cache key (``_cache_key``/
+``_pyxtal_cache_key``) so different augmentation configs don't collide.
 """
 
 from __future__ import annotations
@@ -24,6 +31,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple, Un
 import numpy as np
 from ase.io import write as write_atoms
 
+from dim_red.augmentation import AugmentationConfig, augment_structures
 from dim_red.fetch import fetch_structures_by_crystal_system
 from dim_red.soap import compute_soap
 from dim_red.utils import standardize
@@ -34,32 +42,52 @@ if TYPE_CHECKING:
 logger = logging.getLogger("dim_red.pipeline")
 
 
+def _augmentation_payload(
+    augmentation: Optional[AugmentationConfig],
+) -> Optional[Dict[str, Any]]:
+    """Cache-key-safe representation of an augmentation config -- ``None``
+    when augmentation is disabled, so a config that never mentions
+    ``augmentation`` keeps producing the exact same cache key as before this
+    feature existed.
+    """
+    return dataclasses.asdict(augmentation) if augmentation is not None else None
+
+
 def _cache_key(
-    crystal_systems: Sequence[str], limit_per_system: int, soap_kwargs: Dict[str, Any]
+    crystal_systems: Sequence[str],
+    limit_per_system: int,
+    soap_kwargs: Dict[str, Any],
+    augmentation: Optional[AugmentationConfig] = None,
 ) -> str:
     """Stable hash identifying a dataset built from (crystal systems, fetch
-    limit, SOAP hyperparameters).
+    limit, SOAP hyperparameters, augmentation settings).
     """
     payload = {
         "crystal_systems": sorted(cs.lower() for cs in crystal_systems),
         "limit_per_system": limit_per_system,
         "soap_kwargs": {k: soap_kwargs[k] for k in sorted(soap_kwargs)},
+        "augmentation": _augmentation_payload(augmentation),
     }
     blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()[:16]
 
 
 def _pyxtal_cache_key(
-    pyxtal_config: "PyxtalConfig", seed: int, soap_kwargs: Dict[str, Any]
+    pyxtal_config: "PyxtalConfig",
+    seed: int,
+    soap_kwargs: Dict[str, Any],
+    augmentation: Optional[AugmentationConfig] = None,
 ) -> str:
     """Stable hash identifying a dataset built from (pyxtal generation
-    config, seed, SOAP hyperparameters). Prefixed so it never collides with
-    a ``_cache_key`` hash even if both happened to match numerically.
+    config, seed, SOAP hyperparameters, augmentation settings). Prefixed so
+    it never collides with a ``_cache_key`` hash even if both happened to
+    match numerically.
     """
     payload = {
         "pyxtal": dataclasses.asdict(pyxtal_config),
         "seed": seed,
         "soap_kwargs": {k: soap_kwargs[k] for k in sorted(soap_kwargs)},
+        "augmentation": _augmentation_payload(augmentation),
     }
     blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
     return "pyxtal-" + hashlib.sha256(blob).hexdigest()[:16]
@@ -152,6 +180,7 @@ def get_or_build_dataset(
     limit_per_system: int,
     cache_dir: Union[str, Path],
     api_key: Optional[str] = None,
+    augmentation: Optional[AugmentationConfig] = None,
 ) -> Tuple[np.ndarray, List[str], List[str], List[int], Path]:
     """Fetch structures, compute a global SOAP descriptor per structure, and
     standardize the result -- reusing a cached copy on disk when available.
@@ -165,6 +194,10 @@ def get_or_build_dataset(
         cache_dir: Directory where cached datasets (``<hash>.npz``/
             ``<hash>.extxyz``) live.
         api_key: Materials Project API key (falls back to ``MP_API_KEY``).
+        augmentation: Optional ``dim_red.augmentation.AugmentationConfig``
+            (thermal-noise-style jitter and/or vacancy removal), applied to
+            each crystal system's fetched structures before they're added to
+            the dataset. ``None`` (default) disables augmentation.
 
     Returns:
         ``(X_std, labels, material_ids, spacegroups, structures_path)``
@@ -175,7 +208,7 @@ def get_or_build_dataset(
     """
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    key = _cache_key(crystal_systems, limit_per_system, soap_kwargs)
+    key = _cache_key(crystal_systems, limit_per_system, soap_kwargs, augmentation)
     cache_path = cache_dir / f"{key}.npz"
     structures_path = _structures_cache_path(cache_path)
 
@@ -198,7 +231,17 @@ def get_or_build_dataset(
         atoms_list = fetch_structures_by_crystal_system(
             crystal_system=cs, api_key=api_key, limit=limit_per_system
         )
-        logger.info("Fetched %d structures for crystal_system=%s", len(atoms_list), cs)
+        n_fetched = len(atoms_list)
+        if augmentation is not None:
+            atoms_list = augment_structures(atoms_list, augmentation)
+            logger.info(
+                "Fetched %d structures for crystal_system=%s (%d after augmentation)",
+                n_fetched,
+                cs,
+                len(atoms_list),
+            )
+        else:
+            logger.info("Fetched %d structures for crystal_system=%s", n_fetched, cs)
         all_atoms.extend(atoms_list)
         labels.extend([cs.capitalize()] * len(atoms_list))
 
@@ -220,6 +263,7 @@ def get_or_build_pyxtal_dataset(
     seed: int,
     soap_kwargs: Dict[str, Any],
     cache_dir: Union[str, Path],
+    augmentation: Optional[AugmentationConfig] = None,
 ) -> Tuple[np.ndarray, List[str], List[str], List[int], Path]:
     """Generate a synthetic structure database with ``dim_red.generate``,
     compute a global SOAP descriptor per structure, and standardize the
@@ -236,6 +280,10 @@ def get_or_build_pyxtal_dataset(
         soap_kwargs: Keyword arguments for ``compute_soap`` minus ``average``.
         cache_dir: Directory where cached datasets (``<hash>.npz``/
             ``<hash>.extxyz``) live.
+        augmentation: Optional ``dim_red.augmentation.AugmentationConfig``
+            (thermal-noise-style jitter and/or vacancy removal), applied to
+            the generated structures before SOAP. ``None`` (default) disables
+            augmentation.
 
     Returns:
         Same shape as ``get_or_build_dataset``: ``(X_std, labels,
@@ -248,7 +296,7 @@ def get_or_build_pyxtal_dataset(
 
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    key = _pyxtal_cache_key(pyxtal_config, seed, soap_kwargs)
+    key = _pyxtal_cache_key(pyxtal_config, seed, soap_kwargs, augmentation)
     cache_path = cache_dir / f"{key}.npz"
     structures_path = _structures_cache_path(cache_path)
 
@@ -270,6 +318,15 @@ def get_or_build_pyxtal_dataset(
             "pyxtal generated no structures for the requested configuration."
         )
 
+    n_generated = len(all_atoms)
+    if augmentation is not None:
+        all_atoms = augment_structures(all_atoms, augmentation)
+        logger.info(
+            "Generated %d structures with pyxtal (%d after augmentation)",
+            n_generated,
+            len(all_atoms),
+        )
+
     labels = [a.info["family"] for a in all_atoms]
     material_ids = [a.info["material_id"] for a in all_atoms]
     spacegroups = [a.info["spacegroup"] for a in all_atoms]
@@ -281,6 +338,35 @@ def get_or_build_pyxtal_dataset(
     return X_std, labels, material_ids, spacegroups, structures_path
 
 
+def _resolve_augmentation(config: "RunConfig") -> Optional[AugmentationConfig]:
+    """Converts ``RunConfig.augmentation`` (``dim_red.pipeline.config``'s
+    own, ``dim_red.augmentation``-independent dataclass -- see that class's
+    docstring) into the real ``dim_red.augmentation.AugmentationConfig`` that
+    ``get_or_build_dataset``/``get_or_build_pyxtal_dataset`` actually use.
+    ``None`` when augmentation is disabled. Resolves ``seed`` the same way
+    ``build_dataset_for_run`` already does for ``config.pyxtal.seed``: falls
+    back to ``config.seed`` when ``config.augmentation.seed`` is ``None``.
+    """
+    if config.augmentation is None:
+        return None
+    seed = (
+        config.augmentation.seed
+        if config.augmentation.seed is not None
+        else config.seed
+    )
+    return AugmentationConfig(
+        n_augmented=config.augmentation.n_augmented,
+        keep_original=config.augmentation.keep_original,
+        jitter_probability=config.augmentation.jitter_probability,
+        jitter_std=config.augmentation.jitter_std,
+        vacancy_probability=config.augmentation.vacancy_probability,
+        vacancy_atom_probability=config.augmentation.vacancy_atom_probability,
+        max_vacancies=config.augmentation.max_vacancies,
+        supercell_radius=config.augmentation.supercell_radius,
+        seed=seed,
+    )
+
+
 def build_dataset_for_run(
     config: "RunConfig", cache_dir: Union[str, Path]
 ) -> Tuple[np.ndarray, List[str], List[str], List[int], Path]:
@@ -290,6 +376,7 @@ def build_dataset_for_run(
     know which data source a run uses. Same 5-element return shape as both:
     ``(X_std, labels, material_ids, spacegroups, structures_path)``.
     """
+    augmentation = _resolve_augmentation(config)
     if config.data_source == "pyxtal":
         # config.pyxtal.seed (if set) pins the generated dataset independently
         # of config.seed, so sweeping config.seed (e.g. repeated-seed training
@@ -300,6 +387,7 @@ def build_dataset_for_run(
             seed=seed,
             soap_kwargs=config.soap.as_kwargs(),
             cache_dir=cache_dir,
+            augmentation=augmentation,
         )
     return get_or_build_dataset(
         crystal_systems=config.fetch.crystal_systems,
@@ -307,4 +395,5 @@ def build_dataset_for_run(
         limit_per_system=config.fetch.limit_per_system,
         cache_dir=cache_dir,
         api_key=config.fetch.api_key,
+        augmentation=augmentation,
     )

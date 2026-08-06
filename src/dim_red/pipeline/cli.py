@@ -6,6 +6,7 @@ Preferred usage (console scripts installed by ``pip install -e .``):
     dimred-sweep configs/sweep.example.yaml
     dimred-rerun runs/20260728-1/hd-128_cs-cubic
     dimred-compare runs/20260728-1
+    dimred-apply new_structures.extxyz runs/20260728-1/hd-128_cs-cubic
 
 Equivalent, flag-based form (``python -m``), kept for scripting/backward
 compatibility:
@@ -13,6 +14,7 @@ compatibility:
     python -m dim_red.pipeline.cli --config configs/sweep.example.yaml --sweep
     python -m dim_red.pipeline.cli --rerun runs/20260728-1/hd-128_cs-cubic
     python -m dim_red.pipeline.cli --compare runs/20260728-1
+    python -m dim_red.pipeline.cli --apply new_structures.extxyz --apply-run runs/20260728-1/hd-128_cs-cubic
 
 Note: no single-letter flags are defined here on purpose. ``dim_red.vae.training``
 imports ``learned_optimization``, which parses ``sys.argv`` with ``absl`` at
@@ -248,6 +250,85 @@ def compare_command(argv=None) -> None:
     )
 
 
+def _do_apply(
+    structures_path: str,
+    run_dir: str,
+    output_dir: Optional[str],
+    label_field: Optional[str],
+    umap_n_neighbors: Optional[int] = None,
+    umap_min_dist: Optional[float] = None,
+    umap_metric: Optional[str] = None,
+    umap_random_state: Optional[int] = None,
+) -> Path:
+    from dim_red.pipeline.compare import LatentUmapParams
+    from dim_red.pipeline.inference import apply_model_to_structures
+
+    _configure_console_logging()
+    umap_params = LatentUmapParams(
+        n_neighbors=umap_n_neighbors,
+        min_dist=umap_min_dist,
+        metric=umap_metric,
+        random_state=umap_random_state,
+    )
+    result_dir = apply_model_to_structures(
+        run_dir,
+        structures_path,
+        output_dir=output_dir,
+        label_field=label_field,
+        umap_params=umap_params,
+    )
+    print(f"Applied structures saved to {result_dir}")
+    return result_dir
+
+
+def apply_command(argv=None) -> None:
+    """``dimred-apply <structures> <run_dir>``: apply an already-trained run's
+    model to new structures and plot them in its latent space alongside the
+    original training dataset.
+    """
+    parser = argparse.ArgumentParser(
+        description="Apply an already-trained dim_red run's model to new "
+        "structures, and plot them in its latent space alongside the "
+        "original training dataset."
+    )
+    parser.add_argument(
+        "structures",
+        type=str,
+        help="Path to an extended-XYZ file with the structures to apply the model to.",
+    )
+    parser.add_argument(
+        "run_dir",
+        type=str,
+        help="Path to a completed run directory (needs config.yaml, "
+        "dataset.extxyz, model_params.msgpack and embeddings.npz).",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Where to write the applied embeddings/plot (default: <run_dir>/applied).",
+    )
+    parser.add_argument(
+        "--label-field",
+        type=str,
+        default=None,
+        help="An atoms.info key to color/label the new structures by (default: "
+        "a single 'Applied structure' group).",
+    )
+    _add_umap_args(parser)
+    args = parser.parse_args(argv)
+    _do_apply(
+        args.structures,
+        args.run_dir,
+        args.output_dir,
+        args.label_field,
+        umap_n_neighbors=args.umap_n_neighbors,
+        umap_min_dist=args.umap_min_dist,
+        umap_metric=args.umap_metric,
+        umap_random_state=args.umap_random_state,
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Unified fetch -> SOAP -> VAE training pipeline for dim_red."
@@ -290,14 +371,45 @@ def _build_parser() -> argparse.ArgumentParser:
         help="With --compare: also write the data behind each comparison "
         "plot to a CSV file next to its PNG (default: false, PNGs only).",
     )
+    parser.add_argument(
+        "--apply",
+        type=str,
+        default=None,
+        help=(
+            "Path to an extended-XYZ file with structures to apply an "
+            "already-trained run's model to; requires --apply-run. Plots "
+            "them in that run's latent space alongside its original "
+            "training dataset instead of running anything."
+        ),
+    )
+    parser.add_argument(
+        "--apply-run",
+        type=str,
+        default=None,
+        help="With --apply: path to the completed run directory whose model to apply.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="With --apply: where to write the applied embeddings/plot "
+        "(default: <apply-run>/applied).",
+    )
+    parser.add_argument(
+        "--label-field",
+        type=str,
+        default=None,
+        help="With --apply: an atoms.info key to color/label the new "
+        "structures by (default: a single 'Applied structure' group).",
+    )
     _add_umap_args(parser)
     return parser
 
 
 def main(argv=None) -> None:
     """Flag-based entrypoint for ``python -m dim_red.pipeline.cli``; prefer the
-    dedicated ``dimred-run``/``dimred-sweep``/``dimred-rerun``/``dimred-compare``
-    console scripts for interactive use.
+    dedicated ``dimred-run``/``dimred-sweep``/``dimred-rerun``/``dimred-compare``/
+    ``dimred-apply`` console scripts for interactive use.
     """
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -314,12 +426,29 @@ def main(argv=None) -> None:
         )
         return
 
+    if args.apply:
+        if not args.apply_run:
+            parser.error("--apply requires --apply-run.")
+        _do_apply(
+            args.apply,
+            args.apply_run,
+            args.output_dir,
+            args.label_field,
+            umap_n_neighbors=args.umap_n_neighbors,
+            umap_min_dist=args.umap_min_dist,
+            umap_metric=args.umap_metric,
+            umap_random_state=args.umap_random_state,
+        )
+        return
+
     if args.rerun:
         _do_rerun(args.rerun, args.cache_dir)
         return
 
     if not args.config:
-        parser.error("--config is required unless --rerun or --compare is used.")
+        parser.error(
+            "--config is required unless --rerun, --compare or --apply is used."
+        )
 
     if args.sweep:
         _do_sweep(args.config, args.cache_dir)

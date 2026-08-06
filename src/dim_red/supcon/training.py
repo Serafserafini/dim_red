@@ -37,9 +37,11 @@ argument, ``0.0`` -- disabled -- by default) adds ``lambda_norm *
 norm_penalty(z)`` to the total loss. Unlike ``lambda_family``/
 ``lambda_spacegroup``, it isn't gated by ``mode``: it doesn't depend on any
 label, so it's simply in effect whenever it's non-zero. It exists because
-``supcon_loss``'s squared-Euclidean-distance similarity has no built-in
-scale normalization (unlike a cosine-similarity formulation), so nothing
-otherwise stops the encoder from inflating ``z``'s norm without bound.
+``supcon_loss``'s default ``distance == "euclidean"`` similarity has no
+built-in scale normalization, so nothing otherwise stops the encoder from
+inflating ``z``'s norm without bound (with ``distance == "cosine"``,
+similarity is already bounded to ``[-1, 1]`` by the L2-normalization, so
+``lambda_norm`` is typically unnecessary there).
 ``lambda_norm`` follows the same "config-layer input, not part of
 ``TrainConfig``" placement as ``lambda_family``/``lambda_spacegroup`` (see
 ``dim_red.pipeline.config.SupConConfig.lambda_norm``) since it's a loss-term
@@ -65,6 +67,7 @@ Array = jax.Array
 logger = logging.getLogger("dim_red.pipeline")
 
 _BATCHING_STRATEGIES = ("random", "balanced")
+_DISTANCE_METRICS = ("euclidean", "cosine")
 
 
 @dataclass(frozen=True)
@@ -83,8 +86,15 @@ class TrainConfig:
         batch_size: Number of samples per mini-batch.
         learning_rate: Kept for API compatibility; VeLO is still used as
             optimizer backend, same as ``vae``/``autoencoder``.
-        tau: Temperature dividing cosine similarities before the softmax
-            inside the SupCon loss.
+        tau: Temperature dividing similarities before the softmax inside the
+            SupCon loss.
+        distance: Which similarity ``supcon_loss`` computes: ``"euclidean"``
+            (default, current/original behavior -- negative squared
+            Euclidean distance, unbounded scale, pairs with
+            ``lambda_norm``/``norm_penalty`` if that's a problem) or
+            ``"cosine"`` (cosine similarity between L2-normalized ``z``
+            vectors -- bounded to ``[-1, 1]`` by construction, so
+            ``lambda_norm`` is typically unnecessary with it).
         seed: Seed controlling batch shuffling.
         device: JAX backend string (for example ``"cpu"`` or ``"gpu"``).
         early_stopping: If True, stop training once ``val_loss`` (the full
@@ -108,6 +118,7 @@ class TrainConfig:
     batch_size: int = 32
     learning_rate: float = 1e-3
     tau: float = 0.1
+    distance: str = "euclidean"
     seed: int = 42
     device: str = "cpu"
     early_stopping: bool = False
@@ -116,7 +127,13 @@ class TrainConfig:
     early_stopping_restore_best: bool = True
 
 
-def supcon_loss(z: Array, labels: Array, tau: float, eps: float = 1e-8) -> Array:
+def supcon_loss(
+    z: Array,
+    labels: Array,
+    tau: float,
+    distance: str = "euclidean",
+    eps: float = 1e-8,
+) -> Array:
     """Supervised Contrastive loss (Khosla et al. 2020) for one batch and one
     label level.
 
@@ -134,33 +151,49 @@ def supcon_loss(z: Array, labels: Array, tau: float, eps: float = 1e-8) -> Array
     otherwise poison gradients in that degenerate case.
 
     Args:
-        z: Latent batch, shape ``(batch, latent_dim)``. *Not* L2-normalized
-            internally -- similarity is negative squared Euclidean distance,
-            not cosine similarity (see below), so ``z``'s own scale matters;
-            pair with ``lambda_norm``/``norm_penalty`` if that's a problem.
+        z: Latent batch, shape ``(batch, latent_dim)``. Only L2-normalized
+            internally when ``distance == "cosine"``; for ``"euclidean"``
+            (default) ``z``'s own scale matters, since similarity is negative
+            squared Euclidean distance with no fixed range -- pair with
+            ``lambda_norm``/``norm_penalty`` if that's a problem.
         labels: Integer label ids, shape ``(batch,)``.
         tau: Temperature dividing similarities before the softmax.
-        eps: Unused by the current (squared-Euclidean-distance) similarity;
-            kept for API compatibility.
+        distance: ``"euclidean"`` (default -- negative squared Euclidean
+            distance, ``sim_ij = -||z_i - z_j||^2``, the original formulation
+            here) or ``"cosine"`` (cosine similarity between L2-normalized
+            vectors, ``sim_ij = (z_i / ||z_i||) . (z_j / ||z_j||)``, bounded
+            to ``[-1, 1]`` -- closer to the more common SupCon formulation).
+        eps: Added under the square root when normalizing ``z`` for
+            ``distance == "cosine"`` to avoid dividing by zero for a
+            near-zero-norm row. Unused for ``distance == "euclidean"``.
 
     Returns:
         Scalar loss, the mean over anchors with ``|P(i)| > 0`` of
         ``-log(sum_{p in P(i)} exp(sim_ip/tau) / sum_{a in A(i)} exp(sim_ia/tau))``
-        (``0.0`` if no anchor in the batch has any positive), where
-        ``sim_ij = -||z_i - z_j||^2`` (negative squared Euclidean distance,
-        *not* cosine similarity -- unlike the more common SupCon
-        formulation, so ``sim`` has no fixed range and is sensitive to
-        ``z``'s absolute scale).
+        (``0.0`` if no anchor in the batch has any positive), where ``sim``
+        is chosen by ``distance`` (see above).
+
+    Raises:
+        ValueError: If ``distance`` is not one of ``"euclidean"``/``"cosine"``.
     """
+    if distance not in _DISTANCE_METRICS:
+        raise ValueError(
+            f"distance must be one of {_DISTANCE_METRICS}, got {distance!r}"
+        )
+
     batch_size = z.shape[0]
     if batch_size < 2:
         return jnp.asarray(0.0, dtype=z.dtype)
 
-    sq_norms = jnp.sum(z**2, axis=-1, keepdims=True)
-    sq_dists = sq_norms + sq_norms.T - 2 * (z @ z.T)
-    # Floating-point error can push same-point distances slightly negative.
-    sq_dists = jnp.maximum(sq_dists, 0.0)
-    sim = -sq_dists / tau
+    if distance == "cosine":
+        z_norm = z / jnp.sqrt(jnp.sum(z**2, axis=-1, keepdims=True) + eps)
+        sim = (z_norm @ z_norm.T) / tau
+    else:
+        sq_norms = jnp.sum(z**2, axis=-1, keepdims=True)
+        sq_dists = sq_norms + sq_norms.T - 2 * (z @ z.T)
+        # Floating-point error can push same-point distances slightly negative.
+        sq_dists = jnp.maximum(sq_dists, 0.0)
+        sim = -sq_dists / tau
 
     self_mask = jnp.eye(batch_size, dtype=bool)
     positive_mask = (labels[:, None] == labels[None, :]) & ~self_mask
@@ -193,12 +226,13 @@ def norm_penalty(z: Array) -> Array:
     regularizer (weighted by ``lambda_norm``, see this module's docstring)
     discouraging unbounded embedding growth.
 
-    Matters specifically because ``supcon_loss``'s squared-Euclidean-distance
-    similarity has no built-in scale normalization (unlike a
-    cosine-similarity formulation, which is scale-invariant by construction):
+    Matters specifically for ``supcon_loss``'s default ``distance ==
+    "euclidean"`` similarity, which has no built-in scale normalization:
     without this penalty, nothing stops the encoder from trivially shrinking
     pairwise distances between same-label points by inflating ``z``'s norm
-    overall, rather than actually learning meaningful directions.
+    overall, rather than actually learning meaningful directions. Largely
+    redundant with ``distance == "cosine"``, whose L2-normalization already
+    makes similarity scale-invariant by construction.
 
     Args:
         z: Latent batch, shape ``(batch, latent_dim)``.
@@ -234,6 +268,7 @@ def _make_train_step(
     model: SupConEncoder,
     tx,
     tau: float,
+    distance: str,
     lambda_family,
     lambda_spacegroup,
     lambda_norm,
@@ -264,10 +299,10 @@ def _make_train_step(
             family_loss = jnp.asarray(0.0)
             spacegroup_loss = jnp.asarray(0.0)
             if has_family:
-                family_loss = supcon_loss(z, batch_family, tau)
+                family_loss = supcon_loss(z, batch_family, tau, distance)
                 total = total + lambda_family * family_loss
             if has_spacegroup:
-                spacegroup_loss = supcon_loss(z, batch_spacegroup, tau)
+                spacegroup_loss = supcon_loss(z, batch_spacegroup, tau, distance)
                 total = total + lambda_spacegroup * spacegroup_loss
             penalty = norm_penalty(z)
             total = total + lambda_norm * penalty
@@ -289,6 +324,7 @@ def _make_train_step(
 def _make_eval_step(
     model: SupConEncoder,
     tau: float,
+    distance: str,
     lambda_family,
     lambda_spacegroup,
     lambda_norm,
@@ -309,10 +345,10 @@ def _make_eval_step(
         family_loss = jnp.asarray(0.0)
         spacegroup_loss = jnp.asarray(0.0)
         if has_family:
-            family_loss = supcon_loss(z, batch_family, tau)
+            family_loss = supcon_loss(z, batch_family, tau, distance)
             total = total + lambda_family * family_loss
         if has_spacegroup:
-            spacegroup_loss = supcon_loss(z, batch_spacegroup, tau)
+            spacegroup_loss = supcon_loss(z, batch_spacegroup, tau, distance)
             total = total + lambda_spacegroup * spacegroup_loss
         penalty = norm_penalty(z)
         total = total + lambda_norm * penalty
@@ -383,8 +419,10 @@ def train_supcon(
             separately from ``train_family_ids`` keeps the two independent
             rather than one flag accidentally gating the other).
         batching_spacegroup_ids: Integer spacegroup id per training row,
-            required when ``batching_strategy == "balanced"`` and
-            ``batching_S`` is not ``None``. Same independence from
+            always required when ``batching_strategy == "balanced"`` --
+            spacegroup stratification is always applied (``batching_S ==
+            None`` means "use every spacegroup present per family", not
+            "skip stratification"). Same independence from
             ``train_spacegroup_ids`` as ``batching_family_ids``.
         batching_P: Number of families per balanced batch (``None`` -> all
             families present in ``batching_family_ids``). Ignored unless
@@ -393,8 +431,9 @@ def train_supcon(
             Required (positive integer) when ``batching_strategy ==
             "balanced"``; ignored otherwise.
         batching_S: Number of spacegroups to stratify by within each chosen
-            family (``None`` -> family-only balancing). Ignored unless
-            ``batching_strategy == "balanced"``.
+            family (``None`` -> every spacegroup present for that family,
+            split as evenly as possible). Ignored unless ``batching_strategy
+            == "balanced"``.
 
     Returns:
         Dictionary with per-epoch losses, one entry per epoch actually run
@@ -422,6 +461,10 @@ def train_supcon(
         raise ValueError("batch_size must be a positive integer")
     if config.tau <= 0:
         raise ValueError("tau must be > 0")
+    if config.distance not in _DISTANCE_METRICS:
+        raise ValueError(
+            f"distance must be one of {_DISTANCE_METRICS}, got {config.distance!r}"
+        )
     if lambda_family < 0:
         raise ValueError("lambda_family must be >= 0")
     if lambda_spacegroup < 0:
@@ -466,9 +509,12 @@ def train_supcon(
                 "batching_K must be a positive integer when "
                 "batching_strategy='balanced'"
             )
-        if batching_S is not None and batching_spacegroup_ids is None:
+        if batching_spacegroup_ids is None:
             raise ValueError(
-                "batching_S requires batching_spacegroup_ids to also be given"
+                "batching_strategy='balanced' requires batching_spacegroup_ids "
+                "(spacegroup stratification is always applied -- batching_S="
+                "None means 'use every spacegroup present per family', not "
+                "'skip spacegroup stratification')"
             )
 
     devices = jax.devices(config.device)
@@ -502,11 +548,7 @@ def train_supcon(
 
     if balanced_batching:
         batching_family_np = np.asarray(batching_family_ids, dtype=np.int32)
-        batching_spacegroup_np = (
-            np.asarray(batching_spacegroup_ids, dtype=np.int32)
-            if batching_S is not None
-            else None
-        )
+        batching_spacegroup_np = np.asarray(batching_spacegroup_ids, dtype=np.int32)
         n_train_families = len(np.unique(batching_family_np))
         effective_P = (
             n_train_families
@@ -554,6 +596,7 @@ def train_supcon(
         model,
         tx,
         config.tau,
+        config.distance,
         lambda_family_jax,
         lambda_spacegroup_jax,
         lambda_norm_jax,
@@ -563,6 +606,7 @@ def train_supcon(
     eval_step = _make_eval_step(
         model,
         config.tau,
+        config.distance,
         lambda_family_jax,
         lambda_spacegroup_jax,
         lambda_norm_jax,

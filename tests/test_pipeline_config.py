@@ -7,6 +7,7 @@ import pytest
 import yaml
 
 from dim_red.pipeline.config import (
+    AugmentationConfig,
     AuxHeadsConfig,
     BalancedBatchingParams,
     BatchingConfig,
@@ -279,6 +280,99 @@ def test_aux_heads_config_rejects_invalid_mode():
         AuxHeadsConfig(mode="bogus")
 
 
+# --- augmentation ------------------------------------------------------------
+
+
+def test_run_config_defaults_augmentation_to_none(tmp_path):
+    config_path = _write_yaml(tmp_path / "run.yaml", _single_run_dict())
+    config = load_run_config(config_path)
+    assert config.augmentation is None
+
+
+def test_run_config_parses_augmentation_block(tmp_path):
+    d = _single_run_dict()
+    d["augmentation"] = {
+        "n_augmented": 3,
+        "keep_original": False,
+        "jitter_probability": 1.0,
+        "jitter_std": 0.1,
+        "vacancy_probability": 0.5,
+        "vacancy_atom_probability": 0.2,
+        "max_vacancies": 2,
+        "supercell_radius": 5.0,
+        "seed": 123,
+    }
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+
+    assert config.augmentation == AugmentationConfig(
+        n_augmented=3,
+        keep_original=False,
+        jitter_probability=1.0,
+        jitter_std=0.1,
+        vacancy_probability=0.5,
+        vacancy_atom_probability=0.2,
+        max_vacancies=2,
+        supercell_radius=5.0,
+        seed=123,
+    )
+
+
+def test_augmentation_config_seed_defaults_to_none(tmp_path):
+    d = _single_run_dict()
+    d["augmentation"] = {"n_augmented": 1}
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+    assert config.augmentation.seed is None
+
+
+def test_augmentation_config_supercell_radius_defaults_to_none(tmp_path):
+    d = _single_run_dict()
+    d["augmentation"] = {"n_augmented": 1}
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+    assert config.augmentation.supercell_radius is None
+
+
+def test_run_config_to_dict_roundtrips_augmentation_block(tmp_path):
+    d = _single_run_dict()
+    d["augmentation"] = {
+        "n_augmented": 2,
+        "vacancy_probability": 0.3,
+        "supercell_radius": 6.0,
+        "seed": 7,
+    }
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+
+    saved_path = _write_yaml(tmp_path / "saved.yaml", run_config_to_dict(config))
+    reloaded = load_run_config(saved_path)
+
+    assert reloaded == config
+    assert reloaded.augmentation.n_augmented == 2
+    assert reloaded.augmentation.vacancy_probability == 0.3
+    assert reloaded.augmentation.supercell_radius == 6.0
+    assert reloaded.augmentation.seed == 7
+
+
+def test_run_config_to_dict_omits_augmentation_block_when_none(tmp_path):
+    config_path = _write_yaml(tmp_path / "run.yaml", _single_run_dict())
+    config = load_run_config(config_path)
+    saved = run_config_to_dict(config)
+    assert "augmentation" not in saved
+
+
+def test_augmentation_config_validates_probabilities():
+    with pytest.raises(ValueError, match="jitter_probability"):
+        AugmentationConfig(jitter_probability=1.5)
+    with pytest.raises(ValueError, match="vacancy_probability"):
+        AugmentationConfig(vacancy_probability=-0.1)
+    with pytest.raises(ValueError, match="jitter_std"):
+        AugmentationConfig(jitter_std=-1.0)
+    with pytest.raises(ValueError, match="max_vacancies"):
+        AugmentationConfig(max_vacancies=-1)
+    with pytest.raises(ValueError, match="n_augmented"):
+        AugmentationConfig(n_augmented=-1)
+    with pytest.raises(ValueError, match="supercell_radius"):
+        AugmentationConfig(supercell_radius=0.0)
+
+
 def test_run_config_parses_aux_heads_block(tmp_path):
     d = _single_run_dict()
     d["aux_heads"] = {"mode": "family_only", "lambda_family": 2.0, "head_hidden_dim": 8}
@@ -325,6 +419,20 @@ def test_supcon_config_rejects_invalid_mode():
 )
 def test_supcon_config_accepts_all_valid_modes(mode):
     assert SupConConfig(mode=mode).mode == mode
+
+
+def test_supcon_config_defaults_distance_to_euclidean():
+    assert SupConConfig().distance == "euclidean"
+
+
+def test_supcon_config_rejects_invalid_distance():
+    with pytest.raises(ValueError, match="supcon.distance must be one of"):
+        SupConConfig(distance="bogus")
+
+
+@pytest.mark.parametrize("distance", ["euclidean", "cosine"])
+def test_supcon_config_accepts_all_valid_distances(distance):
+    assert SupConConfig(distance=distance).distance == distance
 
 
 def test_run_config_parses_model_kind_supcon(tmp_path):

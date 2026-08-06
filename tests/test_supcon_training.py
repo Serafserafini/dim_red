@@ -66,6 +66,41 @@ def test_supcon_loss_batch_size_one_returns_zero():
     assert float(loss) == 0.0
 
 
+def test_supcon_loss_cosine_matches_manual_computation():
+    # Two orthogonal unit vectors (label 0, mutual positives) plus one point
+    # anti-parallel to the first (label 1, a singleton -- no positive).
+    z = jnp.array([[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0]])
+    labels = jnp.array([0, 0, 1])
+    tau = 1.0
+
+    loss = supcon_loss(z, labels, tau, distance="cosine")
+
+    # cosine sim: (0,1)=0, (0,2)=-1, (1,2)=0. Anchor 0: A(0)={1,2},
+    # sim/tau={0,-1} -> per_anchor(0) = logsumexp(0,-1) - sim(0,1) =
+    # log(1+e^-1). Anchor 1: A(1)={0,2}, sim/tau={0,0} -> per_anchor(1) =
+    # logsumexp(0,0) - sim(1,0) = log(2). Anchor 2 (label 1) is a singleton,
+    # excluded. Mean over anchors 0 and 1.
+    expected = (math.log(1.0 + math.exp(-1.0)) + math.log(2.0)) / 2.0
+    assert float(loss) == pytest.approx(expected, abs=1e-5)
+
+
+def test_supcon_loss_cosine_scale_invariant():
+    z = jnp.array([[1.0, 0.0], [0.0, 1.0], [-1.0, 0.5]])
+    labels = jnp.array([0, 0, 1])
+    tau = 0.5
+
+    loss_unit = supcon_loss(z, labels, tau, distance="cosine")
+    loss_scaled = supcon_loss(z * 100.0, labels, tau, distance="cosine")
+    assert float(loss_unit) == pytest.approx(float(loss_scaled), abs=1e-5)
+
+
+def test_supcon_loss_rejects_invalid_distance():
+    z = jnp.array([[1.0, 0.0], [0.0, 1.0]])
+    labels = jnp.array([0, 1])
+    with pytest.raises(ValueError, match="distance"):
+        supcon_loss(z, labels, tau=0.1, distance="manhattan")
+
+
 def _make_split_db(n=40, n_features=5, val_ratio=0.25, seed=0):
     rng = np.random.default_rng(seed)
     X = rng.normal(size=(n, n_features)).astype(np.float32)
@@ -196,6 +231,49 @@ def test_train_supcon_family_ids_must_be_given_with_val_ids():
         )
 
 
+def test_train_supcon_rejects_invalid_distance():
+    train_db, val_db = _make_split_db(n=40)
+    model = SupConEncoder(input_dim=5, encoder_hidden_dim=[8], latent_dim=3, seed=0)
+    config = TrainConfig(epochs=1, batch_size=8, seed=0, device="cpu", distance="bogus")
+    family_ids = np.zeros(40, dtype=np.int32)
+
+    with pytest.raises(ValueError, match="distance must be one of"):
+        train_supcon(
+            model,
+            train_db,
+            val_db,
+            config,
+            train_family_ids=family_ids[:30],
+            val_family_ids=family_ids[30:],
+        )
+
+
+def test_train_supcon_cosine_distance_returns_history():
+    n = 40
+    train_db, val_db = _make_split_db(n=n)
+    train_idx, val_idx = _split_indices_like_train_val_split(n, 0.25, 0)
+    rng = np.random.default_rng(0)
+    family_ids = rng.integers(0, 3, size=n).astype(np.int32)
+
+    model = SupConEncoder(input_dim=5, encoder_hidden_dim=[8], latent_dim=3, seed=0)
+    config = TrainConfig(
+        epochs=2, batch_size=8, seed=0, device="cpu", distance="cosine"
+    )
+
+    history = train_supcon(
+        model,
+        train_db,
+        val_db,
+        config,
+        train_family_ids=family_ids[train_idx],
+        val_family_ids=family_ids[val_idx],
+    )
+
+    assert len(history["train_loss"]) == 2
+    assert all(math.isfinite(v) for v in history["train_loss"])
+    assert all(math.isfinite(v) for v in history["val_loss"])
+
+
 def test_train_supcon_invalid_batching_strategy():
     train_db, val_db = _make_split_db(n=40)
     model = SupConEncoder(input_dim=5, encoder_hidden_dim=[8], latent_dim=3, seed=0)
@@ -255,7 +333,7 @@ def test_train_supcon_balanced_batching_requires_positive_K():
         )
 
 
-def test_train_supcon_balanced_batching_S_requires_spacegroup_ids():
+def test_train_supcon_balanced_batching_requires_spacegroup_ids():
     n = 40
     train_db, val_db = _make_split_db(n=n)
     train_idx, val_idx = _split_indices_like_train_val_split(n, 0.25, 0)
@@ -264,7 +342,10 @@ def test_train_supcon_balanced_batching_S_requires_spacegroup_ids():
     rng = np.random.default_rng(1)
     family_ids = rng.integers(0, 3, size=n).astype(np.int32)
 
-    with pytest.raises(ValueError, match="batching_S requires batching_spacegroup_ids"):
+    # Spacegroup stratification is always applied for balanced batching now
+    # (S=None means "use every spacegroup present", not "skip") -- so
+    # batching_spacegroup_ids is required regardless of whether S is given.
+    with pytest.raises(ValueError, match="requires batching_spacegroup_ids"):
         train_supcon(
             model,
             train_db,
@@ -275,7 +356,6 @@ def test_train_supcon_balanced_batching_S_requires_spacegroup_ids():
             batching_strategy="balanced",
             batching_family_ids=family_ids[train_idx],
             batching_K=4,
-            batching_S=2,
         )
 
 
@@ -328,6 +408,7 @@ def test_train_supcon_balanced_batching_logs_warning_about_ignored_batch_size(ca
     train_idx, val_idx = _split_indices_like_train_val_split(n, 0.25, 0)
     rng = np.random.default_rng(1)
     family_ids = rng.integers(0, 4, size=n).astype(np.int32)
+    spacegroup_ids = rng.integers(0, 8, size=n).astype(np.int32)
 
     model = SupConEncoder(input_dim=5, encoder_hidden_dim=[8], latent_dim=3, seed=0)
     config = TrainConfig(epochs=1, batch_size=8, tau=0.1, seed=0, device="cpu")
@@ -342,6 +423,7 @@ def test_train_supcon_balanced_batching_logs_warning_about_ignored_batch_size(ca
             val_family_ids=family_ids[val_idx],
             batching_strategy="balanced",
             batching_family_ids=family_ids[train_idx],
+            batching_spacegroup_ids=spacegroup_ids[train_idx],
             batching_K=5,
         )
 
@@ -372,6 +454,7 @@ def test_train_supcon_balanced_batching_decoupled_from_loss_family_flag():
         lambda_spacegroup=1.0,
         batching_strategy="balanced",
         batching_family_ids=family_ids[train_idx],
+        batching_spacegroup_ids=spacegroup_ids[train_idx],
         batching_K=5,
     )
 

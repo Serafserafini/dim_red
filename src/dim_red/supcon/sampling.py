@@ -1,7 +1,8 @@
 """
 Balanced batch sampler for SupCon training: an alternative to plain random
 shuffling that guarantees every batch contains multiple examples per crystal
-family (and, optionally, per spacegroup within each chosen family), so the
+family, further stratified per spacegroup within each chosen family (every
+spacegroup present by default, or a subset if capped via ``S``), so the
 SupCon loss (``dim_red.supcon.training.supcon_loss``) reliably has positives
 available for every anchor -- useful for datasets less balanced than the
 pyxtal-generated one this package was originally built against.
@@ -38,7 +39,7 @@ def _sample_indices(pool: np.ndarray, n: int, rng: np.random.Generator) -> np.nd
 
 def balanced_batch_indices(
     family_ids: np.ndarray,
-    spacegroup_ids: Optional[np.ndarray],
+    spacegroup_ids: np.ndarray,
     P: Optional[int],
     K: int,
     S: Optional[int],
@@ -48,23 +49,25 @@ def balanced_batch_indices(
 
     Chooses ``P`` families (all families present when ``P`` is ``None``,
     clamped down with a warning if ``P`` exceeds what's available), then for
-    each chosen family either:
-
-    - samples ``K`` rows directly from that family (``S`` is ``None``), or
-    - chooses ``S`` spacegroups within that family (clamped down with a
-      warning if ``S`` exceeds the spacegroups actually present for that
-      family) and splits ``K`` across them as evenly as possible
-      (``K // S_eff``, with the remainder ``K % S_eff`` going to the first
-      few chosen spacegroups), sampling that many rows from each.
+    each chosen family chooses ``S`` spacegroups within it -- *all*
+    spacegroups present for that family when ``S`` is ``None`` (the default:
+    no clamping/warning needed, since "all" can't be exceeded), otherwise
+    ``S`` (clamped down with a warning if it exceeds the spacegroups actually
+    present for that family) -- and splits ``K`` across the chosen
+    spacegroups as evenly as possible (``K // S_eff``, with the remainder
+    ``K % S_eff`` going to the first few chosen spacegroups), sampling that
+    many rows from each.
 
     Args:
         family_ids: Integer family id per row, shape ``(n_rows,)``.
         spacegroup_ids: Integer spacegroup id per row, shape ``(n_rows,)``.
-            Required (not ``None``) when ``S`` is not ``None``.
+            Always required now: spacegroup stratification is always
+            applied, ``S=None`` meaning "all spacegroups present", not "skip
+            stratification".
         P: Number of families to include, or ``None`` for all present.
         K: Number of examples per chosen family.
         S: Number of spacegroups to stratify by within each chosen family,
-            or ``None`` to skip spacegroup stratification.
+            or ``None`` to use every spacegroup present for that family.
         rng: Numpy random generator, reused across batches/epochs by the
             caller for a single reproducible stream.
 
@@ -93,22 +96,21 @@ def balanced_batch_indices(
     for family in chosen_families:
         family_pool = np.flatnonzero(family_ids == family)
 
-        if S is None:
-            batch_index_chunks.append(_sample_indices(family_pool, K, rng))
-            continue
-
         family_spacegroups = np.unique(spacegroup_ids[family_pool])
         n_sg_available = len(family_spacegroups)
-        S_eff = min(S, n_sg_available)
-        if S > n_sg_available:
-            logger.warning(
-                "batching.balanced_params.S=%d exceeds %d spacegroups present "
-                "for family %s; clamping to %d",
-                S,
-                n_sg_available,
-                family,
-                n_sg_available,
-            )
+        if S is None:
+            S_eff = n_sg_available
+        else:
+            S_eff = min(S, n_sg_available)
+            if S > n_sg_available:
+                logger.warning(
+                    "batching.balanced_params.S=%d exceeds %d spacegroups "
+                    "present for family %s; clamping to %d",
+                    S,
+                    n_sg_available,
+                    family,
+                    n_sg_available,
+                )
         if S_eff > K:
             logger.warning(
                 "batching.balanced_params.S=%d > K=%d for family %s; only %d "
@@ -137,7 +139,7 @@ def balanced_batch_indices(
 def iter_balanced_batches(
     arrays: Tuple[np.ndarray, ...],
     family_ids: np.ndarray,
-    spacegroup_ids: Optional[np.ndarray],
+    spacegroup_ids: np.ndarray,
     P: Optional[int],
     K: int,
     S: Optional[int],
@@ -160,11 +162,14 @@ def iter_balanced_batches(
             all, or includes one with different values -- e.g. a dummy
             all-zeros array when the SupCon family loss term is inactive but
             balanced batching is still requested).
-        spacegroup_ids: Integer spacegroup id per row, or ``None`` if ``S``
-            is ``None``. Same independence from ``arrays`` as ``family_ids``.
+        spacegroup_ids: Integer spacegroup id per row, always required --
+            spacegroup stratification is always applied (``S=None`` means
+            "every spacegroup present for that family", not "skip"). Same
+            independence from ``arrays`` as ``family_ids``.
         P: Number of families per batch (``None`` -> all present).
         K: Number of examples per family per batch.
-        S: Number of spacegroups per family per batch (``None`` -> family-only).
+        S: Number of spacegroups per family per batch (``None`` -> every
+            spacegroup present for that family).
         n_batches: How many batches to build.
         rng: Numpy random generator, shared across batches for a single
             reproducible stream.

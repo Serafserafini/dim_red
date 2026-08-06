@@ -48,13 +48,18 @@ supcon:
   lambda_family: 1.0
   lambda_spacegroup: 1.0
   tau: 0.1
+  # Which similarity supcon_loss computes: "euclidean" (default, shown here
+  # -- negative squared Euclidean distance, unbounded scale) or "cosine"
+  # (cosine similarity between L2-normalized z vectors, bounded to [-1, 1]).
+  distance: euclidean
   # Weight of an optional embedding-norm regularizer (mean squared L2 norm
   # of z), added to the total loss. Unlike lambda_family/lambda_spacegroup,
   # not gated by mode -- always in effect when non-zero. 0.0 (default,
   # shown here) disables it. Worth raising above 0 if z's norm grows
   # unbounded during training (watch train_norm_penalty/val_norm_penalty in
-  # loss_history.csv) -- supcon_loss's distance-based similarity has no
-  # built-in scale normalization to prevent that on its own.
+  # loss_history.csv) -- with distance: euclidean, similarity has no
+  # built-in scale normalization to prevent that on its own; largely
+  # redundant with distance: cosine.
   lambda_norm: 0.0
 
 # How training batches are built (validation batches always stay random,
@@ -68,7 +73,7 @@ supcon:
 #   balanced_params:
 #     P: null   # null -> all families present in the training split
 #     K: 32     # examples per family per batch -> batch_size = P*K
-#     S: 8      # spacegroups per family per batch; null -> family-only
+#     S: 8      # spacegroups per family per batch; null -> every spacegroup present
 batching:
   strategy: random
 

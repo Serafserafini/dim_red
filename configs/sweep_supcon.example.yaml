@@ -40,6 +40,9 @@ base:
     lambda_family: 1.0
     lambda_spacegroup: 1.0
     tau: 0.1
+    # "euclidean" (default) or "cosine"; sweepable via "supcon.distance"
+    # like any other dotted-path field below.
+    distance: euclidean
     # Embedding-norm regularizer weight, disabled by default; sweepable via
     # "supcon.lambda_norm" like any other dotted-path field below.
     lambda_norm: 0.0
