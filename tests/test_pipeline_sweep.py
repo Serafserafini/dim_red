@@ -129,11 +129,12 @@ def test_run_sweep_writes_readme_entry(tmp_path):
     content = readme_path.read_text()
     sweep_name = run_dirs[0].parent.name
     assert f"## {sweep_name}" in content
-    assert "Model: vae" in content
-    assert "Dataset source: fetch" in content
-    assert "limit_per_system=8 x 1 systems" in content
-    assert "varies: encoder=[4]" in content and "encoder=[8]" in content
     assert "Sweep axes: vae.encoder_hidden_dim" in content
+    # Non-default settings: values shared by every run in the sweep show up
+    # as a single value; the swept axis itself shows up as "varies: ...".
+    assert "fetch.limit_per_system: 8" in content
+    assert "data_source: fetch" not in content  # data_source left at default
+    assert "vae.encoder_hidden_dim: varies: [4] | [8]" in content
 
 
 def test_run_sweep_appends_to_existing_readme(tmp_path):

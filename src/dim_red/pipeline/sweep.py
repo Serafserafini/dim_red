@@ -15,7 +15,22 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Union
 
-from dim_red.pipeline.config import RunConfig, SweepConfig, expand_sweep
+from dim_red.pipeline.config import (
+    AugmentationConfig,
+    AuxHeadsConfig,
+    BatchingConfig,
+    FetchConfig,
+    PyxtalConfig,
+    RunConfig,
+    SoapConfig,
+    SupConConfig,
+    SweepConfig,
+    TrainSettings,
+    VAEArchConfig,
+    expand_sweep,
+    flatten_config_dict,
+    run_config_to_dict,
+)
 from dim_red.pipeline.single_run import run_single
 
 logger = logging.getLogger("dim_red.pipeline")
@@ -44,26 +59,54 @@ def _next_sweep_dir(output_dir: Path) -> Path:
     return sweep_dir
 
 
-def _dataset_size_desc(config: RunConfig) -> str:
-    """Configured dataset-size for a run's data source, without actually
-    building it (the exact count is only known after fetch/generation --
-    this reports the config that determines it).
+def _default_flat_config() -> dict:
+    """Flattened ``{dotted_path: default_value}`` for every ``RunConfig`` leaf
+    that actually has a static default. ``vae.encoder_hidden_dim``/
+    ``vae.latent_dim`` are required (no default), so they're left out here
+    -- meaning they always show up as non-default below -- while
+    ``vae.decoder_hidden_dim``/``vae.mirror`` (which do have defaults) are
+    still included.
     """
-    if config.data_source == "fetch":
-        fc = config.fetch
-        return f"limit_per_system={fc.limit_per_system} x {len(fc.crystal_systems)} systems"
-    pc = config.pyxtal
-    if pc.structures_per_spacegroup is not None:
-        return f"structures_per_spacegroup={pc.structures_per_spacegroup}"
-    return f"structures_per_family={pc.structures_per_family}"
+    defaults = {
+        "seed": 42,
+        "output_dir": "runs",
+        "name": None,
+        "model": "vae",
+        "data_source": "fetch",
+    }
+    for prefix, cls in (
+        ("soap", SoapConfig),
+        ("train", TrainSettings),
+        ("aux_heads", AuxHeadsConfig),
+        ("supcon", SupConConfig),
+        ("batching", BatchingConfig),
+        ("fetch", FetchConfig),
+        ("pyxtal", PyxtalConfig),
+        ("augmentation", AugmentationConfig),
+    ):
+        defaults.update(flatten_config_dict({prefix: dataclasses.asdict(cls())}))
+
+    vae_defaults = dataclasses.asdict(
+        VAEArchConfig(encoder_hidden_dim=[], latent_dim=0)
+    )
+    del vae_defaults["encoder_hidden_dim"]
+    del vae_defaults["latent_dim"]
+    defaults.update(flatten_config_dict({"vae": vae_defaults}))
+    return defaults
 
 
-def _architecture_desc(config: RunConfig) -> str:
-    vae = config.vae
-    decoder = vae.decoder_hidden_dim
-    if decoder is None:
-        decoder = "mirror" if vae.mirror else "same-as-encoder"
-    return f"encoder={vae.encoder_hidden_dim} latent={vae.latent_dim} decoder={decoder}"
+def _diff_from_defaults(config: RunConfig, defaults: dict) -> dict:
+    """``{dotted_path: value}`` for every leaf of ``config`` that differs
+    from ``defaults`` (or has no entry there at all, e.g. ``vae.*``) --
+    fields left at their default aren't included, so only what this run
+    actually customized shows up.
+    """
+    flat = flatten_config_dict(run_config_to_dict(config))
+    return {
+        key: value
+        for key, value in flat.items()
+        if key not in defaults or defaults[key] != value
+    }
 
 
 def _summarize_field(values: List[str]) -> str:
@@ -90,16 +133,22 @@ def _write_sweep_readme(
     output_dir.mkdir(parents=True, exist_ok=True)
     is_new = not readme_path.exists()
 
-    entry = (
-        f"## {sweep_dir.name}\n\n"
-        f"- Model: {_summarize_field([c.model_kind for c in run_configs])}\n"
-        f"- Dataset elements: "
-        f"{_summarize_field([_dataset_size_desc(c) for c in run_configs])}\n"
-        f"- Dataset source: {_summarize_field([c.data_source for c in run_configs])}\n"
-        f"- Architecture: "
-        f"{_summarize_field([_architecture_desc(c) for c in run_configs])}\n"
-        f"- Sweep axes: {', '.join(sorted(sweep.grid)) if sweep.grid else '(none)'}\n\n"
+    defaults = _default_flat_config()
+    per_run_diffs = [_diff_from_defaults(c, defaults) for c in run_configs]
+    flats = [flatten_config_dict(run_config_to_dict(c)) for c in run_configs]
+    non_default_keys = sorted({key for diff in per_run_diffs for key in diff})
+
+    lines = [f"## {sweep_dir.name}\n\n"]
+    lines.append(
+        f"- Sweep axes: {', '.join(sorted(sweep.grid)) if sweep.grid else '(none)'}\n"
     )
+    if non_default_keys:
+        lines.append("- Non-default settings:\n")
+        for key in non_default_keys:
+            values = [str(flat.get(key, defaults.get(key))) for flat in flats]
+            lines.append(f"  - {key}: {_summarize_field(values)}\n")
+    lines.append("\n")
+    entry = "".join(lines)
     with open(readme_path, "a") as f:
         if is_new:
             f.write("# Sweeps\n\n")
@@ -117,10 +166,10 @@ def run_sweep(
     cache stays shared at ``<output_dir>/_dataset_cache`` across sweep
     invocations, since it doesn't depend on which sweep produced it.
 
-    Also appends a summary entry for this sweep (model kind, dataset size,
-    dataset source, architecture, and swept axes) to ``<output_dir>/README.md``,
-    creating that file the first time a sweep lands in ``output_dir`` (see
-    ``_write_sweep_readme``).
+    Also appends a summary entry for this sweep (the swept axes, plus every
+    config value that differs from its ``RunConfig`` dataclass default) to
+    ``<output_dir>/README.md``, creating that file the first time a sweep
+    lands in ``output_dir`` (see ``_write_sweep_readme``).
 
     Returns:
         The list of run directories created, in grid order.

@@ -1,0 +1,151 @@
+# Reference config: every field the fetch/pyxtal -> SOAP -> vae/autoencoder/
+# supcon pipeline accepts (dim_red.pipeline.config.RunConfig and its nested
+# blocks), each set to its own default value, with a comment on what it does
+# and (where relevant) which other setting it depends on or is ignored by.
+#
+# This file documents the full schema -- it is NOT meant to be run as-is:
+# "fetch"/"pyxtal" are mutually exclusive (pick one via "data_source"), and
+# "aux_heads"/"supcon"/"batching" only apply to some values of "model". For a
+# runnable starting point, copy one of the other configs/*.example.yaml files
+# instead (single_run.example.yaml for fetch+vae, single_run_pyxtal.example.yaml
+# for pyxtal+vae, single_run_supcon.example.yaml for pyxtal+supcon,
+# single_run_autoencoder.example.yaml for fetch+autoencoder) and only change
+# what you need -- every field omitted from a real config falls back to the
+# default shown here.
+#
+# Run with: python -m dim_red.pipeline.cli --config <your_config.yaml>
+# or:       dimred-run <your_config.yaml>
+
+# --- Top level ------------------------------------------------------------
+
+seed: 42 # global RNG seed (train/val split, model init, ...); also the
+  # fallback for pyxtal.seed/augmentation.seed when those are left null
+output_dir: runs # where this run's directory is created
+name: null # optional custom run-directory name; null -> auto-derived from
+  # the swept/non-default hyperparameters (see pipeline.single_run.make_run_name)
+model: vae # "vae" (default) | "autoencoder" | "supcon" -- which model
+  # dim_red.pipeline.single_run.run_single trains; all three read their
+  # encoder architecture from "vae:" below
+data_source: fetch # "fetch" (default, Materials Project) | "pyxtal"
+  # (synthetic, symmetry-valid structures via dim_red.generate) -- exactly
+  # one of "fetch:"/"pyxtal:" below is required, matching this
+
+# --- data_source: fetch -----------------------------------------------
+
+fetch: # required when data_source: fetch, otherwise unused/omitted
+  crystal_systems: [] # REQUIRED, no default -- non-empty list, e.g.
+    # [cubic, hexagonal]; dim_red.fetch.fetch_structures_by_crystal_system
+  limit_per_system: 15 # max structures fetched per crystal system
+  api_key: null # falls back to the MP_API_KEY environment variable
+
+# --- data_source: pyxtal ------------------------------------------------
+
+pyxtal: # required when data_source: pyxtal, otherwise unused/omitted
+  families: null # restrict generation to these crystal families, e.g.
+    # [cubic, hexagonal]; null -> all 7. Mutually exclusive with "spacegroups"
+  spacegroups: null # restrict to these explicit space groups instead, e.g.
+    # [225, 196]. Mutually exclusive with "families"
+  structures_per_spacegroup: null # exactly one of this /
+  structures_per_family: null # ... "structures_per_family" is required
+  distribution: uniform # "uniform" (default, as evenly as possible) |
+    # "random" -- how structures_per_family is split across a family's space groups
+  n_species: 1 # chemical species per generated structure (which elements
+    # doesn't matter -- sampled from a built-in placeholder pool)
+  species_pool: null # override the placeholder element pool; null -> built-in default
+  candidate_num_ions: null # override candidate ion counts per site; null -> pyxtal default
+  factor: 1.1 # pyxtal volume factor
+  max_count: 5 # pyxtal max attempts per structure
+  seed: null # null -> falls back to the top-level "seed" above; set this to
+    # pin the generated dataset independently (e.g. while sweeping "seed" itself)
+
+# --- Optional structure-level data augmentation --------------------------
+# Applied right after fetch/pyxtal and before SOAP, regardless of
+# data_source. Omit this block entirely (default: null) to disable
+# augmentation, current behavior unchanged.
+
+augmentation: null # example block, all fields at their default:
+  # n_augmented: 1          # augmented copies generated per structure
+  # keep_original: true     # also keep the unmodified structure alongside them
+  # jitter_probability: 0.5 # chance, per augmented copy, that positional jitter applies at all
+  # jitter_std: 0.05        # Angstroms
+  # vacancy_probability: 0.0      # chance, per augmented copy, that vacancy removal applies at all
+  # vacancy_atom_probability: 0.05 # chance any individual atom is removed, once selected
+  # max_vacancies: null     # null -> uncapped, short of the structure's own floor of 1 atom
+  # supercell_radius: null  # Angstroms; null -> skip supercell expansion (see CLAUDE.md)
+  # seed: null              # null -> falls back to the top-level "seed" above
+
+# --- SOAP featurization ----------------------------------------------------
+
+soap:
+  r_cut: 5.0
+  n_max: 4
+  l_max: 3
+  sigma: 0.5
+  element_agnostic: false
+  normalize_distances: false
+  species: null # auto-detected across all fetched/generated structures
+
+# --- Encoder/decoder architecture (all three model kinds) ------------------
+
+vae:
+  encoder_hidden_dim: [] # REQUIRED, no default -- e.g. [128, 64]
+  decoder_hidden_dim: null # null -> mirrors the encoder (reversed); ignored
+    # for model: supcon (no decoder)
+  latent_dim: 0 # REQUIRED, no default -- e.g. 2
+  mirror: true # only consulted when decoder_hidden_dim is null; ignored for
+    # model: supcon
+
+# --- model: vae / autoencoder only -----------------------------------------
+# Optional auxiliary classification heads on the latent z. Ignored for
+# model: supcon (use "supcon:" below instead).
+
+aux_heads:
+  mode: none # "none" (default, plain vae/autoencoder) | "family_only" |
+    # "family_and_spacegroup" (spacegroup head masked by family)
+  lambda_family: 1.0 # weight of the family cross-entropy term; ignored when mode: none
+  lambda_spacegroup: 1.0 # weight of the spacegroup term; ignored unless mode: family_and_spacegroup
+  head_hidden_dim: 16 # hidden width of each head's single hidden layer
+
+# --- model: supcon only ------------------------------------------------
+# Supervised Contrastive loss on the encoder's latent z. Ignored for
+# model: vae/autoencoder (use "aux_heads:" above instead).
+
+supcon:
+  mode: family_and_spacegroup # "family_only" | "spacegroup_only" |
+    # "family_and_spacegroup" (default) -- which label level(s) to contrast on
+  lambda_family: 1.0 # weight of the family-level term; ignored when mode: spacegroup_only
+  lambda_spacegroup: 1.0 # weight of the spacegroup-level term; ignored when mode: family_only
+  tau: 0.1 # temperature dividing similarities before the softmax
+  distance: euclidean # "euclidean" (default, negative squared distance,
+    # unbounded scale) | "cosine" (L2-normalized, bounded to [-1, 1])
+  lambda_norm: 0.0 # weight of an optional embedding-norm regularizer; not
+    # gated by mode; 0.0 (default) disables it
+
+# --- model: supcon only: training-batch sampling ---------------------------
+# Ignored for model: vae/autoencoder (which always shuffle). Validation
+# batches always stay random regardless of "strategy".
+
+batching:
+  strategy: random # "random" (default, plain shuffle) | "balanced"
+    # (family/spacegroup-stratified sampler, see dim_red.supcon.sampling)
+  balanced_params: # only consulted when strategy: balanced
+    P: null # families per batch; null -> all families present in the training split
+    K: null # REQUIRED when strategy: balanced -- examples per family per
+      # batch (batch_size = P*K), e.g. 32
+    S: null # spacegroups per family per batch; null -> every spacegroup present
+
+# --- Training ---------------------------------------------------------
+
+train:
+  epochs: 20
+  batch_size: 32
+  learning_rate: 0.001 # unused by the VeLO optimizer, kept for API compatibility
+  beta: 1.0 # KL weight; ignored for model: autoencoder/supcon (no KL term)
+  val_ratio: 0.2
+  device: cpu # "cpu" | "gpu" -- raises if no matching JAX device exists
+  early_stopping: # same mechanism for vae/autoencoder/supcon: stop once
+    # val_loss hasn't improved by more than min_delta for "patience" epochs
+    enabled: false
+    patience: 10
+    min_delta: 0.0
+    restore_best_weights: true # keep the best-val_loss epoch's params, not necessarily the last
