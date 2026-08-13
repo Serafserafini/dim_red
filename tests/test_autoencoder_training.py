@@ -256,6 +256,11 @@ def test_train_autoencoder_early_stopping_stops_before_configured_epochs():
         batch_size=8,
         seed=0,
         device="cpu",
+        # This test relies on val_loss actually plateauing within 30 epochs
+        # at patience=2 -- tuned against VeLO's convergence timing (faked
+        # fast by tests/conftest.py's fixture). It's testing early
+        # stopping's own bookkeeping, not which optimizer is active.
+        optimizer="velo",
         early_stopping=True,
         early_stopping_patience=2,
     )
@@ -282,6 +287,10 @@ def test_train_autoencoder_early_stopping_restore_best_changes_final_params():
         batch_size=8,
         seed=0,
         device="cpu",
+        # Tuned against VeLO's convergence timing (faked fast by
+        # tests/conftest.py's fixture) -- this test is about early
+        # stopping's restore-best bookkeeping, not optimizer choice.
+        optimizer="velo",
         early_stopping=True,
         early_stopping_patience=2,
         early_stopping_restore_best=True,
@@ -300,6 +309,7 @@ def test_train_autoencoder_early_stopping_restore_best_changes_final_params():
         batch_size=8,
         seed=0,
         device="cpu",
+        optimizer="velo",
         early_stopping=True,
         early_stopping_patience=2,
         early_stopping_restore_best=False,
@@ -363,5 +373,44 @@ def test_train_autoencoder_early_stopping_rejects_negative_min_delta():
                 device="cpu",
                 early_stopping=True,
                 early_stopping_min_delta=-1.0,
+            ),
+        )
+
+
+def test_train_autoencoder_optimizer_velo_returns_history():
+    """ "velo" still works now that it's no longer the default -- exercises
+    the VeLO path (faked fast by tests/conftest.py's autouse fixture).
+    """
+    train_db, val_db = _make_split_db(n=40)
+    model = Autoencoder(
+        input_dim=5,
+        encoder_hidden_dim=[8],
+        decoder_hidden_dim=None,
+        latent_dim=2,
+        seed=0,
+    )
+    config = TrainConfig(epochs=2, batch_size=8, seed=0, device="cpu", optimizer="velo")
+    history = train_autoencoder(model, train_db, val_db, config)
+
+    assert len(history["train_loss"]) == 2
+    assert all(np.isfinite(v) for v in history["train_loss"])
+
+
+def test_train_autoencoder_rejects_invalid_optimizer():
+    train_db, val_db = _make_split_db(n=40)
+    model = Autoencoder(
+        input_dim=5,
+        encoder_hidden_dim=[8],
+        decoder_hidden_dim=None,
+        latent_dim=2,
+        seed=0,
+    )
+    with pytest.raises(ValueError, match="optimizer must be one of"):
+        train_autoencoder(
+            model,
+            train_db,
+            val_db,
+            TrainConfig(
+                epochs=1, batch_size=8, seed=0, device="cpu", optimizer="bogus"
             ),
         )

@@ -431,3 +431,42 @@ def test_train_vae_early_stopping_rejects_negative_min_delta():
                 early_stopping_min_delta=-1.0,
             ),
         )
+
+
+def test_train_vae_optimizer_velo_returns_history():
+    """ "velo" still works now that it's no longer the default -- exercises
+    the VeLO path (faked fast by tests/conftest.py's autouse fixture).
+    """
+    train_db, val_db = _make_split_db(n=40)
+    model = VAE(
+        input_dim=5,
+        encoder_hidden_dim=[8],
+        decoder_hidden_dim=None,
+        latent_dim=2,
+        seed=0,
+    )
+    config = TrainConfig(epochs=2, batch_size=8, seed=0, device="cpu", optimizer="velo")
+    history = train_vae(model, train_db, val_db, config)
+
+    assert len(history["train_loss"]) == 2
+    assert all(np.isfinite(v) for v in history["train_loss"])
+
+
+def test_train_vae_rejects_invalid_optimizer():
+    train_db, val_db = _make_split_db(n=40)
+    model = VAE(
+        input_dim=5,
+        encoder_hidden_dim=[8],
+        decoder_hidden_dim=None,
+        latent_dim=2,
+        seed=0,
+    )
+    with pytest.raises(ValueError, match="optimizer must be one of"):
+        train_vae(
+            model,
+            train_db,
+            val_db,
+            TrainConfig(
+                epochs=1, batch_size=8, seed=0, device="cpu", optimizer="bogus"
+            ),
+        )

@@ -7,6 +7,7 @@ Preferred usage (console scripts installed by ``pip install -e .``):
     dimred-rerun runs/20260728-1/hd-128_cs-cubic
     dimred-compare runs/20260728-1
     dimred-apply new_structures.extxyz runs/20260728-1/hd-128_cs-cubic
+    dimred-train-tail configs/tail_train_classification.example.yaml runs/20260728-1/hd-128_cs-cubic
 
 Equivalent, flag-based form (``python -m``), kept for scripting/backward
 compatibility:
@@ -15,6 +16,7 @@ compatibility:
     python -m dim_red.pipeline.cli --rerun runs/20260728-1/hd-128_cs-cubic
     python -m dim_red.pipeline.cli --compare runs/20260728-1
     python -m dim_red.pipeline.cli --apply new_structures.extxyz --apply-run runs/20260728-1/hd-128_cs-cubic
+    python -m dim_red.pipeline.cli --train-tail configs/tail_train_classification.example.yaml --train-tail-run runs/20260728-1/hd-128_cs-cubic
 
 Note: no single-letter flags are defined here on purpose. ``dim_red.vae.training``
 imports ``learned_optimization``, which parses ``sys.argv`` with ``absl`` at
@@ -329,6 +331,47 @@ def apply_command(argv=None) -> None:
     )
 
 
+def _do_train_tail(config_path: str, run_dir: str) -> Path:
+    import dataclasses
+
+    from dim_red.pipeline.config import load_tail_train_config
+    from dim_red.pipeline.tail_training import train_tail
+
+    _configure_console_logging()
+    tail_config = load_tail_train_config(config_path)
+    # The run directory is always supplied here (not read from the YAML),
+    # so the same tail-training config can be reused across many runs
+    # without editing it each time -- overrides whatever run_dir (if any)
+    # the YAML itself set.
+    tail_config = dataclasses.replace(tail_config, run_dir=run_dir)
+    tail_dir = train_tail(tail_config)
+    print(f"Tail training complete: {tail_dir}")
+    return tail_dir
+
+
+def train_tail_command(argv=None) -> None:
+    """``dimred-train-tail <config> <run_dir>``: freeze an already-trained
+    ``model: supcon`` run's body and train exactly one tail (classification
+    or visualization) on top of it. See
+    ``configs/tail_train_classification.example.yaml``/
+    ``configs/tail_train_visualization.example.yaml``.
+    """
+    parser = argparse.ArgumentParser(
+        description="Freeze an already-trained dim_red supcon run's body "
+        "and train a classification or visualization tail on top of it."
+    )
+    parser.add_argument("config", type=str, help="Path to a tail-training YAML config.")
+    parser.add_argument(
+        "run_dir",
+        type=str,
+        help="Path to the completed model_kind='supcon' run directory whose "
+        "frozen body to attach the tail to (overrides run_dir in the config, "
+        "if it sets one).",
+    )
+    args = parser.parse_args(argv)
+    _do_train_tail(args.config, args.run_dir)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Unified fetch -> SOAP -> VAE training pipeline for dim_red."
@@ -402,6 +445,25 @@ def _build_parser() -> argparse.ArgumentParser:
         help="With --apply: an atoms.info key to color/label the new "
         "structures by (default: a single 'Applied structure' group).",
     )
+    parser.add_argument(
+        "--train-tail",
+        type=str,
+        default=None,
+        help=(
+            "Path to a tail-training YAML config; requires --train-tail-run. "
+            "Freezes an already-trained model_kind='supcon' run's body and "
+            "trains a classification or visualization tail on top of it, "
+            "instead of running anything else."
+        ),
+    )
+    parser.add_argument(
+        "--train-tail-run",
+        type=str,
+        default=None,
+        help="With --train-tail: path to the completed model_kind='supcon' "
+        "run directory whose frozen body to attach the tail to (overrides "
+        "run_dir in the config, if it sets one).",
+    )
     _add_umap_args(parser)
     return parser
 
@@ -441,13 +503,20 @@ def main(argv=None) -> None:
         )
         return
 
+    if args.train_tail:
+        if not args.train_tail_run:
+            parser.error("--train-tail requires --train-tail-run.")
+        _do_train_tail(args.train_tail, args.train_tail_run)
+        return
+
     if args.rerun:
         _do_rerun(args.rerun, args.cache_dir)
         return
 
     if not args.config:
         parser.error(
-            "--config is required unless --rerun, --compare or --apply is used."
+            "--config is required unless --rerun, --compare, --apply or "
+            "--train-tail is used."
         )
 
     if args.sweep:

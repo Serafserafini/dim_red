@@ -35,7 +35,7 @@ def test_get_or_build_dataset_cache_miss_then_hit(tmp_path):
             "dim_red.pipeline.dataset_cache.compute_soap", return_value=fake_soap
         ) as mock_soap,
     ):
-        X1, labels1, ids1, sg1, structures_path1 = get_or_build_dataset(
+        X1, labels1, ids1, sg1, structures_path1, mean1, std1 = get_or_build_dataset(
             crystal_systems=["cubic"],
             soap_kwargs={"r_cut": 3.0, "n_max": 2, "l_max": 2},
             limit_per_system=2,
@@ -48,6 +48,14 @@ def test_get_or_build_dataset_cache_miss_then_hit(tmp_path):
         assert labels1 == ["Cubic", "Cubic"]
         assert ids1 == ["mp-1", "mp-2"]
         assert sg1 == [225, 229]
+
+        # X1 is the raw fake_soap standardized by (mean1, std1) -- both are
+        # cached alongside X1 so a later load_trained_run call doesn't need
+        # to recompute SOAP just to recover them.
+        assert mean1.shape == (2,)
+        assert std1.shape == (2,)
+        np.testing.assert_allclose(mean1, fake_soap.mean(axis=0))
+        np.testing.assert_allclose(X1, (fake_soap - mean1) / std1)
 
         # The exact structures are cached as extended XYZ alongside the .npz.
         assert structures_path1.suffix == ".extxyz"
@@ -65,7 +73,7 @@ def test_get_or_build_dataset_cache_miss_then_hit(tmp_path):
 
         # Second call with identical parameters should hit the cache and not
         # call fetch/compute_soap again.
-        X2, labels2, ids2, sg2, structures_path2 = get_or_build_dataset(
+        X2, labels2, ids2, sg2, structures_path2, mean2, std2 = get_or_build_dataset(
             crystal_systems=["cubic"],
             soap_kwargs={"r_cut": 3.0, "n_max": 2, "l_max": 2},
             limit_per_system=2,
@@ -79,6 +87,8 @@ def test_get_or_build_dataset_cache_miss_then_hit(tmp_path):
         assert ids2 == ids1
         assert sg2 == sg1
         assert structures_path2 == structures_path1
+        np.testing.assert_allclose(mean1, mean2)
+        np.testing.assert_allclose(std1, std2)
 
 
 def test_get_or_build_dataset_rebuilds_stale_cache_missing_spacegroups(tmp_path):
@@ -108,7 +118,7 @@ def test_get_or_build_dataset_rebuilds_stale_cache_missing_spacegroups(tmp_path)
         ) as mock_fetch,
         patch("dim_red.pipeline.dataset_cache.compute_soap", return_value=fake_soap),
     ):
-        X, labels, ids, sg, structures_path = get_or_build_dataset(
+        X, labels, ids, sg, structures_path, mean, std = get_or_build_dataset(
             crystal_systems=["cubic"],
             soap_kwargs=soap_kwargs,
             limit_per_system=2,
@@ -120,6 +130,52 @@ def test_get_or_build_dataset_rebuilds_stale_cache_missing_spacegroups(tmp_path)
     assert ids == ["mp-1"]
     assert sg == [225]
     assert structures_path.exists()
+
+
+def test_get_or_build_dataset_rebuilds_stale_cache_missing_standardization_stats(
+    tmp_path,
+):
+    """A cache .npz written before feature_mean/feature_std were cached (but
+    with a companion .extxyz already in place) should also be treated as a
+    miss and rebuilt, not return without those fields.
+    """
+    fake_atoms = [_fake_atoms("Cu", "mp-1", 225)]
+    fake_soap = np.array([[1.0, 2.0]])
+    soap_kwargs = {"r_cut": 3.0, "n_max": 2, "l_max": 2}
+
+    key = _cache_key(["cubic"], 2, soap_kwargs)
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        tmp_path / f"{key}.npz",
+        X=np.array([[9.0, 9.0]]),
+        labels=np.array(["Stale"]),
+        material_ids=np.array(["mp-old"]),
+        spacegroups=np.array([225], dtype=np.int64),
+        # "feature_mean"/"feature_std" intentionally omitted to simulate a
+        # cache written before those fields existed.
+    )
+    from ase.io import write as write_atoms
+
+    write_atoms(str(tmp_path / f"{key}.extxyz"), fake_atoms, format="extxyz")
+
+    with (
+        patch(
+            "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
+            return_value=fake_atoms,
+        ) as mock_fetch,
+        patch("dim_red.pipeline.dataset_cache.compute_soap", return_value=fake_soap),
+    ):
+        X, labels, ids, sg, structures_path, mean, std = get_or_build_dataset(
+            crystal_systems=["cubic"],
+            soap_kwargs=soap_kwargs,
+            limit_per_system=2,
+            cache_dir=tmp_path,
+        )
+
+    assert mock_fetch.call_count == 1
+    assert labels == ["Cubic"]
+    assert mean.shape == (2,)
+    assert std.shape == (2,)
 
 
 def test_get_or_build_dataset_rebuilds_stale_cache_missing_structures(tmp_path):
@@ -151,7 +207,7 @@ def test_get_or_build_dataset_rebuilds_stale_cache_missing_structures(tmp_path):
         ) as mock_fetch,
         patch("dim_red.pipeline.dataset_cache.compute_soap", return_value=fake_soap),
     ):
-        X, labels, ids, sg, structures_path = get_or_build_dataset(
+        X, labels, ids, sg, structures_path, mean, std = get_or_build_dataset(
             crystal_systems=["cubic"],
             soap_kwargs=soap_kwargs,
             limit_per_system=2,
@@ -230,7 +286,7 @@ def test_get_or_build_dataset_applies_augmentation(tmp_path):
         ) as mock_fetch,
         patch("dim_red.pipeline.dataset_cache.compute_soap", return_value=fake_soap),
     ):
-        X, labels, ids, sg, structures_path = get_or_build_dataset(
+        X, labels, ids, sg, structures_path, mean, std = get_or_build_dataset(
             crystal_systems=["cubic"],
             soap_kwargs={"r_cut": 3.0, "n_max": 2, "l_max": 2},
             limit_per_system=2,
@@ -327,11 +383,13 @@ def test_get_or_build_pyxtal_dataset_cache_miss_then_hit(tmp_path):
             "dim_red.pipeline.dataset_cache.compute_soap", return_value=fake_soap
         ) as mock_soap,
     ):
-        X1, labels1, ids1, sg1, structures_path1 = get_or_build_pyxtal_dataset(
-            pyxtal_config=pyxtal_config,
-            seed=0,
-            soap_kwargs={"r_cut": 3.0, "n_max": 2, "l_max": 2},
-            cache_dir=tmp_path,
+        X1, labels1, ids1, sg1, structures_path1, mean1, std1 = (
+            get_or_build_pyxtal_dataset(
+                pyxtal_config=pyxtal_config,
+                seed=0,
+                soap_kwargs={"r_cut": 3.0, "n_max": 2, "l_max": 2},
+                cache_dir=tmp_path,
+            )
         )
 
         assert mock_generate.call_count == 1
@@ -344,11 +402,13 @@ def test_get_or_build_pyxtal_dataset_cache_miss_then_hit(tmp_path):
         assert len(read_atoms(structures_path1, index=":")) == 2
 
         # Second call with identical parameters should hit the cache.
-        X2, labels2, ids2, sg2, structures_path2 = get_or_build_pyxtal_dataset(
-            pyxtal_config=pyxtal_config,
-            seed=0,
-            soap_kwargs={"r_cut": 3.0, "n_max": 2, "l_max": 2},
-            cache_dir=tmp_path,
+        X2, labels2, ids2, sg2, structures_path2, mean2, std2 = (
+            get_or_build_pyxtal_dataset(
+                pyxtal_config=pyxtal_config,
+                seed=0,
+                soap_kwargs={"r_cut": 3.0, "n_max": 2, "l_max": 2},
+                cache_dir=tmp_path,
+            )
         )
 
         assert mock_generate.call_count == 1
@@ -392,7 +452,7 @@ def test_get_or_build_pyxtal_dataset_applies_augmentation(tmp_path):
         ) as mock_generate,
         patch("dim_red.pipeline.dataset_cache.compute_soap", return_value=fake_soap),
     ):
-        X, labels, ids, sg, structures_path = get_or_build_pyxtal_dataset(
+        X, labels, ids, sg, structures_path, mean, std = get_or_build_pyxtal_dataset(
             pyxtal_config=pyxtal_config,
             seed=0,
             soap_kwargs={"r_cut": 3.0, "n_max": 2, "l_max": 2},
@@ -466,7 +526,7 @@ def test_build_dataset_for_run_dispatches_to_pyxtal(tmp_path):
             "dim_red.generate.generate_structures", return_value=fake_atoms
         ) as mock_generate,
     ):
-        X, labels, ids, sg, structures_path = build_dataset_for_run(
+        X, labels, ids, sg, structures_path, mean, std = build_dataset_for_run(
             config, cache_dir=tmp_path
         )
 
@@ -493,7 +553,7 @@ def test_get_or_build_pyxtal_dataset_accepts_pyxtal_config_with_seed_set(tmp_pat
         patch("dim_red.generate.generate_structures", return_value=fake_atoms),
         patch("dim_red.pipeline.dataset_cache.compute_soap", return_value=fake_soap),
     ):
-        X, labels, ids, sg, structures_path = get_or_build_pyxtal_dataset(
+        X, labels, ids, sg, structures_path, mean, std = get_or_build_pyxtal_dataset(
             pyxtal_config=pyxtal_config, seed=999, soap_kwargs={}, cache_dir=tmp_path
         )
     assert labels == ["Cubic"]
@@ -515,6 +575,8 @@ def test_build_dataset_for_run_pyxtal_seed_falls_back_to_run_seed(tmp_path):
             ["id"],
             [225],
             tmp_path / "fake.extxyz",
+            np.zeros(1),
+            np.ones(1),
         )
         build_dataset_for_run(config, cache_dir=tmp_path)
 
@@ -539,6 +601,8 @@ def test_build_dataset_for_run_pyxtal_seed_overrides_run_seed(tmp_path):
             ["id"],
             [225],
             tmp_path / "fake.extxyz",
+            np.zeros(1),
+            np.ones(1),
         )
         build_dataset_for_run(config, cache_dir=tmp_path)
 
@@ -558,6 +622,8 @@ def test_build_dataset_for_run_augmentation_defaults_to_none(tmp_path):
             ["id"],
             [225],
             tmp_path / "fake.extxyz",
+            np.zeros(1),
+            np.ones(1),
         )
         build_dataset_for_run(config, cache_dir=tmp_path)
 
@@ -582,7 +648,7 @@ def test_build_dataset_for_run_forwards_augmentation_to_fetch(tmp_path):
         ) as mock_fetch,
         patch("dim_red.pipeline.dataset_cache.compute_soap", return_value=fake_soap),
     ):
-        X, labels, ids, sg, structures_path = build_dataset_for_run(
+        X, labels, ids, sg, structures_path, mean, std = build_dataset_for_run(
             config, cache_dir=tmp_path
         )
 
@@ -604,6 +670,8 @@ def test_build_dataset_for_run_augmentation_seed_falls_back_to_run_seed(tmp_path
             ["id"],
             [225],
             tmp_path / "fake.extxyz",
+            np.zeros(1),
+            np.ones(1),
         )
         build_dataset_for_run(config, cache_dir=tmp_path)
 
@@ -624,6 +692,8 @@ def test_build_dataset_for_run_augmentation_seed_overrides_run_seed(tmp_path):
             ["id"],
             [225],
             tmp_path / "fake.extxyz",
+            np.zeros(1),
+            np.ones(1),
         )
         build_dataset_for_run(config, cache_dir=tmp_path)
 
@@ -646,6 +716,8 @@ def test_build_dataset_for_run_forwards_supercell_radius(tmp_path):
             ["id"],
             [225],
             tmp_path / "fake.extxyz",
+            np.zeros(1),
+            np.ones(1),
         )
         build_dataset_for_run(config, cache_dir=tmp_path)
 

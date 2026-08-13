@@ -34,7 +34,7 @@ from ase.io import write as write_atoms
 from dim_red.augmentation import AugmentationConfig, augment_structures
 from dim_red.fetch import fetch_structures_by_crystal_system
 from dim_red.soap import compute_soap
-from dim_red.utils import standardize
+from dim_red.utils import apply_standardization, fit_standardization
 
 if TYPE_CHECKING:
     from dim_red.pipeline.config import PyxtalConfig, RunConfig
@@ -93,7 +93,14 @@ def _pyxtal_cache_key(
     return "pyxtal-" + hashlib.sha256(blob).hexdigest()[:16]
 
 
-_CACHE_ARRAY_KEYS = ("X", "labels", "material_ids", "spacegroups")
+_CACHE_ARRAY_KEYS = (
+    "X",
+    "labels",
+    "material_ids",
+    "spacegroups",
+    "feature_mean",
+    "feature_std",
+)
 
 # Sentinel spacegroup number for structures MP didn't return symmetry data for.
 _UNKNOWN_SPACEGROUP = -1
@@ -110,7 +117,9 @@ def _structures_cache_path(cache_path: Path) -> Path:
 
 def _load_cached_dataset(
     cache_path: Path,
-) -> Optional[Tuple[np.ndarray, List[str], List[str], List[int]]]:
+) -> Optional[
+    Tuple[np.ndarray, List[str], List[str], List[int], np.ndarray, np.ndarray]
+]:
     if not cache_path.exists():
         return None
     if not _structures_cache_path(cache_path).exists():
@@ -132,6 +141,8 @@ def _load_cached_dataset(
         cached["labels"].tolist(),
         cached["material_ids"].tolist(),
         cached["spacegroups"].tolist(),
+        cached["feature_mean"],
+        cached["feature_std"],
     )
 
 
@@ -141,6 +152,8 @@ def _save_dataset_cache(
     labels: List[str],
     material_ids: List[str],
     spacegroups: List[int],
+    feature_mean: np.ndarray,
+    feature_std: np.ndarray,
 ) -> None:
     np.savez(
         cache_path,
@@ -148,6 +161,8 @@ def _save_dataset_cache(
         labels=np.array(labels),
         material_ids=np.array(material_ids),
         spacegroups=np.array(spacegroups, dtype=np.int64),
+        feature_mean=feature_mean,
+        feature_std=feature_std,
     )
     logger.info("Dataset cached at %s (shape=%s)", cache_path, X_std.shape)
 
@@ -160,7 +175,14 @@ def _save_structures_cache(cache_path: Path, atoms_list: list) -> None:
 
 def _compute_soap_and_standardize(
     atoms_list: list, soap_kwargs: Dict[str, Any]
-) -> np.ndarray:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Returns ``(X_std, feature_mean, feature_std)`` -- unlike
+    ``dim_red.utils.standardize`` (fit+apply in one, discarding the fitted
+    statistics), the mean/std are also returned here so they can be cached
+    and, ultimately, saved into a completed run's ``embeddings.npz`` --
+    letting ``dim_red.pipeline.inference.load_trained_run`` standardize new
+    structures without ever recomputing SOAP on the training set again.
+    """
     effective_soap_kwargs = dict(soap_kwargs)
     if effective_soap_kwargs.get("species") is None:
         effective_soap_kwargs["species"] = sorted(
@@ -171,7 +193,8 @@ def _compute_soap_and_standardize(
     logger.info("Computing SOAP descriptors for %d structures", len(atoms_list))
     soap_vectors = compute_soap(atoms_list, **effective_soap_kwargs)
     X = np.asarray(soap_vectors).reshape(len(atoms_list), -1)
-    return standardize(X)
+    mean, std = fit_standardization(X)
+    return apply_standardization(X, mean, std), mean, std
 
 
 def get_or_build_dataset(
@@ -181,7 +204,7 @@ def get_or_build_dataset(
     cache_dir: Union[str, Path],
     api_key: Optional[str] = None,
     augmentation: Optional[AugmentationConfig] = None,
-) -> Tuple[np.ndarray, List[str], List[str], List[int], Path]:
+) -> Tuple[np.ndarray, List[str], List[str], List[int], Path, np.ndarray, np.ndarray]:
     """Fetch structures, compute a global SOAP descriptor per structure, and
     standardize the result -- reusing a cached copy on disk when available.
 
@@ -200,11 +223,18 @@ def get_or_build_dataset(
             the dataset. ``None`` (default) disables augmentation.
 
     Returns:
-        ``(X_std, labels, material_ids, spacegroups, structures_path)``
-        where ``X_std`` has shape ``(n_samples, n_features)``, ``spacegroups``
-        holds the MP spacegroup number (1-230) per structure (or ``-1`` when
-        unavailable), and ``structures_path`` is the cached extended-XYZ file
-        holding the exact fetched ``Atoms`` (same order as the other arrays).
+        ``(X_std, labels, material_ids, spacegroups, structures_path,
+        feature_mean, feature_std)`` where ``X_std`` has shape
+        ``(n_samples, n_features)``, ``spacegroups`` holds the MP spacegroup
+        number (1-230) per structure (or ``-1`` when unavailable),
+        ``structures_path`` is the cached extended-XYZ file holding the exact
+        fetched ``Atoms`` (same order as the other arrays), and
+        ``feature_mean``/``feature_std`` are the per-feature standardization
+        statistics ``X_std`` was derived from (``dim_red.utils.fit_standardization``
+        on the raw SOAP matrix) -- cached alongside ``X_std`` so a later
+        ``dim_red.pipeline.single_run.run_single`` call can save them into its
+        own ``embeddings.npz`` without recomputing SOAP, see
+        ``dim_red.pipeline.inference.load_trained_run``.
     """
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -217,7 +247,7 @@ def get_or_build_dataset(
         logger.info(
             "Dataset cache hit (%s) for crystal_systems=%s", key, list(crystal_systems)
         )
-        return (*cached, structures_path)
+        return (*cached[:4], structures_path, *cached[4:])
 
     logger.info(
         "Dataset cache miss (%s); fetching structures for crystal_systems=%s",
@@ -252,10 +282,22 @@ def get_or_build_dataset(
     spacegroups = [a.info.get("spacegroup", _UNKNOWN_SPACEGROUP) for a in all_atoms]
 
     _save_structures_cache(cache_path, all_atoms)
-    X_std = _compute_soap_and_standardize(all_atoms, soap_kwargs)
-    _save_dataset_cache(cache_path, X_std, labels, material_ids, spacegroups)
+    X_std, feature_mean, feature_std = _compute_soap_and_standardize(
+        all_atoms, soap_kwargs
+    )
+    _save_dataset_cache(
+        cache_path, X_std, labels, material_ids, spacegroups, feature_mean, feature_std
+    )
 
-    return X_std, labels, material_ids, spacegroups, structures_path
+    return (
+        X_std,
+        labels,
+        material_ids,
+        spacegroups,
+        structures_path,
+        feature_mean,
+        feature_std,
+    )
 
 
 def get_or_build_pyxtal_dataset(
@@ -264,7 +306,7 @@ def get_or_build_pyxtal_dataset(
     soap_kwargs: Dict[str, Any],
     cache_dir: Union[str, Path],
     augmentation: Optional[AugmentationConfig] = None,
-) -> Tuple[np.ndarray, List[str], List[str], List[int], Path]:
+) -> Tuple[np.ndarray, List[str], List[str], List[int], Path, np.ndarray, np.ndarray]:
     """Generate a synthetic structure database with ``dim_red.generate``,
     compute a global SOAP descriptor per structure, and standardize the
     result -- reusing a cached copy on disk when available. The ``pyxtal``
@@ -287,9 +329,10 @@ def get_or_build_pyxtal_dataset(
 
     Returns:
         Same shape as ``get_or_build_dataset``: ``(X_std, labels,
-        material_ids, spacegroups, structures_path)``, with ``labels``
-        holding each structure's crystal family and ``structures_path`` the
-        cached extended-XYZ file holding the exact generated ``Atoms``.
+        material_ids, spacegroups, structures_path, feature_mean,
+        feature_std)``, with ``labels`` holding each structure's crystal
+        family and ``structures_path`` the cached extended-XYZ file holding
+        the exact generated ``Atoms``.
     """
     # Lazy: dim_red.generate requires pyxtal, not a hard dim_red dependency.
     from dim_red.generate import GenerationConfig, generate_structures
@@ -303,7 +346,7 @@ def get_or_build_pyxtal_dataset(
     cached = _load_cached_dataset(cache_path)
     if cached is not None:
         logger.info("Dataset cache hit (%s) for pyxtal generation", key)
-        return (*cached, structures_path)
+        return (*cached[:4], structures_path, *cached[4:])
 
     logger.info("Dataset cache miss (%s); generating structures with pyxtal", key)
 
@@ -332,10 +375,22 @@ def get_or_build_pyxtal_dataset(
     spacegroups = [a.info["spacegroup"] for a in all_atoms]
 
     _save_structures_cache(cache_path, all_atoms)
-    X_std = _compute_soap_and_standardize(all_atoms, soap_kwargs)
-    _save_dataset_cache(cache_path, X_std, labels, material_ids, spacegroups)
+    X_std, feature_mean, feature_std = _compute_soap_and_standardize(
+        all_atoms, soap_kwargs
+    )
+    _save_dataset_cache(
+        cache_path, X_std, labels, material_ids, spacegroups, feature_mean, feature_std
+    )
 
-    return X_std, labels, material_ids, spacegroups, structures_path
+    return (
+        X_std,
+        labels,
+        material_ids,
+        spacegroups,
+        structures_path,
+        feature_mean,
+        feature_std,
+    )
 
 
 def _resolve_augmentation(config: "RunConfig") -> Optional[AugmentationConfig]:
@@ -369,12 +424,13 @@ def _resolve_augmentation(config: "RunConfig") -> Optional[AugmentationConfig]:
 
 def build_dataset_for_run(
     config: "RunConfig", cache_dir: Union[str, Path]
-) -> Tuple[np.ndarray, List[str], List[str], List[int], Path]:
+) -> Tuple[np.ndarray, List[str], List[str], List[int], Path, np.ndarray, np.ndarray]:
     """Dispatches to ``get_or_build_dataset`` or ``get_or_build_pyxtal_dataset``
     per ``config.data_source`` -- the single entry point
     ``dim_red.pipeline.single_run.run_single`` uses, so callers don't need to
-    know which data source a run uses. Same 5-element return shape as both:
-    ``(X_std, labels, material_ids, spacegroups, structures_path)``.
+    know which data source a run uses. Same 7-element return shape as both:
+    ``(X_std, labels, material_ids, spacegroups, structures_path,
+    feature_mean, feature_std)``.
     """
     augmentation = _resolve_augmentation(config)
     if config.data_source == "pyxtal":

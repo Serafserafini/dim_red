@@ -22,6 +22,7 @@ _SUPCON_MODES = ("family_only", "spacegroup_only", "family_and_spacegroup")
 _SUPCON_DISTANCES = ("euclidean", "cosine")
 _MODEL_KINDS = ("vae", "autoencoder", "supcon")
 _DATA_SOURCES = ("fetch", "pyxtal")
+_OPTIMIZER_KINDS = ("adam", "velo")
 
 
 @dataclass(frozen=True)
@@ -251,15 +252,34 @@ class TrainSettings:
 
     ``beta`` is ignored when ``RunConfig.model_kind == "autoencoder"`` (no
     KL term to weight -- see ``dim_red.autoencoder.training.TrainConfig``).
+
+    Attributes:
+        optimizer: ``"adam"`` (default) -- a plain, fast ``optax.adam(learning_rate)``
+            -- or ``"velo"`` -- ``learned_optimization``'s pretrained VeLO
+            meta-learned optimizer, whose ``num_steps``-dependent setup and
+            pretrained-hypernetwork checkpoint load cost real, fixed time
+            (several seconds or more, plus a network call attempting to
+            resolve Google Cloud credentials that can hang far longer on
+            some networks) before training even starts. Same field/semantics
+            across ``vae``/``autoencoder``/``supcon`` phase-1 training and
+            (via ``TailTrainSettings.optimizer``) phase-2 tail training.
     """
 
     epochs: int = 20
     batch_size: int = 32
     learning_rate: float = 1e-3
+    optimizer: str = "adam"
     beta: float = 1.0
     val_ratio: float = 0.2
     device: str = "cpu"
     early_stopping: EarlyStoppingConfig = field(default_factory=EarlyStoppingConfig)
+
+    def __post_init__(self):
+        if self.optimizer not in _OPTIMIZER_KINDS:
+            raise ValueError(
+                f"train.optimizer must be one of {_OPTIMIZER_KINDS}, got "
+                f"{self.optimizer!r}"
+            )
 
 
 @dataclass(frozen=True)
@@ -296,9 +316,13 @@ class AuxHeadsConfig:
 @dataclass(frozen=True)
 class SupConConfig:
     """Config for ``RunConfig.model_kind == "supcon"``: a two-level (family
-    and/or spacegroup) Supervised Contrastive loss trained directly on the
-    encoder's latent ``z`` -- no classifier heads involved, unlike
-    ``AuxHeadsConfig`` (whose ``mode`` this mirrors the shape of).
+    and/or spacegroup) Supervised Contrastive loss, computed on a projection
+    tail's output (Khosla et al. 2020's ``z = Proj(Enc(x))``, see
+    ``dim_red.supcon.tails.ProjectionTail``/``dim_red.supcon.training``) --
+    no classifier heads involved at this stage, unlike ``AuxHeadsConfig``
+    (whose ``mode`` this mirrors the shape of). Classification/visualization
+    tails are trained separately, after this run's body is frozen -- see
+    ``dim_red.pipeline.config.TailTrainConfig``.
 
     Attributes:
         mode: Which label level(s) to contrast on: ``"family_only"``,
@@ -320,7 +344,7 @@ class SupConConfig:
             vectors, bounded to ``[-1, 1]``). Forwarded as-is to
             ``dim_red.supcon.training.TrainConfig.distance``.
         lambda_norm: Weight of the embedding-norm regularizer (mean squared
-            L2 norm of the batch's latent ``z``), added to the total loss
+            L2 norm of the batch's projected ``z``), added to the total loss
             alongside the family/spacegroup terms -- unlike those, it's not
             gated by ``mode`` (it doesn't depend on labels at all, so it's
             always in effect whenever it's non-zero). ``0.0`` (default)
@@ -328,8 +352,18 @@ class SupConConfig:
             ``dim_red.supcon.training.norm_penalty`` for why this matters:
             with ``distance == "euclidean"`` (default), similarity has no
             built-in scale normalization, so nothing otherwise discourages
-            the encoder from inflating ``z``'s norm without bound; largely
-            redundant with ``distance == "cosine"``.
+            the projection from inflating ``z``'s norm without bound;
+            largely redundant with ``distance == "cosine"``.
+        projection_dim: Size of the space the SupCon loss is actually
+            computed in (Khosla et al. 2020 default: 128) -- separate from
+            ``vae.latent_dim``, which stays the body's own representation
+            width (saved to ``embeddings.npz``, reused by every downstream
+            tail). The projection tail is discarded after phase 1 in the
+            original paper; this codebase still saves its trained params
+            (``projection_params.msgpack``) for reproducibility.
+        projection_hidden_dim: Widths of hidden layers in the projection
+            tail's MLP. ``None`` (default) resolves to a single hidden
+            layer matching the body's own ``latent_dim``.
     """
 
     mode: str = "family_and_spacegroup"
@@ -338,6 +372,8 @@ class SupConConfig:
     tau: float = 0.1
     distance: str = "euclidean"
     lambda_norm: float = 0.0
+    projection_dim: int = 128
+    projection_hidden_dim: Optional[List[int]] = None
 
     def __post_init__(self):
         if self.mode not in _SUPCON_MODES:
@@ -349,6 +385,8 @@ class SupConConfig:
                 f"supcon.distance must be one of {_SUPCON_DISTANCES}, got "
                 f"{self.distance!r}"
             )
+        if self.projection_dim <= 0:
+            raise ValueError("supcon.projection_dim must be a positive integer")
 
 
 @dataclass(frozen=True)
@@ -449,6 +487,14 @@ class RunConfig:
             after the dataset is built, before SOAP. ``None`` (default)
             disables it, current behavior unchanged. Applies regardless of
             ``data_source``. See ``AugmentationConfig``.
+        tails: Optionally auto-train a classification and/or visualization
+            tail (``dim_red.pipeline.tail_training.train_tail``) right after
+            this run's body finishes phase-1 training -- the same entry
+            point ``dimred-train-tail`` uses manually, just invoked
+            automatically. ``None`` (default) disables it, current behavior
+            unchanged. Ignored for ``model_kind != "supcon"``, same
+            treatment ``aux_heads``/``supcon``/``batching`` get for the
+            model kinds they don't apply to. See ``AutoTailsConfig``.
     """
 
     soap: SoapConfig
@@ -465,6 +511,7 @@ class RunConfig:
     fetch: Optional[FetchConfig] = None
     pyxtal: Optional[PyxtalConfig] = None
     augmentation: Optional[AugmentationConfig] = None
+    tails: Optional["AutoTailsConfig"] = None
 
     def __post_init__(self):
         if self.model_kind not in _MODEL_KINDS:
@@ -519,6 +566,55 @@ def _dataclass_from_dict(cls, d: Dict[str, Any]):
     return cls(**{k: v for k, v in d.items() if k in known})
 
 
+def _parse_train_settings(cls, d: Dict[str, Any]):
+    """Build a ``TrainSettings``/``TailTrainSettings`` instance from a
+    ``train:``-shaped dict, handling the nested ``early_stopping:`` sub-block
+    the same way for both (every training-loop settings dataclass has an
+    ``early_stopping: EarlyStoppingConfig`` field).
+    """
+    early_stopping = _dataclass_from_dict(
+        EarlyStoppingConfig, d.get("early_stopping", {})
+    )
+    settings = _dataclass_from_dict(
+        cls, {k: v for k, v in d.items() if k != "early_stopping"}
+    )
+    return dataclasses.replace(settings, early_stopping=early_stopping)
+
+
+def _parse_classification_tail_config(
+    d: Dict[str, Any]
+) -> Optional["ClassificationTailConfig"]:
+    """Parse a ``classification:`` block, shared by ``RunConfig.tails`` and
+    ``TailTrainConfig``."""
+    return (
+        _dataclass_from_dict(ClassificationTailConfig, d["classification"])
+        if "classification" in d
+        else None
+    )
+
+
+def _parse_visualization_tail_config(
+    d: Dict[str, Any]
+) -> Optional["VisualizationTailConfig"]:
+    """Parse a ``visualization:`` block (including its nested ``batching:``
+    sub-block), shared by ``RunConfig.tails`` and ``TailTrainConfig``."""
+    visualization_dict = d.get("visualization")
+    if visualization_dict is None:
+        return None
+    batching_dict = visualization_dict.get("batching", {})
+    batching = BatchingConfig(
+        strategy=str(batching_dict.get("strategy", "random")),
+        balanced_params=_dataclass_from_dict(
+            BalancedBatchingParams, batching_dict.get("balanced_params", {})
+        ),
+    )
+    visualization = _dataclass_from_dict(
+        VisualizationTailConfig,
+        {k: v for k, v in visualization_dict.items() if k != "batching"},
+    )
+    return dataclasses.replace(visualization, batching=batching)
+
+
 def load_yaml(path: Union[str, Path]) -> Dict[str, Any]:
     with open(path, "r") as f:
         return yaml.safe_load(f)
@@ -528,14 +624,7 @@ def run_config_from_dict(d: Dict[str, Any]) -> RunConfig:
     data_source = str(d.get("data_source", "fetch"))
     soap = _dataclass_from_dict(SoapConfig, d.get("soap", {}))
     vae = _dataclass_from_dict(VAEArchConfig, d.get("vae", {}))
-    train_dict = d.get("train", {})
-    train_early_stopping = _dataclass_from_dict(
-        EarlyStoppingConfig, train_dict.get("early_stopping", {})
-    )
-    train = _dataclass_from_dict(
-        TrainSettings, {k: v for k, v in train_dict.items() if k != "early_stopping"}
-    )
-    train = dataclasses.replace(train, early_stopping=train_early_stopping)
+    train = _parse_train_settings(TrainSettings, d.get("train", {}))
     aux_heads = _dataclass_from_dict(AuxHeadsConfig, d.get("aux_heads", {}))
     supcon = _dataclass_from_dict(SupConConfig, d.get("supcon", {}))
     batching_dict = d.get("batching", {})
@@ -551,6 +640,16 @@ def run_config_from_dict(d: Dict[str, Any]) -> RunConfig:
     augmentation_config = (
         _dataclass_from_dict(AugmentationConfig, d["augmentation"])
         if "augmentation" in d
+        else None
+    )
+    tails_dict = d.get("tails")
+    tails_config = (
+        AutoTailsConfig(
+            classification=_parse_classification_tail_config(tails_dict),
+            visualization=_parse_visualization_tail_config(tails_dict),
+            train=_parse_train_settings(TailTrainSettings, tails_dict.get("train", {})),
+        )
+        if tails_dict is not None
         else None
     )
 
@@ -588,6 +687,7 @@ def run_config_from_dict(d: Dict[str, Any]) -> RunConfig:
         fetch=fetch_config,
         pyxtal=pyxtal_config,
         augmentation=augmentation_config,
+        tails=tails_config,
     )
 
 
@@ -618,6 +718,15 @@ def run_config_to_dict(config: RunConfig) -> Dict[str, Any]:
         result["pyxtal"] = dataclasses.asdict(config.pyxtal)
     if config.augmentation is not None:
         result["augmentation"] = dataclasses.asdict(config.augmentation)
+    if config.tails is not None:
+        tails_dict: Dict[str, Any] = {"train": dataclasses.asdict(config.tails.train)}
+        if config.tails.classification is not None:
+            tails_dict["classification"] = dataclasses.asdict(
+                config.tails.classification
+            )
+        if config.tails.visualization is not None:
+            tails_dict["visualization"] = dataclasses.asdict(config.tails.visualization)
+        result["tails"] = tails_dict
     return result
 
 
@@ -680,3 +789,260 @@ def expand_sweep(sweep: SweepConfig) -> List[RunConfig]:
             _set_dotted(d, key, value)
         runs.append(run_config_from_dict(d))
     return runs
+
+
+# --- Phase 2: tail training (dim_red.pipeline.tail_training) ---------------
+#
+# Deliberately independent of RunConfig/SweepConfig above: this targets an
+# already-completed `model: supcon` run directory rather than building a
+# dataset from scratch, so it gets its own top-level YAML shape and loader
+# rather than being nested under RunConfig.
+
+_TAIL_KINDS = ("classification", "visualization")
+_CLASSIFICATION_TAIL_MODES = ("family_only", "family_and_spacegroup")
+
+
+@dataclass(frozen=True)
+class ClassificationTailConfig:
+    """Config for ``TailTrainConfig.tail_kind == "classification"``: trains
+    a ``dim_red.supcon.tails.ClassificationTail`` on a frozen supcon run's
+    saved representations, via cross-entropy. Mirrors ``AuxHeadsConfig``'s
+    3-value ``mode`` restriction (not ``SupConConfig``'s) -- the spacegroup
+    head here is family-masked via ``dim_red.supcon.tails.apply_family_mask``,
+    so an unconditioned ``"spacegroup_only"`` isn't meaningful, same
+    restriction ``AuxHeadsConfig.mode`` already has and for the same reason.
+
+    Attributes:
+        mode: ``"family_only"`` or ``"family_and_spacegroup"`` (default).
+        lambda_family: Weight of the family cross-entropy term.
+        lambda_spacegroup: Weight of the (family-masked) spacegroup
+            cross-entropy term. Ignored unless ``mode ==
+            "family_and_spacegroup"``.
+        head_hidden_dim: Hidden width of each head's single hidden layer.
+    """
+
+    mode: str = "family_and_spacegroup"
+    lambda_family: float = 1.0
+    lambda_spacegroup: float = 1.0
+    head_hidden_dim: int = 16
+
+    def __post_init__(self):
+        if self.mode not in _CLASSIFICATION_TAIL_MODES:
+            raise ValueError(
+                f"classification.mode must be one of "
+                f"{_CLASSIFICATION_TAIL_MODES}, got {self.mode!r}"
+            )
+
+
+@dataclass(frozen=True)
+class VisualizationTailConfig:
+    """Config for ``TailTrainConfig.tail_kind == "visualization"``: trains a
+    ``dim_red.supcon.tails.VisualizationTail`` on a frozen supcon run's
+    saved representations, via the same Supervised Contrastive loss as the
+    phase-1 projection tail (see
+    ``dim_red.supcon.tail_training.train_visualization_tail``).
+
+    Attributes:
+        viz_dim: Output dimensionality -- 2 or 3 (plotted with
+            ``dim_red.analysis.plotting.plot_reduced_space``/
+            ``plot_reduced_space_3d`` respectively).
+        mode: Which label level(s) to contrast on -- same 3-value set as
+            ``SupConConfig.mode`` (independent terms, no family ->
+            spacegroup masking, unlike ``ClassificationTailConfig.mode``).
+        lambda_family: Weight of the family-level term. Ignored when
+            ``mode == "spacegroup_only"``.
+        lambda_spacegroup: Weight of the spacegroup-level term. Ignored
+            when ``mode == "family_only"``.
+        tau: Temperature dividing similarities before the softmax.
+        distance: ``"euclidean"`` (default) or ``"cosine"`` -- see
+            ``dim_red.supcon.training.supcon_loss``.
+        lambda_norm: Weight of the embedding-norm regularizer, applied to
+            this tail's own output. ``0.0`` (default) disables it.
+        hidden_dim: Widths of hidden layers in the visualization MLP.
+            ``None`` (default) resolves to a single hidden layer matching
+            the body's own representation width.
+        batching: How training batches are formed -- same ``BatchingConfig``
+            shape/semantics as ``RunConfig.batching`` (``"random"`` default,
+            or ``"balanced"`` via ``dim_red.supcon.sampling``).
+    """
+
+    viz_dim: int = 2
+    mode: str = "family_and_spacegroup"
+    lambda_family: float = 1.0
+    lambda_spacegroup: float = 1.0
+    tau: float = 0.1
+    distance: str = "euclidean"
+    lambda_norm: float = 0.0
+    hidden_dim: Optional[List[int]] = None
+    batching: BatchingConfig = field(default_factory=BatchingConfig)
+
+    def __post_init__(self):
+        if self.viz_dim not in (2, 3):
+            raise ValueError(
+                f"visualization.viz_dim must be 2 or 3, got {self.viz_dim!r}"
+            )
+        if self.mode not in _SUPCON_MODES:
+            raise ValueError(
+                f"visualization.mode must be one of {_SUPCON_MODES}, got "
+                f"{self.mode!r}"
+            )
+        if self.distance not in _SUPCON_DISTANCES:
+            raise ValueError(
+                f"visualization.distance must be one of {_SUPCON_DISTANCES}, "
+                f"got {self.distance!r}"
+            )
+
+
+@dataclass(frozen=True)
+class TailTrainSettings:
+    """Training-loop mechanics for phase 2, mirroring the relevant subset of
+    ``RunConfig.train`` (``TrainSettings``) -- no ``beta``/``val_ratio``:
+    phase 2 reuses phase 1's exact train/val split (see
+    ``dim_red.pipeline.tail_training``) rather than resplitting.
+
+    ``optimizer`` is the same field/semantics as ``TrainSettings.optimizer``
+    -- ``"adam"`` (default) or ``"velo"`` -- and matters even more here than
+    in phase 1, since phase-2 tails are tiny single-hidden-layer MLPs where
+    VeLO's fixed setup cost dominates the actual training time.
+    """
+
+    epochs: int = 20
+    batch_size: int = 32
+    learning_rate: float = 1e-3
+    optimizer: str = "adam"
+    device: str = "cpu"
+    early_stopping: EarlyStoppingConfig = field(default_factory=EarlyStoppingConfig)
+
+    def __post_init__(self):
+        if self.optimizer not in _OPTIMIZER_KINDS:
+            raise ValueError(
+                f"train.optimizer must be one of {_OPTIMIZER_KINDS}, got "
+                f"{self.optimizer!r}"
+            )
+
+
+@dataclass(frozen=True)
+class AutoTailsConfig:
+    """Config for ``RunConfig.tails``: automatically train one or both tails
+    on a completed ``model_kind == "supcon"`` run's frozen body, right after
+    phase-1 training finishes -- the same
+    ``dim_red.pipeline.tail_training.train_tail`` entry point
+    ``dimred-train-tail`` uses, just invoked automatically instead of as a
+    separate manual command. Ignored for ``model_kind != "supcon"``, same
+    treatment ``aux_heads``/``supcon``/``batching`` already get for the model
+    kinds they don't apply to.
+
+    Attributes:
+        classification: Auto-train a classification tail when set (``None``
+            default disables it).
+        visualization: Auto-train a visualization tail when set (``None``
+            default disables it). A run/sweep can set both to get a
+            classification tail AND a visualization tail out of a single
+            ``dimred-run``/``dimred-sweep`` invocation.
+        train: Training-loop mechanics shared by whichever tail(s) are
+            enabled -- same shape as ``TailTrainConfig.train``.
+    """
+
+    classification: Optional[ClassificationTailConfig] = None
+    visualization: Optional[VisualizationTailConfig] = None
+    train: TailTrainSettings = field(default_factory=TailTrainSettings)
+
+
+@dataclass(frozen=True)
+class TailTrainConfig:
+    """Fully resolved configuration for phase 2: freeze an already-trained
+    supcon run's body and train exactly one tail (classification or
+    visualization) on top of it -- see ``dim_red.pipeline.tail_training``.
+
+    Attributes:
+        tail_kind: ``"classification"`` or ``"visualization"`` -- which tail
+            to train. Exactly one of ``classification``/``visualization``
+            must be set, matching this.
+        run_dir: Path to a completed ``model: supcon`` run directory (must
+            contain at least ``config.yaml``/``embeddings.npz`` --
+            ``dim_red.pipeline.inference.load_run_embeddings``'s required
+            set; ``dataset.extxyz``/``model_params.msgpack`` aren't needed
+            for tail training at all). ``None`` (default) leaves it unset
+            in the config itself -- the
+            ``dimred-train-tail <config> <run_dir>`` console script (and its
+            ``python -m dim_red.pipeline.cli --train-tail <config>
+            --train-tail-run <run_dir>`` flag-based form) always takes the
+            run directory as a separate argument and overrides whatever is
+            here, so a single tail-training config can be reused across many
+            runs without editing it each time; set this directly only for
+            programmatic use of ``dim_red.pipeline.tail_training.train_tail``
+            without going through the CLI. ``train_tail`` raises if it's
+            still ``None`` by the time training actually starts.
+        classification: Required when ``tail_kind == "classification"``.
+        visualization: Required when ``tail_kind == "visualization"``.
+        train: Training-loop mechanics.
+        seed: Seed for the tail's own parameter initialization.
+        output_subdir: Directory name under ``<run_dir>/tails/`` this tail's
+            artifacts are written to. ``None`` (default) uses ``tail_kind``
+            itself.
+    """
+
+    tail_kind: str
+    run_dir: Optional[str] = None
+    classification: Optional[ClassificationTailConfig] = None
+    visualization: Optional[VisualizationTailConfig] = None
+    train: TailTrainSettings = field(default_factory=TailTrainSettings)
+    seed: int = 42
+    output_subdir: Optional[str] = None
+
+    def __post_init__(self):
+        if self.tail_kind not in _TAIL_KINDS:
+            raise ValueError(
+                f"tail_kind must be one of {_TAIL_KINDS}, got {self.tail_kind!r}"
+            )
+        if self.tail_kind == "classification" and self.classification is None:
+            raise ValueError(
+                "tail_kind='classification' requires a 'classification' config block."
+            )
+        if self.tail_kind == "visualization" and self.visualization is None:
+            raise ValueError(
+                "tail_kind='visualization' requires a 'visualization' config block."
+            )
+
+
+def tail_train_config_from_dict(d: Dict[str, Any]) -> TailTrainConfig:
+    """Build a ``TailTrainConfig`` from a parsed YAML dict (see
+    ``load_tail_train_config``)."""
+    tail_kind = str(d.get("tail_kind", "classification"))
+    train = _parse_train_settings(TailTrainSettings, d.get("train", {}))
+    classification = _parse_classification_tail_config(d)
+    visualization = _parse_visualization_tail_config(d)
+
+    run_dir = d.get("run_dir")
+    return TailTrainConfig(
+        run_dir=str(run_dir) if run_dir is not None else None,
+        tail_kind=tail_kind,
+        classification=classification,
+        visualization=visualization,
+        train=train,
+        seed=int(d.get("seed", 42)),
+        output_subdir=d.get("output_subdir"),
+    )
+
+
+def load_tail_train_config(path: Union[str, Path]) -> TailTrainConfig:
+    return tail_train_config_from_dict(load_yaml(path))
+
+
+def tail_train_config_to_dict(config: TailTrainConfig) -> Dict[str, Any]:
+    """Serialize a ``TailTrainConfig`` back into the same nested shape
+    ``load_tail_train_config`` expects, so a saved ``tail_config.yaml`` can
+    be fed straight back in for a rerun.
+    """
+    result = {
+        "run_dir": config.run_dir,
+        "tail_kind": config.tail_kind,
+        "train": dataclasses.asdict(config.train),
+        "seed": config.seed,
+        "output_subdir": config.output_subdir,
+    }
+    if config.classification is not None:
+        result["classification"] = dataclasses.asdict(config.classification)
+    if config.visualization is not None:
+        result["visualization"] = dataclasses.asdict(config.visualization)
+    return result

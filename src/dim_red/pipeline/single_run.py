@@ -8,13 +8,17 @@ every point in the dataset used for training (with soft-masked auxiliary
 head predictions when active), and a 2D scatter plot of those embeddings.
 ``config.model_kind`` selects between a VAE (``dim_red.vae``), a
 deterministic Autoencoder (``dim_red.autoencoder``), or an encoder-only
-Supervised Contrastive model (``dim_red.supcon``, no reconstruction/KL/
+Supervised Contrastive body (``dim_red.supcon``, no reconstruction/KL/
 classifier heads at all -- its family/spacegroup labels drive a contrastive
-loss on the latent ``z`` directly, gated by ``config.supcon.mode`` instead of
-``config.aux_heads.mode``). All three share the same encoder architecture
+loss, gated by ``config.supcon.mode`` instead of ``config.aux_heads.mode``,
+computed on a jointly-trained ``dim_red.supcon.tails.ProjectionTail``'s
+output rather than the body's own representation -- see
+``dim_red.supcon.training``). All three share the same encoder architecture
 (``config.vae``); ``supcon`` reads its own loss settings from
 ``config.supcon`` and ignores ``config.aux_heads``, the reverse of what
-``vae``/``autoencoder`` do.
+``vae``/``autoencoder`` do. A completed ``supcon`` run's frozen body can
+then have a classification or visualization tail trained on top of it
+separately -- see ``dim_red.pipeline.tail_training``.
 """
 
 from __future__ import annotations
@@ -37,9 +41,11 @@ from dim_red.autoencoder.model import Autoencoder
 from dim_red.autoencoder.model import apply_family_mask as ae_apply_family_mask
 from dim_red.autoencoder.training import TrainConfig as AETrainConfig
 from dim_red.autoencoder.training import train_autoencoder
-from dim_red.pipeline.config import RunConfig, run_config_to_dict
+from dim_red.pipeline.config import RunConfig, TailTrainConfig, run_config_to_dict
 from dim_red.pipeline.dataset_cache import build_dataset_for_run
+from dim_red.pipeline.tail_training import train_tail
 from dim_red.supcon.model import SupConEncoder
+from dim_red.supcon.tails import ProjectionTail
 from dim_red.supcon.training import TrainConfig as SupConTrainConfig
 from dim_red.supcon.training import train_supcon
 from dim_red.vae.database import VAEDatabase
@@ -228,9 +234,14 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
         (the exact structures used for training, same order as
         ``embeddings.npz``'s arrays), ``embeddings.npz`` (latent embeddings
         of every point in the training dataset, the raw standardized SOAP
-        ``features`` fed to the model, the true ``spacegroups`` per point,
-        plus ``family_probs``/``spacegroup_probs`` and their class
-        vocabularies when auxiliary heads are active -- never the case for
+        ``features`` fed to the model plus the ``feature_mean``/``feature_std``
+        they were standardized with -- from
+        ``dim_red.pipeline.dataset_cache.build_dataset_for_run``, so
+        ``dim_red.pipeline.inference.load_trained_run`` can standardize new
+        structures the same way without ever recomputing SOAP on this run's
+        own training set -- the true ``spacegroups`` per point, plus
+        ``family_probs``/``spacegroup_probs`` and their class vocabularies
+        when auxiliary heads are active -- never the case for
         ``model_kind == "supcon"``, which has no classifier heads at all),
         ``embeddings_plot.png`` and ``run.log``.
     """
@@ -250,9 +261,15 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
         resolved_cache_dir = (
             Path(cache_dir) if cache_dir else output_dir / "_dataset_cache"
         )
-        X, labels, material_ids, spacegroups, structures_path = build_dataset_for_run(
-            config, cache_dir=resolved_cache_dir
-        )
+        (
+            X,
+            labels,
+            material_ids,
+            spacegroups,
+            structures_path,
+            feature_mean,
+            feature_std,
+        ) = build_dataset_for_run(config, cache_dir=resolved_cache_dir)
         logger.info("Dataset ready: X.shape=%s, %d samples", X.shape, len(labels))
 
         dataset_path = run_dir / "dataset.extxyz"
@@ -343,14 +360,24 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
         is_vae = config.model_kind == "vae"
 
         if is_supcon:
-            # No decoder, no classifier heads at all -- the encoder is
-            # trained directly against family/spacegroup labels via a
-            # contrastive loss, so its constructor takes none of the
-            # aux-head/decoder arguments vae/autoencoder need.
+            # No decoder, no classifier heads at all -- the encoder (body)
+            # is trained jointly with a projection tail against family/
+            # spacegroup labels via a contrastive loss computed on the
+            # tail's output, not the body's own representation (Khosla et
+            # al. 2020). Its constructor takes none of the aux-head/decoder
+            # arguments vae/autoencoder need.
             model = SupConEncoder(
                 input_dim=X.shape[1],
                 encoder_hidden_dim=config.vae.encoder_hidden_dim,
                 latent_dim=config.vae.latent_dim,
+                seed=config.seed,
+            )
+            projection_tail = ProjectionTail(
+                input_dim=config.vae.latent_dim,
+                hidden_dim=(
+                    config.supcon.projection_hidden_dim or [config.vae.latent_dim]
+                ),
+                projection_dim=config.supcon.projection_dim,
                 seed=config.seed,
             )
         else:
@@ -387,6 +414,7 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
                 epochs=config.train.epochs,
                 batch_size=config.train.batch_size,
                 learning_rate=config.train.learning_rate,
+                optimizer=config.train.optimizer,
                 beta=config.train.beta,
                 lambda_family=config.aux_heads.lambda_family,
                 lambda_spacegroup=config.aux_heads.lambda_spacegroup,
@@ -396,7 +424,8 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
             )
             logger.info(
                 "Training VAE: encoder_hidden_dim=%s latent_dim=%d epochs=%d "
-                "batch_size=%d beta=%.3f aux_heads=%s device=%s early_stopping=%s",
+                "batch_size=%d beta=%.3f aux_heads=%s device=%s optimizer=%s "
+                "early_stopping=%s",
                 config.vae.encoder_hidden_dim,
                 config.vae.latent_dim,
                 config.train.epochs,
@@ -404,6 +433,7 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
                 config.train.beta,
                 aux_mode,
                 config.train.device,
+                config.train.optimizer,
                 config.train.early_stopping.enabled,
             )
         elif is_supcon:
@@ -411,6 +441,7 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
                 epochs=config.train.epochs,
                 batch_size=config.train.batch_size,
                 learning_rate=config.train.learning_rate,
+                optimizer=config.train.optimizer,
                 tau=config.supcon.tau,
                 distance=config.supcon.distance,
                 seed=config.seed,
@@ -418,11 +449,14 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
                 **early_stopping_kwargs,
             )
             logger.info(
-                "Training SupCon encoder: encoder_hidden_dim=%s latent_dim=%d epochs=%d "
-                "batch_size=%d tau=%.3f distance=%s lambda_norm=%.3f mode=%s device=%s "
-                "batching=%s%s early_stopping=%s",
+                "Training SupCon body+projection tail: encoder_hidden_dim=%s "
+                "latent_dim=%d projection_dim=%d projection_hidden_dim=%s "
+                "epochs=%d batch_size=%d tau=%.3f distance=%s lambda_norm=%.3f "
+                "mode=%s device=%s optimizer=%s batching=%s%s early_stopping=%s",
                 config.vae.encoder_hidden_dim,
                 config.vae.latent_dim,
+                config.supcon.projection_dim,
+                config.supcon.projection_hidden_dim or [config.vae.latent_dim],
                 config.train.epochs,
                 config.train.batch_size,
                 config.supcon.tau,
@@ -430,6 +464,7 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
                 config.supcon.lambda_norm,
                 aux_mode,
                 config.train.device,
+                config.train.optimizer,
                 config.batching.strategy,
                 (
                     f" (P={config.batching.balanced_params.P} "
@@ -445,6 +480,7 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
                 epochs=config.train.epochs,
                 batch_size=config.train.batch_size,
                 learning_rate=config.train.learning_rate,
+                optimizer=config.train.optimizer,
                 lambda_family=config.aux_heads.lambda_family,
                 lambda_spacegroup=config.aux_heads.lambda_spacegroup,
                 seed=config.seed,
@@ -453,19 +489,21 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
             )
             logger.info(
                 "Training Autoencoder: encoder_hidden_dim=%s latent_dim=%d epochs=%d "
-                "batch_size=%d aux_heads=%s device=%s early_stopping=%s",
+                "batch_size=%d aux_heads=%s device=%s optimizer=%s early_stopping=%s",
                 config.vae.encoder_hidden_dim,
                 config.vae.latent_dim,
                 config.train.epochs,
                 config.train.batch_size,
                 aux_mode,
                 config.train.device,
+                config.train.optimizer,
                 config.train.early_stopping.enabled,
             )
 
         if is_supcon:
             history = train_supcon(
                 model,
+                projection_tail,
                 train_db,
                 val_db,
                 train_config,
@@ -543,6 +581,13 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
             material_ids=np.array(material_ids),
             spacegroups=np.array(spacegroups, dtype=np.int64),
             split=split,
+            # Per-feature standardization stats these SOAP features were
+            # derived from (dim_red.pipeline.dataset_cache._compute_soap_and_standardize),
+            # so dim_red.pipeline.inference.load_trained_run can standardize
+            # new structures the same way without ever recomputing SOAP on
+            # this run's own training set.
+            feature_mean=feature_mean,
+            feature_std=feature_std,
         )
         logger.info(
             "Encoded %d points into %d-dim latent space",
@@ -606,6 +651,55 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
 
         with open(run_dir / "model_params.msgpack", "wb") as f:
             f.write(serialization.to_bytes(model.params))
+
+        if is_supcon:
+            # Discarded in the original paper once phase-1 training is
+            # done -- kept here purely for reproducibility/debugging the
+            # exact loss surface that produced the body. Nothing downstream
+            # (dim_red.pipeline.inference/tail_training) ever reloads it.
+            with open(run_dir / "projection_params.msgpack", "wb") as f:
+                f.write(serialization.to_bytes(projection_tail.params))
+            logger.info(
+                "Saved projection tail params to %s",
+                run_dir / "projection_params.msgpack",
+            )
+
+        # Auto-train tails (dim_red.pipeline.config.RunConfig.tails): the
+        # exact same dim_red.pipeline.tail_training.train_tail entry point
+        # dimred-train-tail invokes manually, just triggered automatically
+        # right after phase-1 training finishes. train_tail re-reads
+        # config.yaml/dataset.extxyz/embeddings.npz from run_dir (already
+        # written above) and recomputes SOAP to recover standardization
+        # stats -- the same cost a manual dimred-train-tail call would incur,
+        # not extra cost from automating it. Its own run.log FileHandler is
+        # added to this same "dim_red.pipeline" logger while ours is still
+        # attached, so this run's run.log ends up containing a full trace of
+        # any auto-triggered tail training too.
+        if is_supcon and config.tails is not None:
+            if config.tails.classification is not None:
+                logger.info("Auto-training classification tail on this run")
+                tail_dir = train_tail(
+                    TailTrainConfig(
+                        run_dir=str(run_dir),
+                        tail_kind="classification",
+                        classification=config.tails.classification,
+                        train=config.tails.train,
+                        seed=config.seed,
+                    )
+                )
+                logger.info("Auto-trained classification tail saved to %s", tail_dir)
+            if config.tails.visualization is not None:
+                logger.info("Auto-training visualization tail on this run")
+                tail_dir = train_tail(
+                    TailTrainConfig(
+                        run_dir=str(run_dir),
+                        tail_kind="visualization",
+                        visualization=config.tails.visualization,
+                        train=config.tails.train,
+                        seed=config.seed,
+                    )
+                )
+                logger.info("Auto-trained visualization tail saved to %s", tail_dir)
 
         logger.info("Run complete: artifacts saved to %s", run_dir)
     finally:

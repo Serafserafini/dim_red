@@ -57,9 +57,26 @@ base:
   train:
     epochs: 20
     batch_size: 32
-    learning_rate: 0.001
+    learning_rate: 0.001 # Adam's learning rate; unused when optimizer: velo
+    optimizer: adam # "adam" (default, fast) or "velo" (much slower to start, see CLAUDE.md)
     val_ratio: 0.2
     device: cpu
+
+  # Automatically train a classification and/or visualization tail on every
+  # run's frozen body right after phase-1 training finishes -- same
+  # dim_red.pipeline.tail_training.train_tail entry point dimred-train-tail
+  # uses, invoked automatically for each of this sweep's runs instead of as
+  # a separate manual command per run. Omit this block entirely (default)
+  # to disable, current behavior unchanged.
+  # tails:
+  #   classification:
+  #     mode: family_and_spacegroup
+  #   visualization:
+  #     viz_dim: 2
+  #   train:
+  #     epochs: 20
+  #     batch_size: 32
+  #     optimizer: adam
 
 # 2 hidden-layer configs x 2 tau values x 3 modes x 2 batching strategies =
 # 24 runs. Since only soap/pyxtal settings affect the dataset cache key, all

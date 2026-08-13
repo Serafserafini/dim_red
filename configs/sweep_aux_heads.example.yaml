@@ -39,7 +39,8 @@ base:
   train:
     epochs: 20
     batch_size: 32
-    learning_rate: 0.001
+    learning_rate: 0.001 # Adam's learning rate; unused when optimizer: velo
+    optimizer: adam # "adam" (default, fast) or "velo" (much slower to start, see CLAUDE.md)
     beta: 1.0
     val_ratio: 0.2
     device: cpu

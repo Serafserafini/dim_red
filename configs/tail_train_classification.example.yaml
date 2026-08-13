@@ -1,0 +1,50 @@
+# Example config for phase 2 of the SupCon body/tail workflow: freezes an
+# already-trained "model: supcon" run's body (see
+# configs/single_run_supcon.example.yaml) and trains a small classification
+# tail on top of its already-saved representations (embeddings.npz), via
+# cross-entropy -- Khosla et al. 2020's "linear evaluation protocol",
+# generalized to a small MLP head instead of a strictly linear one. No SOAP
+# recompute, no body forward pass -- freely rerunnable with a different
+# tail config against the same trained body.
+# The run directory (a completed "model: supcon" run -- needs config.yaml,
+# dataset.extxyz, model_params.msgpack and embeddings.npz) is passed on the
+# command line, not in this file, so the same tail config can be reused
+# across many runs without editing it each time:
+# Run with: python -m dim_red.pipeline.cli --train-tail configs/tail_train_classification.example.yaml --train-tail-run runs/<date>-<n>/<run-name>
+# or:       dimred-train-tail configs/tail_train_classification.example.yaml runs/<date>-<n>/<run-name>
+
+tail_kind: classification # "classification" or "visualization" -- see
+# configs/tail_train_visualization.example.yaml for the latter.
+
+classification:
+  # "family_only" or "family_and_spacegroup" (default, shown here) -- unlike
+  # supcon.mode in the phase-1 config, "spacegroup_only" is not valid here:
+  # the spacegroup head is conditioned on family via a co-occurrence mask
+  # (dim_red.supcon.tails.apply_family_mask), so it always needs the family
+  # head active too.
+  mode: family_and_spacegroup
+  lambda_family: 1.0
+  lambda_spacegroup: 1.0 # ignored unless mode: family_and_spacegroup
+  head_hidden_dim: 16
+
+# Directory name under <run_dir>/tails/ this tail's artifacts are written
+# to. null (default) uses tail_kind itself ("classification").
+output_subdir: null
+
+seed: 42 # seed for the tail's own parameter initialization
+
+train:
+  epochs: 20
+  batch_size: 32
+  learning_rate: 0.001 # Adam's learning rate (used when optimizer: adam,
+    # the default); unused when optimizer: velo
+  optimizer: adam # "adam" (default, fast) or "velo" (learned_optimization's
+    # pretrained VeLO meta-learned optimizer -- much slower to start, see CLAUDE.md)
+  device: cpu
+  # Same early-stopping mechanism as the rest of the pipeline (monitors
+  # val_loss, using phase 1's exact train/val split).
+  early_stopping:
+    enabled: false
+    patience: 10
+    min_delta: 0.0
+    restore_best_weights: true

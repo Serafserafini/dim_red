@@ -26,8 +26,10 @@ from dim_red.pipeline.config import (
 )
 from dim_red.pipeline.inference import (
     LoadedRun,
+    RunEmbeddings,
     apply_model_to_structures,
     encode_structures,
+    load_run_embeddings,
     load_trained_run,
 )
 from dim_red.pipeline.single_run import run_single
@@ -94,9 +96,14 @@ def _inference_soap_side_effect(fake_soap_train, seed=7):
 def test_load_trained_run_reconstructs_model_and_standardization(tmp_path):
     run_dir, fake_soap_train = _train_a_run(tmp_path)
 
+    # The fast path (feature_mean/feature_std already saved in embeddings.npz
+    # by run_single) must never call compute_soap at all -- that's the whole
+    # point of this fix, so any call here is a regression.
     with patch(
         "dim_red.pipeline.inference.compute_soap",
-        side_effect=_inference_soap_side_effect(fake_soap_train),
+        side_effect=AssertionError(
+            "load_trained_run's fast path must not recompute SOAP"
+        ),
     ):
         loaded = load_trained_run(run_dir)
 
@@ -111,8 +118,46 @@ def test_load_trained_run_reconstructs_model_and_standardization(tmp_path):
     assert loaded.embeddings["embeddings"].shape == (N_TRAIN, 2)
 
 
+def _strip_standardization_stats(run_dir):
+    """Rewrites run_dir/embeddings.npz without feature_mean/feature_std, to
+    simulate a run written before those fields existed (forcing
+    load_trained_run's slow fallback path)."""
+    npz_path = run_dir / "embeddings.npz"
+    with np.load(npz_path) as npz:
+        payload = {
+            k: v for k, v in npz.items() if k not in ("feature_mean", "feature_std")
+        }
+    np.savez(npz_path, **payload)
+
+
+def test_load_trained_run_falls_back_for_runs_missing_standardization_stats(
+    tmp_path, caplog
+):
+    run_dir, fake_soap_train = _train_a_run(tmp_path)
+    _strip_standardization_stats(run_dir)
+
+    with (
+        patch(
+            "dim_red.pipeline.inference.compute_soap",
+            side_effect=_inference_soap_side_effect(fake_soap_train),
+        ),
+        caplog.at_level(logging.WARNING, logger="dim_red.pipeline"),
+    ):
+        loaded = load_trained_run(run_dir)
+
+    assert loaded.feature_mean.shape == (N_FEATURES,)
+    assert loaded.feature_std.shape == (N_FEATURES,)
+    np.testing.assert_allclose(
+        loaded.feature_mean, fake_soap_train.mean(axis=0), atol=1e-5
+    )
+    assert any("no feature_mean/feature_std" in rec.message for rec in caplog.records)
+
+
 def test_load_trained_run_warns_on_standardization_mismatch(tmp_path, caplog):
+    """The mismatch check only runs on the slow fallback path (the fast path
+    has nothing recomputed to compare against embeddings.npz['features'])."""
     run_dir, _fake_soap_train = _train_a_run(tmp_path)
+    _strip_standardization_stats(run_dir)
 
     def _mismatched_side_effect(atoms, **kwargs):
         rng = np.random.default_rng(999)
@@ -135,6 +180,34 @@ def test_load_trained_run_missing_files_raises(tmp_path):
     empty_dir.mkdir()
     with pytest.raises(FileNotFoundError):
         load_trained_run(empty_dir)
+
+
+def test_load_run_embeddings_reads_config_and_embeddings_only(tmp_path):
+    """load_run_embeddings must never touch compute_soap -- it doesn't
+    reconstruct the model, resolve species, or need standardization stats at
+    all -- and must work even without dataset.extxyz/model_params.msgpack,
+    since dim_red.pipeline.tail_training.train_tail relies on exactly that.
+    """
+    run_dir, _fake_soap_train = _train_a_run(tmp_path)
+    (run_dir / "dataset.extxyz").unlink()
+    (run_dir / "model_params.msgpack").unlink()
+
+    with patch(
+        "dim_red.pipeline.inference.compute_soap",
+        side_effect=AssertionError("load_run_embeddings must not touch SOAP"),
+    ):
+        loaded = load_run_embeddings(run_dir)
+
+    assert isinstance(loaded, RunEmbeddings)
+    assert loaded.config.model_kind == "vae"
+    assert loaded.embeddings["embeddings"].shape == (N_TRAIN, 2)
+
+
+def test_load_run_embeddings_missing_files_raises(tmp_path):
+    empty_dir = tmp_path / "not-a-run"
+    empty_dir.mkdir()
+    with pytest.raises(FileNotFoundError):
+        load_run_embeddings(empty_dir)
 
 
 def test_encode_structures_returns_finite_latent_coords(tmp_path):

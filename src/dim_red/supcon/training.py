@@ -1,12 +1,15 @@
 """
-Training utilities for the SupCon (Supervised Contrastive) encoder-only model.
+Training utilities for the SupCon (Supervised Contrastive) body + projection
+tail (phase 1 -- see ``dim_red.supcon.tail_training`` for phase 2, training a
+classification/visualization tail on the frozen body afterwards).
 
 Mirrors ``dim_red.autoencoder.training``'s overall shape (``TrainConfig``,
 VeLO as the optimizer backend, the same ``has_family``/``has_spacegroup``
 compile-time-branch pattern) but the objective is entirely different: no
 reconstruction, no classifier heads -- a Supervised Contrastive loss
-computed directly on the encoder's latent ``z`` against family and/or
-spacegroup labels.
+computed against family and/or spacegroup labels, on the *projection tail's*
+output (Khosla et al. 2020's ``z = Proj(Enc(x))``), not directly on the
+body's own representation ``r`` -- see ``train_supcon``.
 
 Validation deliberately does **not** reuse the padding+``vmap``-over-epoch
 trick used by ``vae.training``/``autoencoder.training``: that trick zero-pads
@@ -60,6 +63,7 @@ from learned_optimization.research.general_lopt import prefab
 
 from dim_red.supcon.model import SupConEncoder
 from dim_red.supcon.sampling import iter_balanced_batches
+from dim_red.supcon.tails import ProjectionTail
 from dim_red.vae.database import VAEDatabase
 
 Array = jax.Array
@@ -68,6 +72,7 @@ logger = logging.getLogger("dim_red.pipeline")
 
 _BATCHING_STRATEGIES = ("random", "balanced")
 _DISTANCE_METRICS = ("euclidean", "cosine")
+_OPTIMIZERS = ("adam", "velo")
 
 
 @dataclass(frozen=True)
@@ -84,8 +89,15 @@ class TrainConfig:
     Attributes:
         epochs: Number of full passes over training data.
         batch_size: Number of samples per mini-batch.
-        learning_rate: Kept for API compatibility; VeLO is still used as
-            optimizer backend, same as ``vae``/``autoencoder``.
+        learning_rate: Adam's learning rate, used whenever ``optimizer ==
+            "adam"`` (the default). Ignored (kept for API compatibility) when
+            ``optimizer == "velo"``.
+        optimizer: ``"adam"`` (default) -- a plain ``optax.adam(learning_rate)``
+            -- or ``"velo"`` -- ``learned_optimization``'s pretrained VeLO
+            meta-learned optimizer, whose ``num_steps``-dependent setup and
+            pretrained-hypernetwork checkpoint load cost real, fixed time
+            (several seconds or more) before training even starts. See
+            ``_make_optimizer``.
         tau: Temperature dividing similarities before the softmax inside the
             SupCon loss.
         distance: Which similarity ``supcon_loss`` computes: ``"euclidean"``
@@ -117,6 +129,7 @@ class TrainConfig:
     epochs: int = 20
     batch_size: int = 32
     learning_rate: float = 1e-3
+    optimizer: str = "adam"
     tau: float = 0.1
     distance: str = "euclidean"
     seed: int = 42
@@ -264,8 +277,24 @@ def _weighted_mean(values: List[float], weights: List[int]) -> float:
     return float(np.sum(values_arr * weights_arr) / np.sum(weights_arr))
 
 
+def _make_optimizer(optimizer: str, learning_rate: float, num_steps: int):
+    """Build this training loop's optax-compatible optimizer.
+
+    ``"adam"`` (default) is a plain ``optax.adam(learning_rate)``, wrapped in
+    ``optax.with_extra_args_support`` so it also accepts the
+    ``extra_args={"loss": ...}`` kwarg every train/eval step always passes
+    (VeLO is loss-conditioned; a bare ``optax.adam`` doesn't accept
+    ``extra_args`` at all). ``"velo"`` uses ``learned_optimization``'s
+    pretrained VeLO meta-learned optimizer instead.
+    """
+    if optimizer == "velo":
+        return prefab.optax_lopt(num_steps=num_steps)
+    return optax.with_extra_args_support(optax.adam(learning_rate))
+
+
 def _make_train_step(
     model: SupConEncoder,
+    projection_tail: ProjectionTail,
     tx,
     tau: float,
     distance: str,
@@ -275,7 +304,16 @@ def _make_train_step(
     has_family: bool,
     has_spacegroup: bool,
 ):
-    """Create a jitted training step bound to model, optimizer and loss weights.
+    """Create a jitted training step bound to body, projection tail,
+    optimizer and loss weights.
+
+    ``params`` is a plain ``{"body": ..., "tail": ...}`` dict composed from
+    the body's and projection tail's independently-initialized pytrees --
+    both are differentiated together by the single ``jax.value_and_grad``
+    call below, so this is where body+tail are jointly trained (see the
+    module docstring). ``supcon_loss``/``norm_penalty`` are computed on the
+    projection tail's output ``z = Proj(r)``, not the body's raw
+    representation ``r``.
 
     ``has_family``/``has_spacegroup`` are plain Python bools (not traced
     values): the branches they guard are resolved at trace time, so the
@@ -294,7 +332,8 @@ def _make_train_step(
         """Single optimization step returning updated params/state/losses."""
 
         def loss_fn(local_params):
-            z = model.encode_with_params(local_params, batch_x)
+            r = model.encode_with_params(local_params["body"], batch_x)
+            z = projection_tail.project_with_params(local_params["tail"], r)
             total = jnp.asarray(0.0)
             family_loss = jnp.asarray(0.0)
             spacegroup_loss = jnp.asarray(0.0)
@@ -323,6 +362,7 @@ def _make_train_step(
 
 def _make_eval_step(
     model: SupConEncoder,
+    projection_tail: ProjectionTail,
     tau: float,
     distance: str,
     lambda_family,
@@ -334,13 +374,15 @@ def _make_eval_step(
     """Create a jitted evaluation step for one (unpadded) batch.
 
     Mirrors ``_make_train_step``'s objective exactly (same terms, same
-    weights, including ``norm_penalty``) so ``val_loss`` reflects the same
-    thing ``train_loss`` is actually optimized for.
+    weights, including ``norm_penalty``, computed on the projection tail's
+    output) so ``val_loss`` reflects the same thing ``train_loss`` is
+    actually optimized for.
     """
 
     @jax.jit
     def _eval_step(params, batch_x, batch_family, batch_spacegroup):
-        z = model.encode_with_params(params, batch_x)
+        r = model.encode_with_params(params["body"], batch_x)
+        z = projection_tail.project_with_params(params["tail"], r)
         total = jnp.asarray(0.0)
         family_loss = jnp.asarray(0.0)
         spacegroup_loss = jnp.asarray(0.0)
@@ -359,6 +401,7 @@ def _make_eval_step(
 
 def train_supcon(
     model: SupConEncoder,
+    projection_tail: ProjectionTail,
     train_db: VAEDatabase,
     val_db: VAEDatabase,
     config: TrainConfig,
@@ -376,11 +419,18 @@ def train_supcon(
     batching_K: Optional[int] = None,
     batching_S: Optional[int] = None,
 ) -> Dict[str, List[float]]:
-    """Train a ``SupConEncoder`` with VeLO and return per-epoch loss history.
+    """Jointly train a ``SupConEncoder`` body and a ``ProjectionTail``
+    (Adam by default, or VeLO -- see ``TrainConfig.optimizer``) and return
+    per-epoch loss history -- the SupCon loss is computed on the projection
+    tail's output, not the body's raw representation (see the module
+    docstring). Both ``model.params``/``projection_tail.params``
+    are updated in place.
 
     Args:
         model: ``SupConEncoder`` instance containing the Flax module and
-            mutable parameters.
+            mutable parameters -- the body.
+        projection_tail: ``ProjectionTail`` instance trained jointly with
+            the body; its output is what the SupCon loss actually sees.
         train_db: Training dataset wrapper.
         val_db: Validation dataset wrapper.
         config: Training hyperparameters and execution backend options.
@@ -400,7 +450,9 @@ def train_supcon(
         lambda_family: Weight of the family-level term.
         lambda_spacegroup: Weight of the spacegroup-level term.
         lambda_norm: Weight of the embedding-norm regularizer (see
-            ``norm_penalty``). ``0.0`` (default) disables it -- unlike
+            ``norm_penalty``), applied to the *projection tail's* output
+            (the space the SupCon loss is computed in), not the body's raw
+            representation. ``0.0`` (default) disables it -- unlike
             ``lambda_family``/``lambda_spacegroup``, always in effect
             (whenever non-zero) regardless of which label ids are given,
             since it doesn't depend on labels at all.
@@ -459,6 +511,12 @@ def train_supcon(
         raise ValueError("epochs must be a positive integer")
     if config.batch_size <= 0:
         raise ValueError("batch_size must be a positive integer")
+    if config.learning_rate <= 0:
+        raise ValueError("learning_rate must be > 0")
+    if config.optimizer not in _OPTIMIZERS:
+        raise ValueError(
+            f"optimizer must be one of {_OPTIMIZERS}, got {config.optimizer!r}"
+        )
     if config.tau <= 0:
         raise ValueError("tau must be > 0")
     if config.distance not in _DISTANCE_METRICS:
@@ -587,13 +645,14 @@ def train_supcon(
         history["train_spacegroup_supcon"] = []
         history["val_spacegroup_supcon"] = []
 
-    tx = prefab.optax_lopt(num_steps=total_steps)
+    tx = _make_optimizer(config.optimizer, config.learning_rate, total_steps)
     lambda_family_jax = jnp.asarray(lambda_family, dtype=jnp.float32)
     lambda_spacegroup_jax = jnp.asarray(lambda_spacegroup, dtype=jnp.float32)
     lambda_norm_jax = jnp.asarray(lambda_norm, dtype=jnp.float32)
 
     train_step = _make_train_step(
         model,
+        projection_tail,
         tx,
         config.tau,
         config.distance,
@@ -605,6 +664,7 @@ def train_supcon(
     )
     eval_step = _make_eval_step(
         model,
+        projection_tail,
         config.tau,
         config.distance,
         lambda_family_jax,
@@ -613,8 +673,8 @@ def train_supcon(
         has_family,
         has_spacegroup,
     )
-    opt_state = tx.init(model.params)
-    params = model.params
+    params = {"body": model.params, "tail": projection_tail.params}
+    opt_state = tx.init(params)
 
     best_val_loss = float("inf")
     best_params = None
@@ -729,5 +789,6 @@ def train_supcon(
         and best_params is not None
     ):
         params = best_params
-    model.params = params
+    model.params = params["body"]
+    projection_tail.params = params["tail"]
     return history

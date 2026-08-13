@@ -8,17 +8,21 @@ import yaml
 
 from dim_red.pipeline.config import (
     AugmentationConfig,
+    AutoTailsConfig,
     AuxHeadsConfig,
     BalancedBatchingParams,
     BatchingConfig,
+    ClassificationTailConfig,
     EarlyStoppingConfig,
     FetchConfig,
     PyxtalConfig,
     RunConfig,
     SoapConfig,
     SupConConfig,
+    TailTrainSettings,
     TrainSettings,
     VAEArchConfig,
+    VisualizationTailConfig,
     expand_sweep,
     flatten_config_dict,
     load_run_config,
@@ -482,6 +486,54 @@ def test_run_config_to_dict_roundtrips_supcon_lambda_norm(tmp_path):
     assert reloaded.supcon.lambda_norm == 0.4
 
 
+def test_supcon_config_projection_dim_defaults_to_128(tmp_path):
+    config_path = _write_yaml(tmp_path / "run.yaml", _single_run_dict())
+    config = load_run_config(config_path)
+    assert config.supcon.projection_dim == 128
+    assert config.supcon.projection_hidden_dim is None
+
+
+def test_supcon_config_rejects_non_positive_projection_dim():
+    with pytest.raises(ValueError, match="projection_dim must be a positive integer"):
+        SupConConfig(projection_dim=0)
+
+
+def test_run_config_parses_supcon_projection_fields(tmp_path):
+    d = _single_run_dict()
+    d["model"] = "supcon"
+    d["supcon"] = {"projection_dim": 64, "projection_hidden_dim": [32, 16]}
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+
+    assert config.supcon.projection_dim == 64
+    assert config.supcon.projection_hidden_dim == [32, 16]
+
+
+def test_run_config_to_dict_roundtrips_supcon_projection_fields(tmp_path):
+    d = _single_run_dict()
+    d["model"] = "supcon"
+    d["supcon"] = {"projection_dim": 64, "projection_hidden_dim": [32]}
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+
+    saved_path = _write_yaml(tmp_path / "saved.yaml", run_config_to_dict(config))
+    reloaded = load_run_config(saved_path)
+
+    assert reloaded == config
+    assert reloaded.supcon.projection_dim == 64
+    assert reloaded.supcon.projection_hidden_dim == [32]
+
+
+def test_expand_sweep_can_vary_supcon_projection_dim(tmp_path):
+    base = _single_run_dict()
+    base["model"] = "supcon"
+    sweep_dict = {
+        "base": base,
+        "grid": {"supcon.projection_dim": [32, 64, 128]},
+    }
+    sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
+    runs = expand_sweep(sweep)
+    assert {r.supcon.projection_dim for r in runs} == {32, 64, 128}
+
+
 def test_expand_sweep_can_vary_supcon_lambda_norm(tmp_path):
     base = _single_run_dict()
     base["model"] = "supcon"
@@ -862,3 +914,140 @@ def test_expand_sweep_family_and_spacegroup_expands_both_lambda_axes(tmp_path):
     assert len(runs) == 4
     combos = {(r.aux_heads.lambda_family, r.aux_heads.lambda_spacegroup) for r in runs}
     assert combos == {(0.5, 0.1), (0.5, 0.2), (1.0, 0.1), (1.0, 0.2)}
+
+
+def test_run_config_defaults_optimizer_to_adam(tmp_path):
+    config_path = _write_yaml(tmp_path / "run.yaml", _single_run_dict())
+    config = load_run_config(config_path)
+    assert config.train.optimizer == "adam"
+
+
+def test_train_settings_rejects_invalid_optimizer():
+    with pytest.raises(ValueError, match="train.optimizer must be one of"):
+        TrainSettings(optimizer="bogus")
+
+
+@pytest.mark.parametrize("optimizer", ["adam", "velo"])
+def test_train_settings_accepts_valid_optimizers(optimizer):
+    assert TrainSettings(optimizer=optimizer).optimizer == optimizer
+
+
+def test_run_config_parses_train_optimizer(tmp_path):
+    d = _single_run_dict()
+    d["train"]["optimizer"] = "velo"
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+    assert config.train.optimizer == "velo"
+
+
+def test_run_config_to_dict_roundtrips_optimizer(tmp_path):
+    d = _single_run_dict()
+    d["train"]["optimizer"] = "velo"
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+
+    saved_path = _write_yaml(tmp_path / "saved.yaml", run_config_to_dict(config))
+    reloaded = load_run_config(saved_path)
+
+    assert reloaded == config
+    assert reloaded.train.optimizer == "velo"
+
+
+def test_expand_sweep_can_vary_train_optimizer(tmp_path):
+    base = _single_run_dict()
+    sweep_dict = {"base": base, "grid": {"train.optimizer": ["adam", "velo"]}}
+    sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
+    runs = expand_sweep(sweep)
+    assert {r.train.optimizer for r in runs} == {"adam", "velo"}
+
+
+def test_run_config_defaults_tails_to_none(tmp_path):
+    config_path = _write_yaml(tmp_path / "run.yaml", _single_run_dict())
+    config = load_run_config(config_path)
+    assert config.tails is None
+
+
+def test_run_config_parses_tails_classification_only(tmp_path):
+    d = _single_run_dict()
+    d["tails"] = {"classification": {"mode": "family_only", "lambda_family": 2.0}}
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+
+    assert config.tails == AutoTailsConfig(
+        classification=ClassificationTailConfig(mode="family_only", lambda_family=2.0),
+        visualization=None,
+    )
+
+
+def test_run_config_parses_tails_visualization_only(tmp_path):
+    d = _single_run_dict()
+    d["tails"] = {
+        "visualization": {
+            "viz_dim": 3,
+            "batching": {
+                "strategy": "balanced",
+                "balanced_params": {"K": 8},
+            },
+        }
+    }
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+
+    assert config.tails.classification is None
+    assert config.tails.visualization.viz_dim == 3
+    assert config.tails.visualization.batching == BatchingConfig(
+        strategy="balanced",
+        balanced_params=BalancedBatchingParams(K=8),
+    )
+
+
+def test_run_config_parses_tails_both(tmp_path):
+    d = _single_run_dict()
+    d["tails"] = {
+        "classification": {"mode": "family_and_spacegroup"},
+        "visualization": {"viz_dim": 2},
+        "train": {"epochs": 5, "optimizer": "velo"},
+    }
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+
+    assert config.tails.classification == ClassificationTailConfig(
+        mode="family_and_spacegroup"
+    )
+    assert config.tails.visualization == VisualizationTailConfig(viz_dim=2)
+    assert config.tails.train == TailTrainSettings(epochs=5, optimizer="velo")
+
+
+def test_run_config_to_dict_roundtrips_tails_block(tmp_path):
+    d = _single_run_dict()
+    d["tails"] = {
+        "classification": {"mode": "family_only"},
+        "visualization": {"viz_dim": 3},
+        "train": {"epochs": 7},
+    }
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+
+    saved_path = _write_yaml(tmp_path / "saved.yaml", run_config_to_dict(config))
+    reloaded = load_run_config(saved_path)
+
+    assert reloaded == config
+    assert reloaded.tails.classification.mode == "family_only"
+    assert reloaded.tails.visualization.viz_dim == 3
+    assert reloaded.tails.train.epochs == 7
+
+
+def test_run_config_to_dict_omits_tails_block_when_none(tmp_path):
+    config_path = _write_yaml(tmp_path / "run.yaml", _single_run_dict())
+    config = load_run_config(config_path)
+    saved = run_config_to_dict(config)
+    assert "tails" not in saved
+
+
+def test_expand_sweep_can_vary_tails_classification_mode(tmp_path):
+    base = _single_run_dict()
+    base["tails"] = {"classification": {"mode": "family_only"}}
+    sweep_dict = {
+        "base": base,
+        "grid": {"tails.classification.mode": ["family_only", "family_and_spacegroup"]},
+    }
+    sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
+    runs = expand_sweep(sweep)
+    assert {r.tails.classification.mode for r in runs} == {
+        "family_only",
+        "family_and_spacegroup",
+    }

@@ -22,6 +22,8 @@ from dim_red.vae.database import VAEDatabase
 
 Array = jax.Array
 
+_OPTIMIZERS = ("adam", "velo")
+
 
 @dataclass(frozen=True)
 class TrainConfig:
@@ -30,8 +32,15 @@ class TrainConfig:
     Attributes:
         epochs: Number of full passes over training data.
         batch_size: Number of samples per mini-batch.
-        learning_rate: Kept for API compatibility; VeLO is still used as
-            optimizer backend.
+        learning_rate: Adam's learning rate, used whenever ``optimizer ==
+            "adam"`` (the default). Ignored (kept for API compatibility) when
+            ``optimizer == "velo"``.
+        optimizer: ``"adam"`` (default) -- a plain ``optax.adam(learning_rate)``
+            -- or ``"velo"`` -- ``learned_optimization``'s pretrained VeLO
+            meta-learned optimizer, whose ``num_steps``-dependent setup and
+            pretrained-hypernetwork checkpoint load cost real, fixed time
+            (several seconds or more) before training even starts. See
+            ``_make_optimizer``.
         lambda_family: Weight applied to the family classification
             cross-entropy term, when family ids are passed to
             ``train_autoencoder``. Ignored otherwise.
@@ -60,6 +69,7 @@ class TrainConfig:
     epochs: int = 20
     batch_size: int = 32
     learning_rate: float = 1e-3
+    optimizer: str = "adam"
     lambda_family: float = 0.0
     lambda_spacegroup: float = 0.0
     seed: int = 42
@@ -96,6 +106,21 @@ def _iter_batches(
         batch_idx = indices[start : start + batch_size]
         batches.append(tuple(a[batch_idx] for a in arrays))
     return batches
+
+
+def _make_optimizer(optimizer: str, learning_rate: float, num_steps: int):
+    """Build this training loop's optax-compatible optimizer.
+
+    ``"adam"`` (default) is a plain ``optax.adam(learning_rate)``, wrapped in
+    ``optax.with_extra_args_support`` so it also accepts the
+    ``extra_args={"loss": ...}`` kwarg every train/eval step always passes
+    (VeLO is loss-conditioned; a bare ``optax.adam`` doesn't accept
+    ``extra_args`` at all). ``"velo"`` uses ``learned_optimization``'s
+    pretrained VeLO meta-learned optimizer instead.
+    """
+    if optimizer == "velo":
+        return prefab.optax_lopt(num_steps=num_steps)
+    return optax.with_extra_args_support(optax.adam(learning_rate))
 
 
 def _make_train_step(
@@ -276,7 +301,8 @@ def train_autoencoder(
     val_spacegroup_ids: Optional[np.ndarray] = None,
     family_spacegroup_mask: Optional[np.ndarray] = None,
 ) -> Dict[str, List[float]]:
-    """Train an Autoencoder with VeLO (Optax wrapper) and return loss history.
+    """Train an Autoencoder (Adam by default, or VeLO -- see
+    ``TrainConfig.optimizer``) and return loss history.
 
     Args:
         model: Autoencoder instance containing Flax module and mutable parameters.
@@ -324,6 +350,10 @@ def train_autoencoder(
         raise ValueError("batch_size must be a positive integer")
     if config.learning_rate <= 0:
         raise ValueError("learning_rate must be > 0")
+    if config.optimizer not in _OPTIMIZERS:
+        raise ValueError(
+            f"optimizer must be one of {_OPTIMIZERS}, got {config.optimizer!r}"
+        )
     if config.lambda_family < 0:
         raise ValueError("lambda_family must be >= 0")
     if config.lambda_spacegroup < 0:
@@ -399,7 +429,7 @@ def train_autoencoder(
         history["train_spacegroup_ce"] = []
         history["val_spacegroup_ce"] = []
 
-    tx = prefab.optax_lopt(num_steps=total_steps)
+    tx = _make_optimizer(config.optimizer, config.learning_rate, total_steps)
     lambda_family = jnp.asarray(config.lambda_family, dtype=jnp.float32)
     lambda_spacegroup = jnp.asarray(config.lambda_spacegroup, dtype=jnp.float32)
 

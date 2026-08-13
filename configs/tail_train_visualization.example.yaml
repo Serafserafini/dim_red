@@ -1,0 +1,76 @@
+# Example config for phase 2 of the SupCon body/tail workflow: freezes an
+# already-trained "model: supcon" run's body (see
+# configs/single_run_supcon.example.yaml) and trains a small visualization
+# tail on top of its already-saved representations (embeddings.npz), down
+# to 2 or 3 dimensions, using the *same* Supervised Contrastive loss as the
+# phase-1 projection tail -- so the low-dimensional projection still
+# respects family/spacegroup neighborhood structure, unlike a purely
+# unsupervised post-hoc projection (e.g. UMAP). No SOAP recompute, no body
+# forward pass -- freely rerunnable with a different tail config against the
+# same trained body.
+# The run directory (a completed "model: supcon" run -- needs config.yaml,
+# dataset.extxyz, model_params.msgpack and embeddings.npz) is passed on the
+# command line, not in this file, so the same tail config can be reused
+# across many runs without editing it each time:
+# Run with: python -m dim_red.pipeline.cli --train-tail configs/tail_train_visualization.example.yaml --train-tail-run runs/<date>-<n>/<run-name>
+# or:       dimred-train-tail configs/tail_train_visualization.example.yaml runs/<date>-<n>/<run-name>
+
+tail_kind: visualization # "classification" or "visualization" -- see
+# configs/tail_train_classification.example.yaml for the former.
+
+visualization:
+  viz_dim: 2 # 2 or 3 -- plotted with dim_red.analysis.plotting.plot_reduced_space
+  # (viz_dim: 2) or plot_reduced_space_3d (viz_dim: 3) respectively.
+  # Which label level(s) to contrast on: "family_only", "spacegroup_only",
+  # or "family_and_spacegroup" (default, shown here) -- same 3-value set as
+  # phase 1's supcon.mode (independent terms, no family -> spacegroup
+  # masking, unlike the classification tail's mode).
+  mode: family_and_spacegroup
+  lambda_family: 1.0
+  lambda_spacegroup: 1.0
+  tau: 0.1
+  # "euclidean" (default, shown here) or "cosine" -- see
+  # dim_red.supcon.training.supcon_loss.
+  distance: euclidean
+  # Weight of an optional embedding-norm regularizer, applied to this
+  # tail's own output. 0.0 (default, shown here) disables it.
+  lambda_norm: 0.0
+  # Widths of hidden layers in the visualization MLP. null (default, shown
+  # here) resolves to a single hidden layer matching the body's own
+  # representation width.
+  hidden_dim: null
+  # How training batches are built (validation batches always stay random,
+  # regardless of this setting) -- same shape as phase 1's top-level
+  # "batching" block. "random" (default, shown here) or "balanced" (a
+  # family/spacegroup-stratified sampler, see dim_red.supcon.sampling).
+  # Example balanced block, commented out:
+  # batching:
+  #   strategy: balanced
+  #   balanced_params:
+  #     P: null   # null -> all families present in the training split
+  #     K: 32     # examples per family per batch -> batch_size = P*K
+  #     S: 8      # spacegroups per family per batch; null -> every spacegroup present
+  batching:
+    strategy: random
+
+# Directory name under <run_dir>/tails/ this tail's artifacts are written
+# to. null (default) uses tail_kind itself ("visualization").
+output_subdir: null
+
+seed: 42 # seed for the tail's own parameter initialization
+
+train:
+  epochs: 20
+  batch_size: 32
+  learning_rate: 0.001 # Adam's learning rate (used when optimizer: adam,
+    # the default); unused when optimizer: velo
+  optimizer: adam # "adam" (default, fast) or "velo" (learned_optimization's
+    # pretrained VeLO meta-learned optimizer -- much slower to start, see CLAUDE.md)
+  device: cpu
+  # Same early-stopping mechanism as the rest of the pipeline (monitors
+  # val_loss, using phase 1's exact train/val split).
+  early_stopping:
+    enabled: false
+    patience: 10
+    min_delta: 0.0
+    restore_best_weights: true

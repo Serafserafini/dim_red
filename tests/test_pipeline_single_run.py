@@ -6,6 +6,7 @@ expected artifact is written to the run directory.
 """
 
 import csv
+import dataclasses
 import logging
 from unittest.mock import patch
 
@@ -17,19 +18,25 @@ from ase.io import read as read_atoms
 
 pytest.importorskip("jax")
 
+from flax import serialization
+
 from dim_red.pipeline.config import (
     AugmentationConfig,
+    AutoTailsConfig,
     AuxHeadsConfig,
     BalancedBatchingParams,
     BatchingConfig,
+    ClassificationTailConfig,
     EarlyStoppingConfig,
     FetchConfig,
     PyxtalConfig,
     RunConfig,
     SoapConfig,
     SupConConfig,
+    TailTrainSettings,
     TrainSettings,
     VAEArchConfig,
+    VisualizationTailConfig,
 )
 from dim_red.pipeline.single_run import run_single
 
@@ -93,6 +100,13 @@ def test_run_single_writes_expected_artifacts(tmp_path):
     assert set(embeddings["split"].tolist()) == {"train", "val"}
     assert (embeddings["split"] == "val").sum() == 2  # val_ratio=0.25 of 8 samples
 
+    # Standardization stats the SOAP features were derived from -- saved so
+    # dim_red.pipeline.inference.load_trained_run never needs to recompute
+    # SOAP on this run's own training set.
+    n_features = embeddings["features"].shape[1]
+    assert embeddings["feature_mean"].shape == (n_features,)
+    assert embeddings["feature_std"].shape == (n_features,)
+
     # dataset.extxyz holds the exact structures used, same order/count as
     # embeddings.npz's arrays.
     dataset_atoms = read_atoms(run_dir / "dataset.extxyz", index=":")
@@ -112,6 +126,26 @@ def test_run_single_writes_expected_artifacts(tmp_path):
         "val_recon",
         "val_kl",
     ]
+
+
+def test_run_single_optimizer_velo_still_works_end_to_end(tmp_path):
+    """ "velo" is opt-in now (default is "adam") -- confirm it still works
+    end-to-end through the full pipeline, not just the lower-level
+    train_vae/train_supcon/... functions.
+    """
+    config = _make_config(tmp_path, name="test-run-velo")
+    config = dataclasses.replace(
+        config, train=dataclasses.replace(config.train, optimizer="velo")
+    )
+    fetch_patch, soap_patch = _patch_dataset()
+
+    with fetch_patch, soap_patch:
+        run_dir = run_single(config)
+
+    assert (run_dir / "model_params.msgpack").exists()
+    with open(run_dir / "run.log") as f:
+        run_log = f.read()
+    assert "optimizer=velo" in run_log
 
 
 def test_run_single_auto_name_encodes_swept_params(tmp_path):
@@ -534,6 +568,7 @@ def test_run_single_supcon_family_and_spacegroup_writes_expected_artifacts(tmp_p
             lambda_family=1.0,
             lambda_spacegroup=0.5,
             tau=0.1,
+            projection_dim=6,
         ),
         seed=0,
         output_dir=str(tmp_path / "runs"),
@@ -558,6 +593,12 @@ def test_run_single_supcon_family_and_spacegroup_writes_expected_artifacts(tmp_p
     assert (run_dir / "loss_history.csv").exists()
     assert (run_dir / "embeddings.npz").exists()
     assert (run_dir / "model_params.msgpack").exists()
+
+    assert (run_dir / "projection_params.msgpack").exists()
+    with open(run_dir / "projection_params.msgpack", "rb") as f:
+        projection_params = serialization.msgpack_restore(f.read())
+    last_layer = sorted(projection_params, key=lambda k: int(k.split("_")[-1]))[-1]
+    assert projection_params[last_layer]["bias"].shape == (6,)
 
     with open(run_dir / "loss_history.csv") as f:
         header = f.readline().strip().split(",")
@@ -919,6 +960,10 @@ def test_run_single_supcon_early_stopping_stops_before_configured_epochs(tmp_pat
             epochs=40,
             batch_size=4,
             val_ratio=0.2,
+            # Tuned against VeLO's convergence timing (faked fast by
+            # tests/conftest.py's fixture) -- this test is about early
+            # stopping's own bookkeeping, not optimizer choice.
+            optimizer="velo",
             early_stopping=EarlyStoppingConfig(enabled=True, patience=2),
         ),
         supcon=SupConConfig(mode="family_only", tau=0.1),
@@ -969,3 +1014,121 @@ def test_run_single_early_stopping_disabled_by_default(tmp_path):
     assert len(rows) == 3
     with open(run_dir / "run.log") as f:
         assert "Early stopping" not in f.read()
+
+
+def _make_supcon_config_with_tails(tmp_path, tails):
+    return RunConfig(
+        fetch=FetchConfig(crystal_systems=["cubic", "hexagonal"], limit_per_system=10),
+        soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
+        vae=VAEArchConfig(encoder_hidden_dim=[8], latent_dim=2),
+        train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.2),
+        supcon=SupConConfig(mode="family_and_spacegroup", tau=0.1, projection_dim=6),
+        seed=0,
+        output_dir=str(tmp_path / "runs"),
+        model_kind="supcon",
+        tails=tails,
+    )
+
+
+def test_run_single_supcon_auto_trains_both_tails(tmp_path):
+    tails = AutoTailsConfig(
+        classification=ClassificationTailConfig(mode="family_only"),
+        visualization=VisualizationTailConfig(viz_dim=2),
+        train=TailTrainSettings(epochs=1, batch_size=4),
+    )
+    config = _make_supcon_config_with_tails(tmp_path, tails)
+    spacegroup_offsets = {"cubic": 195, "hexagonal": 168}
+
+    with (
+        patch(
+            "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
+            side_effect=_fake_fetch_with_spacegroups(spacegroup_offsets),
+        ),
+        patch(
+            "dim_red.pipeline.dataset_cache.compute_soap",
+            side_effect=_fake_compute_soap(),
+        ),
+    ):
+        run_dir = run_single(config)
+
+    classification_dir = run_dir / "tails" / "classification"
+    visualization_dir = run_dir / "tails" / "visualization"
+    assert (classification_dir / "tail_predictions.npz").exists()
+    assert (classification_dir / "tail_params.msgpack").exists()
+    assert (classification_dir / "run.log").exists()
+    assert (visualization_dir / "tail_embeddings.npz").exists()
+    assert (visualization_dir / "tail_params.msgpack").exists()
+    assert (visualization_dir / "run.log").exists()
+
+    with open(run_dir / "run.log") as f:
+        run_log = f.read()
+    assert "Auto-training classification tail on this run" in run_log
+    assert "Auto-trained classification tail saved to" in run_log
+    assert "Auto-training visualization tail on this run" in run_log
+    assert "Auto-trained visualization tail saved to" in run_log
+
+
+def test_run_single_supcon_auto_trains_classification_tail_only(tmp_path):
+    tails = AutoTailsConfig(
+        classification=ClassificationTailConfig(mode="family_only"),
+        train=TailTrainSettings(epochs=1, batch_size=4),
+    )
+    config = _make_supcon_config_with_tails(tmp_path, tails)
+    spacegroup_offsets = {"cubic": 195, "hexagonal": 168}
+
+    with (
+        patch(
+            "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
+            side_effect=_fake_fetch_with_spacegroups(spacegroup_offsets),
+        ),
+        patch(
+            "dim_red.pipeline.dataset_cache.compute_soap",
+            side_effect=_fake_compute_soap(),
+        ),
+    ):
+        run_dir = run_single(config)
+
+    assert (run_dir / "tails" / "classification").exists()
+    assert not (run_dir / "tails" / "visualization").exists()
+
+
+def test_run_single_tails_ignored_for_non_supcon_model_kind(tmp_path):
+    tails = AutoTailsConfig(
+        classification=ClassificationTailConfig(mode="family_only"),
+        visualization=VisualizationTailConfig(viz_dim=2),
+        train=TailTrainSettings(epochs=1, batch_size=4),
+    )
+    config = RunConfig(
+        fetch=FetchConfig(crystal_systems=["cubic"], limit_per_system=8),
+        soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
+        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
+        train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
+        seed=0,
+        output_dir=str(tmp_path / "runs"),
+        tails=tails,
+    )
+    fetch_patch, soap_patch = _patch_dataset()
+
+    with fetch_patch, soap_patch:
+        run_dir = run_single(config)
+
+    assert not (run_dir / "tails").exists()
+
+
+def test_run_single_tails_none_leaves_behavior_unchanged(tmp_path):
+    config = _make_supcon_config_with_tails(tmp_path, tails=None)
+    spacegroup_offsets = {"cubic": 195, "hexagonal": 168}
+
+    with (
+        patch(
+            "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
+            side_effect=_fake_fetch_with_spacegroups(spacegroup_offsets),
+        ),
+        patch(
+            "dim_red.pipeline.dataset_cache.compute_soap",
+            side_effect=_fake_compute_soap(),
+        ),
+    ):
+        run_dir = run_single(config)
+
+    assert not (run_dir / "tails").exists()

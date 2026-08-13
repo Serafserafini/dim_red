@@ -56,7 +56,10 @@ aux_heads:
 train:
   epochs: 20
   batch_size: 32
-  learning_rate: 0.001 # unused by the VeLO optimizer, kept for API compatibility
+  learning_rate: 0.001 # Adam's learning rate (used when optimizer: adam,
+    # the default); unused when optimizer: velo
+  optimizer: adam # "adam" (default, fast) or "velo" (learned_optimization's
+    # pretrained VeLO meta-learned optimizer -- much slower to start, see CLAUDE.md)
   beta: 1.0
   val_ratio: 0.2
   device: cpu

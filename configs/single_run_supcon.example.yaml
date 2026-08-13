@@ -1,7 +1,13 @@
-# Example config for a single pyxtal -> SOAP -> SupCon encoder run: no
-# decoder/KL, the encoder is trained directly with a Supervised Contrastive
-# loss on family and/or spacegroup labels (mode below) so structures with
-# similar labels end up nearby in latent space. See CLAUDE.md/dim_red.supcon.
+# Example config for a single pyxtal -> SOAP -> SupCon body+projection-tail
+# run: no decoder, and no classifier heads at this stage -- the body is
+# trained jointly with a small projection tail via a Supervised Contrastive
+# loss (Khosla et al. 2020), computed on the *projection tail's* output
+# (not the body's own representation), on family and/or spacegroup labels
+# (mode below). Once this run completes, its frozen body can have a
+# classification or visualization tail trained on top of it separately --
+# see configs/tail_train_classification.example.yaml/
+# configs/tail_train_visualization.example.yaml and
+# dim_red.pipeline.tail_training. See CLAUDE.md/dim_red.supcon.
 # Run with: python -m dim_red.pipeline.cli --config configs/single_run_supcon.example.yaml
 # or:       dimred-run configs/single_run_supcon.example.yaml
 
@@ -61,6 +67,17 @@ supcon:
   # built-in scale normalization to prevent that on its own; largely
   # redundant with distance: cosine.
   lambda_norm: 0.0
+  # Size of the space the SupCon loss is actually computed in (Khosla et
+  # al. 2020 default, shown here) -- separate from vae.latent_dim above,
+  # which stays the body's own representation width (saved to
+  # embeddings.npz, reused by every downstream tail). The projection tail
+  # is discarded after this run in the original paper; this codebase still
+  # saves its trained weights (projection_params.msgpack) for
+  # reproducibility.
+  projection_dim: 128
+  # Widths of hidden layers in the projection tail's MLP. null (default,
+  # shown here) resolves to a single hidden layer matching vae.latent_dim.
+  projection_hidden_dim: null
 
 # How training batches are built (validation batches always stay random,
 # regardless of this setting). "random" (default, shown here -- a plain
@@ -80,7 +97,10 @@ batching:
 train:
   epochs: 20
   batch_size: 32
-  learning_rate: 0.001 # unused by the VeLO optimizer, kept for API compatibility
+  learning_rate: 0.001 # Adam's learning rate (used when optimizer: adam,
+    # the default); unused when optimizer: velo
+  optimizer: adam # "adam" (default, fast) or "velo" (learned_optimization's
+    # pretrained VeLO meta-learned optimizer -- much slower to start, see CLAUDE.md)
   val_ratio: 0.2
   device: cpu
   # Optional early stopping (same mechanism for vae/autoencoder/supcon):
@@ -91,3 +111,21 @@ train:
     patience: 10
     min_delta: 0.0
     restore_best_weights: true
+
+# Automatically train a classification and/or visualization tail on this
+# run's frozen body right after phase-1 training finishes -- the same
+# dim_red.pipeline.tail_training.train_tail entry point dimred-train-tail
+# uses, invoked automatically instead of as a separate manual command.
+# Ignored for model != "supcon". Omit this block entirely (default) to
+# disable, current behavior unchanged -- use dimred-train-tail manually
+# instead, as configs/tail_train_classification.example.yaml/
+# configs/tail_train_visualization.example.yaml show.
+# tails:
+#   classification:
+#     mode: family_and_spacegroup
+#   visualization:
+#     viz_dim: 2
+#   train:
+#     epochs: 20
+#     batch_size: 32
+#     optimizer: adam

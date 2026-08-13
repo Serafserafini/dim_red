@@ -139,7 +139,10 @@ batching:
 train:
   epochs: 20
   batch_size: 32
-  learning_rate: 0.001 # unused by the VeLO optimizer, kept for API compatibility
+  learning_rate: 0.001 # Adam's learning rate (used when optimizer: adam,
+    # the default); unused when optimizer: velo
+  optimizer: adam # "adam" (default, fast) or "velo" (learned_optimization's
+    # pretrained VeLO meta-learned optimizer -- much slower to start, see CLAUDE.md)
   beta: 1.0 # KL weight; ignored for model: autoencoder/supcon (no KL term)
   val_ratio: 0.2
   device: cpu # "cpu" | "gpu" -- raises if no matching JAX device exists
@@ -149,3 +152,37 @@ train:
     patience: 10
     min_delta: 0.0
     restore_best_weights: true # keep the best-val_loss epoch's params, not necessarily the last
+
+# --- model: supcon only: auto-train tails ----------------------------------
+# Automatically train a classification and/or visualization tail on this
+# run's frozen body right after phase-1 training finishes -- the same
+# dim_red.pipeline.tail_training.train_tail entry point dimred-train-tail
+# uses, invoked automatically instead of as a separate manual command.
+# Ignored for model != "supcon". Omit this block entirely (default: null)
+# to disable, current behavior unchanged.
+
+tails: null # example block, all fields at their default:
+  # classification: null # set to auto-train a classification tail, e.g.:
+  #   mode: family_and_spacegroup # "family_only" | "family_and_spacegroup"
+  #   lambda_family: 1.0
+  #   lambda_spacegroup: 1.0 # ignored unless mode: family_and_spacegroup
+  #   head_hidden_dim: 16
+  # visualization: null # set to auto-train a visualization tail, e.g.:
+  #   viz_dim: 2 # 2 or 3
+  #   mode: family_and_spacegroup # "family_only" | "spacegroup_only" | "family_and_spacegroup"
+  #   lambda_family: 1.0
+  #   lambda_spacegroup: 1.0
+  #   tau: 0.1
+  #   distance: euclidean # "euclidean" | "cosine"
+  #   lambda_norm: 0.0
+  #   hidden_dim: null # null -> single hidden layer matching the body's own width
+  #   batching: # same shape as the top-level "batching:" block above
+  #     strategy: random
+  #     balanced_params: {P: null, K: null, S: null}
+  # train: # training-loop mechanics shared by whichever tail(s) are enabled
+  #   epochs: 20
+  #   batch_size: 32
+  #   learning_rate: 0.001
+  #   optimizer: adam
+  #   device: cpu
+  #   early_stopping: {enabled: false, patience: 10, min_delta: 0.0, restore_best_weights: true}

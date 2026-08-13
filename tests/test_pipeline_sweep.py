@@ -214,3 +214,34 @@ def test_run_sweep_can_vary_model_kind(tmp_path):
     assert names == {"hd-4_cs-cubic", "model-autoencoder_hd-4_cs-cubic"}
     for run_dir in run_dirs:
         assert (run_dir / "loss_history.csv").exists()
+
+
+def test_run_sweep_auto_trains_tails_for_every_run(tmp_path):
+    """A base config setting "tails" reaches every run in a sweep with zero
+    changes to run_sweep itself -- it just calls run_single per combination,
+    which is where the auto-tail-training wiring lives.
+    """
+    base = {
+        "seed": 0,
+        "output_dir": str(tmp_path / "runs"),
+        "model": "supcon",
+        "fetch": {"crystal_systems": ["cubic"], "limit_per_system": 8},
+        "soap": {"r_cut": 3.0, "n_max": 2, "l_max": 2},
+        "vae": {"encoder_hidden_dim": [4], "latent_dim": 2},
+        "train": {"epochs": 1, "batch_size": 4, "val_ratio": 0.25},
+        "tails": {
+            "classification": {"mode": "family_only"},
+            "visualization": {"viz_dim": 2},
+            "train": {"epochs": 1, "batch_size": 4},
+        },
+    }
+    config = SweepConfig(base=base, grid={"supcon.tau": [0.05, 0.1]})
+    fetch_patch, soap_patch = _patch_dataset()
+
+    with fetch_patch, soap_patch:
+        run_dirs = run_sweep(config)
+
+    assert len(run_dirs) == 2
+    for run_dir in run_dirs:
+        assert (run_dir / "tails" / "classification" / "tail_predictions.npz").exists()
+        assert (run_dir / "tails" / "visualization" / "tail_embeddings.npz").exists()

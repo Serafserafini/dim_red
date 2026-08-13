@@ -8,19 +8,34 @@ A completed run directory always has, written together: ``config.yaml``
 (architecture + SOAP settings), ``dataset.extxyz`` (the exact structures used
 to fit/standardize the model, same order as the SOAP features it saw),
 ``model_params.msgpack`` (trained weights) and ``embeddings.npz`` (the
-original dataset's latent embeddings/labels, plus the family/spacegroup
-class vocabularies when a VAE's/Autoencoder's auxiliary heads were active).
-``load_trained_run`` reads all four: it recomputes SOAP on ``dataset.extxyz``
-to recover the exact species list and mean/std standardization statistics
-implied by training (neither is saved directly -- only the already-
-standardized ``features`` are, in ``embeddings.npz``), then rebuilds the
-model architecture and loads its trained weights. ``encode_structures`` then
-featurizes/standardizes new structures through that *same* pipeline -- not
-each their own -- so they land in a latent space that's actually comparable
-to the training set's, and ``plot_applied_structures`` overlays the two
-(projecting both through one shared UMAP fit when the latent space isn't
-already 2D, so old and new points don't end up in two unrelated coordinate
-systems).
+original dataset's latent embeddings/labels, the standardized ``features``
+fed to the model plus the ``feature_mean``/``feature_std`` they were
+standardized with, and the family/spacegroup class vocabularies when a
+VAE's/Autoencoder's auxiliary heads were active). ``load_trained_run`` reads
+all four: it takes ``feature_mean``/``feature_std`` directly from
+``embeddings.npz`` (saved there by ``dim_red.pipeline.single_run.run_single``
+since ``dim_red.pipeline.dataset_cache.build_dataset_for_run`` now returns
+them too) -- no SOAP recomputation on the training set at all -- resolves
+the species list from ``dataset.extxyz`` (cheap: no SOAP involved, just
+reading back which chemical symbols were present), then rebuilds the model
+architecture and loads its trained weights. Runs written before this
+(``feature_mean``/``feature_std`` missing from ``embeddings.npz``) fall back
+to the old behavior -- recomputing SOAP on ``dataset.extxyz`` to recover
+those statistics -- so they stay loadable, just slower. ``encode_structures``
+then featurizes/standardizes new structures through that *same* pipeline --
+not each their own -- so they land in a latent space that's actually
+comparable to the training set's, and ``plot_applied_structures`` overlays
+the two (projecting both through one shared UMAP fit when the latent space
+isn't already 2D, so old and new points don't end up in two unrelated
+coordinate systems).
+
+``load_run_embeddings`` is a lighter-weight counterpart for callers that
+only need ``config.yaml``/``embeddings.npz`` and never the reconstructed
+model itself -- e.g. ``dim_red.pipeline.tail_training.train_tail``, which
+trains a tail directly on a frozen body's already-saved representations and
+never needs the model, species list, or standardization stats
+``load_trained_run`` resolves. It requires only those two files (not the
+full four) and never touches SOAP.
 """
 
 from __future__ import annotations
@@ -70,6 +85,59 @@ class LoadedRun:
     embeddings: Dict[
         str, np.ndarray
     ]  # this run's own embeddings.npz (original dataset)
+
+
+_EMBEDDINGS_REQUIRED_RUN_FILES = ("config.yaml", "embeddings.npz")
+
+
+@dataclass
+class RunEmbeddings:
+    """Lightweight counterpart to ``LoadedRun`` for callers that only need a
+    completed run's config and ``embeddings.npz`` contents -- e.g.
+    ``dim_red.pipeline.tail_training.train_tail``, which trains a tail on
+    representations ``dim_red.pipeline.single_run.run_single`` already
+    computed and saved, and never needs the reconstructed model, species
+    list, or standardization stats ``LoadedRun``/``load_trained_run``
+    resolve. Use ``load_trained_run`` instead when the reconstructed model
+    itself is actually needed (e.g. to encode new structures).
+    """
+
+    run_dir: Path
+    config: RunConfig
+    embeddings: Dict[str, np.ndarray]
+
+
+def load_run_embeddings(run_dir: Union[str, Path]) -> RunEmbeddings:
+    """Load just a completed run's config and ``embeddings.npz`` -- the
+    minimal subset ``dim_red.pipeline.tail_training.train_tail`` actually
+    needs (see ``RunEmbeddings``). Unlike ``load_trained_run``, this never
+    reconstructs the model, resolves species, or computes/recomputes
+    standardization stats -- no SOAP computation of any kind, ever, and
+    ``dataset.extxyz``/``model_params.msgpack`` aren't required to exist at
+    all.
+
+    Args:
+        run_dir: Path to a run directory written by
+            ``dim_red.pipeline.single_run.run_single`` -- must contain at
+            least ``config.yaml`` and ``embeddings.npz``.
+
+    Returns:
+        A ``RunEmbeddings``.
+
+    Raises:
+        FileNotFoundError: If either expected file is missing.
+    """
+    run_dir = Path(run_dir)
+    missing = [f for f in _EMBEDDINGS_REQUIRED_RUN_FILES if not (run_dir / f).exists()]
+    if missing:
+        raise FileNotFoundError(
+            f"{run_dir} is missing {missing} -- not a completed "
+            "dim_red.pipeline.single_run.run_single run directory"
+        )
+    config = load_run_config(run_dir / "config.yaml")
+    with np.load(run_dir / "embeddings.npz") as npz:
+        embeddings = dict(npz.items())
+    return RunEmbeddings(run_dir=run_dir, config=config, embeddings=embeddings)
 
 
 def _resolve_species(config: RunConfig, atoms_list: List[Atoms]) -> List[str]:
@@ -173,38 +241,65 @@ def load_trained_run(run_dir: Union[str, Path]) -> LoadedRun:
     with np.load(run_dir / "embeddings.npz") as npz:
         embeddings = dict(npz.items())
 
+    # Species resolution is cheap (just reads back which chemical symbols
+    # dataset.extxyz's atoms contain) -- no SOAP computation involved -- so
+    # it always happens, regardless of which path below recovers mean/std.
     train_atoms = read_atoms(str(run_dir / "dataset.extxyz"), index=":")
     species = _resolve_species(config, train_atoms)
-    soap_kwargs = config.soap.as_kwargs()
-    X_train_raw = _raw_soap_matrix(train_atoms, soap_kwargs, species)
-    mean, std = fit_standardization(X_train_raw)
 
-    if "features" in embeddings:
-        saved = embeddings["features"]
-        reproduced = apply_standardization(X_train_raw, mean, std)
-        if reproduced.shape != saved.shape:
-            logger.warning(
-                "Recomputed SOAP features for %s's dataset.extxyz have shape %s, "
-                "but embeddings.npz['features'] has shape %s -- config.yaml may "
-                "not match what actually produced this run.",
-                run_dir,
-                reproduced.shape,
-                saved.shape,
-            )
-        else:
-            max_diff = float(np.max(np.abs(reproduced - saved)))
-            if max_diff > _STANDARDIZATION_MISMATCH_TOL:
+    if "feature_mean" in embeddings and "feature_std" in embeddings:
+        # Fast path (runs written after this field existed): the exact
+        # standardization stats training used are already saved -- no need
+        # to recompute SOAP on the training set at all.
+        mean = embeddings["feature_mean"]
+        std = embeddings["feature_std"]
+        input_dim = (
+            embeddings["features"].shape[1]
+            if "features" in embeddings
+            else mean.shape[0]
+        )
+    else:
+        # Slow fallback, for runs predating feature_mean/feature_std being
+        # saved: recompute SOAP on dataset.extxyz to recover them -- the
+        # exact cost this fast path exists to avoid.
+        logger.warning(
+            "%s's embeddings.npz has no feature_mean/feature_std (a run "
+            "written before this run artifact existed) -- recomputing SOAP "
+            "on dataset.extxyz to recover standardization stats; this is "
+            "much slower than loading a run trained after this fix.",
+            run_dir,
+        )
+        soap_kwargs = config.soap.as_kwargs()
+        X_train_raw = _raw_soap_matrix(train_atoms, soap_kwargs, species)
+        mean, std = fit_standardization(X_train_raw)
+        input_dim = X_train_raw.shape[1]
+
+        if "features" in embeddings:
+            saved = embeddings["features"]
+            reproduced = apply_standardization(X_train_raw, mean, std)
+            if reproduced.shape != saved.shape:
                 logger.warning(
-                    "Recomputed SOAP features for %s's dataset.extxyz differ from "
-                    "embeddings.npz['features'] by up to %.3g -- config.yaml's SOAP "
-                    "settings may not match what actually produced this run (new "
-                    "structures would then be featurized inconsistently with the "
-                    "trained model).",
+                    "Recomputed SOAP features for %s's dataset.extxyz have shape %s, "
+                    "but embeddings.npz['features'] has shape %s -- config.yaml may "
+                    "not match what actually produced this run.",
                     run_dir,
-                    max_diff,
+                    reproduced.shape,
+                    saved.shape,
                 )
+            else:
+                max_diff = float(np.max(np.abs(reproduced - saved)))
+                if max_diff > _STANDARDIZATION_MISMATCH_TOL:
+                    logger.warning(
+                        "Recomputed SOAP features for %s's dataset.extxyz differ from "
+                        "embeddings.npz['features'] by up to %.3g -- config.yaml's SOAP "
+                        "settings may not match what actually produced this run (new "
+                        "structures would then be featurized inconsistently with the "
+                        "trained model).",
+                        run_dir,
+                        max_diff,
+                    )
 
-    model = _build_model(config, X_train_raw.shape[1], embeddings)
+    model = _build_model(config, input_dim, embeddings)
     with open(run_dir / "model_params.msgpack", "rb") as f:
         model.params = serialization.from_bytes(model.params, f.read())
 
@@ -213,7 +308,7 @@ def load_trained_run(run_dir: Union[str, Path]) -> LoadedRun:
         config.model_kind,
         run_dir,
         len(species),
-        X_train_raw.shape[1],
+        input_dim,
         config.vae.latent_dim,
     )
     return LoadedRun(
