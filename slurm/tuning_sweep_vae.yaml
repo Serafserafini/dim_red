@@ -1,0 +1,104 @@
+# GPU/SLURM variant of configs/tuning_sweep_vae.example.yaml -- run via
+# slurm/tune_all_models.sbatch, array task 0. See
+# src/dim_red/pipeline/CLAUDE.md's "pipeline.benchmark" section for how to
+# read the resulting sweep with dimred-benchmark.
+#
+# Sized for a real run on RealMemory=2000000 (~2TB) A100 nodes:
+# structures_per_family: 1000 (7000 raw structures total -- host RAM is a
+# complete non-issue at this scale for a SOAP-based model_kind; the only
+# model_kind where dataset size interacts with RAM at all is cgcnn, see
+# slurm/tuning_sweep_cgcnn.yaml). aux_heads.mode is now itself a grid
+# axis (family_only vs family_and_spacegroup) specifically to compare
+# with/without the spacegroup head -- family_only runs simply won't have a
+# spacegroup_probs/spacegroup_2d_* column in dimred-benchmark's table,
+# family_and_spacegroup runs will, so the comparison is a straight
+# present-vs-blank read of the table. early_stopping is on, so the raised
+# epochs budget doesn't cost extra time on runs that converge early.
+#
+# With the full 2-day/GPU budget confirmed safe (dry-run on cgcnn: real
+# max_atoms after supercell_radius: 4.0 was 256, not the ~1000+ that caused
+# the earlier crash -- see slurm/tuning_sweep_cgcnn.yaml), widened to
+# 5 grid axes / 32 runs: vae.latent_dim added (2, 4 -> 8 -- capacity of the
+# actual reduced space, the most directly relevant knob for a
+# dimensionality-reduction tool) and train.learning_rate added (2), on top
+# of encoder_hidden_dim (2), beta (2) and aux_heads.mode (2, with/without
+# the spacegroup head -- family_only runs simply won't have a
+# spacegroup_probs/spacegroup_2d_* column in dimred-benchmark's table,
+# family_and_spacegroup runs will). All 32 runs still share one cached
+# dataset build (only soap/pyxtal/augmentation settings affect the dataset
+# cache key, none of which vary here).
+
+base:
+  seed: 42
+  output_dir: runs/tuning_vae
+  model: vae
+  data_source: pyxtal
+
+  pyxtal:
+    families: [cubic, hexagonal, orthorhombic, tetragonal, trigonal, monoclinic, triclinic]
+    structures_per_family: 1000
+    distribution: uniform
+    n_species: 2
+    seed: 42
+
+  soap:
+    r_cut: 5.0
+    n_max: 4
+    l_max: 3
+    sigma: 0.5
+    element_agnostic: false
+    normalize_distances: false
+    species: null
+
+  vae:
+    encoder_hidden_dim: [128] # overridden by the grid below
+    latent_dim: 8 # overridden by the grid below
+    mirror: true
+
+  aux_heads:
+    mode: family_and_spacegroup # overridden by the grid below
+    lambda_family: 1.0
+    lambda_spacegroup: 1.0
+    head_hidden_dim: 16
+
+  train:
+    epochs: 100
+    batch_size: 64
+    learning_rate: 0.001 # overridden by the grid below
+    optimizer: adam
+    val_ratio: 0.2
+    device: gpu
+    early_stopping:
+      enabled: true
+      patience: 15
+      min_delta: 0.0001
+      restore_best_weights: true
+
+  # Applied to every fetched/generated structure before SOAP, regardless of
+  # data_source. n_augmented: 4 + keep_original: true -> 5x the raw pyxtal
+  # count (7000 -> 35000 structures fed to SOAP/training). supercell_radius
+  # doesn't carry the cgcnn whole-dataset-padding memory risk for a
+  # SOAP-based model_kind (descriptor size is fixed regardless of atom
+  # count) -- kept identical across all four slurm/tuning_sweep_*.yaml
+  # configs so augmentation itself isn't a confound between model kinds.
+  augmentation:
+    n_augmented: 4
+    keep_original: true
+    jitter_probability: 0.5
+    jitter_std: 0.05
+    vacancy_probability: 0.5
+    vacancy_atom_probability: 1
+    max_vacancies: 1
+    supercell_radius: 4.0
+    seed: 42
+
+# 2 hidden-dim x 2 latent_dim x 2 beta x 2 aux_heads modes x 2 learning
+# rates = 32 runs.
+grid:
+  vae.encoder_hidden_dim:
+    - [64]
+    - [128, 64]
+  vae.latent_dim: [4, 8]
+  train.beta: [0.5, 2.0]
+  aux_heads.mode: [family_only, family_and_spacegroup]
+  train.learning_rate: [0.0005, 0.002]
