@@ -8,6 +8,7 @@ Preferred usage (console scripts installed by ``pip install -e .``):
     dimred-compare runs/20260728-1
     dimred-apply new_structures.extxyz runs/20260728-1/hd-128_cs-cubic
     dimred-train-tail configs/tail_train_classification.example.yaml runs/20260728-1/hd-128_cs-cubic
+    dimred-benchmark runs/tuning_vae/20260728-1 runs/tuning_cgcnn/20260728-1 --output runs/benchmark.csv
 
 Equivalent, flag-based form (``python -m``), kept for scripting/backward
 compatibility:
@@ -132,6 +133,27 @@ def _do_compare(
     return report_dir
 
 
+def _do_benchmark(
+    inputs: list, output_csv: str, key_hyperparams: Optional[str]
+) -> Path:
+    from dim_red.pipeline.benchmark import (
+        _DEFAULT_KEY_HYPERPARAMS,
+        generate_benchmark_table,
+    )
+
+    _configure_console_logging()
+    hyperparams = (
+        [h.strip() for h in key_hyperparams.split(",")]
+        if key_hyperparams
+        else _DEFAULT_KEY_HYPERPARAMS
+    )
+    table_path = generate_benchmark_table(
+        inputs, output_csv, key_hyperparams=hyperparams
+    )
+    print(f"Benchmark table saved to {table_path}")
+    return table_path
+
+
 def run_command(argv=None) -> None:
     """``dimred-run <config>``: run a single fetch -> SOAP -> VAE pass."""
     parser = argparse.ArgumentParser(description="Run a single dim_red pipeline pass.")
@@ -250,6 +272,39 @@ def compare_command(argv=None) -> None:
         umap_metric=args.umap_metric,
         umap_random_state=args.umap_random_state,
     )
+
+
+def benchmark_command(argv=None) -> None:
+    """``dimred-benchmark <input>... --output <csv>``: assemble one wide CSV
+    comparing every run found across the given run/sweep directories --
+    possibly spanning different ``model_kind``s -- on standardized,
+    dimensionality-agnostic embedding-quality and classification metrics.
+    """
+    parser = argparse.ArgumentParser(
+        description="Assemble a cross-run (and cross-model_kind) benchmark "
+        "CSV from one or more dim_red run/sweep directories."
+    )
+    parser.add_argument(
+        "inputs",
+        type=str,
+        nargs="+",
+        help="One or more run directories and/or sweep directories (e.g. "
+        "runs/tuning_vae/20260728-1) -- a sweep directory is expanded to "
+        "every completed run found directly under it.",
+    )
+    parser.add_argument(
+        "--output", type=str, required=True, help="Path to write the benchmark CSV to."
+    )
+    parser.add_argument(
+        "--key-hyperparams",
+        type=str,
+        default=None,
+        help="Comma-separated dotted config paths to include as columns "
+        "(default: model,vae.latent_dim,vae.encoder_hidden_dim,"
+        "train.learning_rate,train.batch_size,train.epochs,seed).",
+    )
+    args = parser.parse_args(argv)
+    _do_benchmark(args.inputs, args.output, args.key_hyperparams)
 
 
 def _do_apply(
@@ -464,6 +519,30 @@ def _build_parser() -> argparse.ArgumentParser:
         "run directory whose frozen body to attach the tail to (overrides "
         "run_dir in the config, if it sets one).",
     )
+    parser.add_argument(
+        "--benchmark",
+        type=str,
+        default=None,
+        nargs="+",
+        help=(
+            "One or more run/sweep directories (possibly spanning different "
+            "model_kinds); assembles a cross-run benchmark CSV at "
+            "--benchmark-output instead of running anything."
+        ),
+    )
+    parser.add_argument(
+        "--benchmark-output",
+        type=str,
+        default=None,
+        help="With --benchmark: path to write the benchmark CSV to (required).",
+    )
+    parser.add_argument(
+        "--benchmark-key-hyperparams",
+        type=str,
+        default=None,
+        help="With --benchmark: comma-separated dotted config paths to "
+        "include as columns (default: see benchmark_command's --key-hyperparams).",
+    )
     _add_umap_args(parser)
     return parser
 
@@ -485,6 +564,14 @@ def main(argv=None) -> None:
             umap_min_dist=args.umap_min_dist,
             umap_metric=args.umap_metric,
             umap_random_state=args.umap_random_state,
+        )
+        return
+
+    if args.benchmark:
+        if not args.benchmark_output:
+            parser.error("--benchmark requires --benchmark-output.")
+        _do_benchmark(
+            args.benchmark, args.benchmark_output, args.benchmark_key_hyperparams
         )
         return
 
@@ -515,8 +602,8 @@ def main(argv=None) -> None:
 
     if not args.config:
         parser.error(
-            "--config is required unless --rerun, --compare, --apply or "
-            "--train-tail is used."
+            "--config is required unless --rerun, --compare, --apply, "
+            "--train-tail or --benchmark is used."
         )
 
     if args.sweep:

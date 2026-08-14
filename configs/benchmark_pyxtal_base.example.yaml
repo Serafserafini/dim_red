@@ -1,0 +1,21 @@
+# Shared dataset fragment for the cross-architecture tuning + benchmark
+# playbook (see src/dim_red/pipeline/CLAUDE.md's "Benchmark" section). This
+# is documentation, not a directly loadable config -- there's no YAML
+# include mechanism in dim_red.pipeline.config, so this exact `pyxtal:`
+# block is copied verbatim into each of the four
+# configs/tuning_sweep_{vae,autoencoder,supcon,cgcnn}.example.yaml files'
+# `base.pyxtal:`. If you change this fragment, update all four.
+#
+# pyxtal (not fetch) is used deliberately: it guarantees a known
+# family/spacegroup label for every structure, which supcon's loss and
+# dim_red.analysis.metrics.embedding_quality_metrics's spacegroup term both
+# need (fetch/Materials Project structures can have an unknown/missing
+# spacegroup, sentinel -1). >=~30 structures/class keeps the silhouette/
+# kNN/ARI/NMI metrics from being noise.
+
+pyxtal:
+  families: [cubic, hexagonal, orthorhombic, tetragonal]
+  structures_per_family: 60
+  distribution: uniform
+  n_species: 2
+  seed: 42

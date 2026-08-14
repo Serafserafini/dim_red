@@ -20,6 +20,7 @@ dimred-rerun = "dim_red.pipeline.cli:rerun_command"
 dimred-compare = "dim_red.pipeline.cli:compare_command"
 dimred-apply = "dim_red.pipeline.cli:apply_command"
 dimred-train-tail = "dim_red.pipeline.cli:train_tail_command"
+dimred-benchmark = "dim_red.pipeline.cli:benchmark_command"
 
 [project.optional-dependencies]
 soap = ["ase", "dscribe"]

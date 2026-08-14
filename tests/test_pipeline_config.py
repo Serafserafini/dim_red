@@ -15,6 +15,7 @@ from dim_red.pipeline.config import (
     ClassificationTailConfig,
     EarlyStoppingConfig,
     FetchConfig,
+    GraphConfig,
     PyxtalConfig,
     RunConfig,
     SoapConfig,
@@ -1051,3 +1052,129 @@ def test_expand_sweep_can_vary_tails_classification_mode(tmp_path):
         "family_only",
         "family_and_spacegroup",
     }
+
+
+# --- GraphConfig / model_kind == "cgcnn" ------------------------------------
+
+
+def _cgcnn_run_dict():
+    d = _single_run_dict()
+    d["model"] = "cgcnn"
+    d["aux_heads"] = {"mode": "family_and_spacegroup"}
+    return d
+
+
+def test_run_config_defaults_graph_block(tmp_path):
+    config_path = _write_yaml(tmp_path / "run.yaml", _single_run_dict())
+    config = load_run_config(config_path)
+    assert config.graph == GraphConfig()
+
+
+def test_graph_config_n_gaussian_property():
+    g = GraphConfig(radius=8.0, dmin=0.0, step=0.2)
+    assert g.n_gaussian == 41
+    assert g.resolved_dmax == 8.0
+
+
+def test_graph_config_explicit_dmax_overrides_radius():
+    g = GraphConfig(radius=8.0, dmax=5.0, dmin=0.0, step=0.2)
+    assert g.resolved_dmax == 5.0
+    assert g.n_gaussian == 26
+
+
+def test_graph_config_graph_kwargs_excludes_architecture_fields():
+    g = GraphConfig(atom_fea_len=32, n_conv=5, h_fea_len=64, n_h=2, max_species=4)
+    kwargs = g.graph_kwargs()
+    assert set(kwargs) == {
+        "radius",
+        "max_num_nbr",
+        "dmin",
+        "dmax",
+        "step",
+        "max_species",
+    }
+    assert kwargs["max_species"] == 4
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        dict(radius=0),
+        dict(max_num_nbr=0),
+        dict(step=0),
+        dict(dmax=0.0, dmin=0.0),
+        dict(max_species=0),
+        dict(atom_fea_len=0),
+        dict(n_conv=0),
+        dict(h_fea_len=0),
+        dict(n_h=0),
+    ],
+)
+def test_graph_config_rejects_invalid_values(kwargs):
+    with pytest.raises(ValueError):
+        GraphConfig(**kwargs)
+
+
+def test_run_config_parses_model_kind_cgcnn(tmp_path):
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", _cgcnn_run_dict()))
+    assert config.model_kind == "cgcnn"
+
+
+def test_run_config_parses_graph_block(tmp_path):
+    d = _cgcnn_run_dict()
+    d["graph"] = {"radius": 6.0, "max_num_nbr": 10, "max_species": 4, "n_conv": 2}
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+
+    assert config.graph.radius == 6.0
+    assert config.graph.max_num_nbr == 10
+    assert config.graph.max_species == 4
+    assert config.graph.n_conv == 2
+    # Untouched field keeps its default.
+    assert config.graph.atom_fea_len == 64
+
+
+def test_run_config_cgcnn_requires_aux_heads_mode_not_none(tmp_path):
+    d = _cgcnn_run_dict()
+    d["aux_heads"] = {"mode": "none"}
+    with pytest.raises(ValueError, match="requires aux_heads.mode != 'none'"):
+        load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+
+
+def test_run_config_cgcnn_default_aux_heads_mode_none_raises(tmp_path):
+    # _single_run_dict() has no aux_heads block at all -- AuxHeadsConfig's
+    # own default (mode="none") should still trip the cgcnn-specific check.
+    d = _single_run_dict()
+    d["model"] = "cgcnn"
+    with pytest.raises(ValueError, match="requires aux_heads.mode != 'none'"):
+        load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+
+
+def test_run_config_to_dict_roundtrips_graph_block(tmp_path):
+    d = _cgcnn_run_dict()
+    d["graph"] = {"radius": 5.0, "max_species": 6}
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+
+    saved_path = _write_yaml(tmp_path / "saved.yaml", run_config_to_dict(config))
+    reloaded = load_run_config(saved_path)
+
+    assert reloaded == config
+    assert reloaded.graph.radius == 5.0
+    assert reloaded.graph.max_species == 6
+
+
+def test_run_config_to_dict_always_includes_graph_block(tmp_path):
+    # Unlike fetch/pyxtal/augmentation/tails, "graph" is always serialized
+    # (same treatment as "vae"/"soap"), even for non-cgcnn model kinds.
+    config_path = _write_yaml(tmp_path / "run.yaml", _single_run_dict())
+    config = load_run_config(config_path)
+    saved = run_config_to_dict(config)
+    assert "graph" in saved
+
+
+def test_expand_sweep_can_vary_graph_n_conv(tmp_path):
+    base = _cgcnn_run_dict()
+    sweep_dict = {"base": base, "grid": {"graph.n_conv": [2, 3, 4]}}
+    sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
+    runs = expand_sweep(sweep)
+    assert {r.graph.n_conv for r in runs} == {2, 3, 4}
+    assert all(r.model_kind == "cgcnn" for r in runs)

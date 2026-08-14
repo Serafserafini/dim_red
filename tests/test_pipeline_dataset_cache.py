@@ -723,3 +723,194 @@ def test_build_dataset_for_run_forwards_supercell_radius(tmp_path):
 
     _, kwargs = mock_get.call_args
     assert kwargs["augmentation"].supercell_radius == 5.0
+
+
+# --- CGCNN graph dataset (model_kind == "cgcnn") ----------------------------
+#
+# No mocking needed for graph construction itself (dim_red.cgcnn.graph is
+# cheap, pure NumPy/ASE) -- only fetch_structures_by_crystal_system/
+# dim_red.generate.generate_structures are mocked, same as the SOAP tests
+# above.
+
+from dim_red.pipeline.config import AuxHeadsConfig, GraphConfig
+from dim_red.pipeline.dataset_cache import (
+    _graph_cache_key,
+    build_graph_dataset_for_run,
+    get_or_build_cgcnn_dataset,
+    get_or_build_pyxtal_cgcnn_dataset,
+)
+
+
+def _fake_multi_atom_structure(symbol, material_id, spacegroup):
+    """A real (if tiny) periodic structure -- unlike _fake_atoms' single
+    isolated atom, this actually has neighbors within a modest cutoff, so
+    the resulting graph arrays are non-trivial.
+    """
+    atoms = Atoms(
+        symbol * 2,
+        positions=[[0.0, 0.0, 0.0], [1.5, 0.0, 0.0]],
+        cell=[4.0, 4.0, 4.0],
+        pbc=True,
+    )
+    atoms.info["material_id"] = material_id
+    atoms.info["spacegroup"] = spacegroup
+    return atoms
+
+
+def test_get_or_build_cgcnn_dataset_cache_miss_then_hit(tmp_path):
+    fake_atoms = [
+        _fake_multi_atom_structure("Cu", "mp-1", 225),
+        _fake_multi_atom_structure("Fe", "mp-2", 229),
+    ]
+    graph_kwargs = GraphConfig(radius=3.0, max_num_nbr=4, max_species=2).graph_kwargs()
+
+    with patch(
+        "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
+        return_value=fake_atoms,
+    ) as mock_fetch:
+        graph_arrays1, labels1, ids1, sg1, structures_path1 = (
+            get_or_build_cgcnn_dataset(
+                crystal_systems=["cubic"],
+                graph_kwargs=graph_kwargs,
+                limit_per_system=2,
+                cache_dir=tmp_path,
+            )
+        )
+
+        assert mock_fetch.call_count == 1
+        local_species_idx1, nbr_idx1, nbr_fea1, nbr_mask1, atom_mask1 = graph_arrays1
+        assert local_species_idx1.shape[0] == 2
+        assert labels1 == ["Cubic", "Cubic"]
+        assert ids1 == ["mp-1", "mp-2"]
+        assert sg1 == [225, 229]
+        assert structures_path1.suffix == ".extxyz"
+        assert structures_path1.exists()
+
+        # Second call with identical parameters should hit the cache.
+        graph_arrays2, labels2, ids2, sg2, structures_path2 = (
+            get_or_build_cgcnn_dataset(
+                crystal_systems=["cubic"],
+                graph_kwargs=graph_kwargs,
+                limit_per_system=2,
+                cache_dir=tmp_path,
+            )
+        )
+        assert mock_fetch.call_count == 1
+        np.testing.assert_array_equal(graph_arrays1[0], graph_arrays2[0])
+        assert labels2 == labels1
+        assert ids2 == ids1
+        assert sg2 == sg1
+        assert structures_path2 == structures_path1
+
+
+def test_get_or_build_pyxtal_cgcnn_dataset_cache_miss_then_hit(tmp_path):
+    pytest.importorskip("pyxtal")
+    fake_atoms = [
+        _fake_generated_atoms("Cu", "pyxtal-225-0", 225, "Cubic"),
+        _fake_generated_atoms("Fe", "pyxtal-225-1", 225, "Cubic"),
+    ]
+    for a in fake_atoms:
+        a.set_cell([4.0, 4.0, 4.0])
+        a.set_pbc(True)
+    pyxtal_config = PyxtalConfig(spacegroups=[225], structures_per_spacegroup=2)
+    graph_kwargs = GraphConfig(radius=3.0, max_num_nbr=4, max_species=2).graph_kwargs()
+
+    with patch(
+        "dim_red.generate.generate_structures", return_value=fake_atoms
+    ) as mock_generate:
+        graph_arrays1, labels1, ids1, sg1, structures_path1 = (
+            get_or_build_pyxtal_cgcnn_dataset(
+                pyxtal_config=pyxtal_config,
+                seed=0,
+                graph_kwargs=graph_kwargs,
+                cache_dir=tmp_path,
+            )
+        )
+        assert mock_generate.call_count == 1
+        assert labels1 == ["Cubic", "Cubic"]
+        assert structures_path1.exists()
+
+        graph_arrays2, labels2, ids2, sg2, structures_path2 = (
+            get_or_build_pyxtal_cgcnn_dataset(
+                pyxtal_config=pyxtal_config,
+                seed=0,
+                graph_kwargs=graph_kwargs,
+                cache_dir=tmp_path,
+            )
+        )
+        assert mock_generate.call_count == 1
+        np.testing.assert_array_equal(graph_arrays1[0], graph_arrays2[0])
+        assert structures_path2 == structures_path1
+
+
+def test_graph_cache_key_changes_with_radius_but_not_architecture_params():
+    """GraphConfig.graph_kwargs() only carries graph-construction params
+    (radius/max_num_nbr/dmin/dmax/step/max_species) -- architecture-only
+    fields (atom_fea_len/n_conv/h_fea_len/n_h) never enter the cache key,
+    so two configs differing only in architecture produce identical keys.
+    """
+    kwargs_a = GraphConfig(radius=8.0, atom_fea_len=32, n_conv=2).graph_kwargs()
+    kwargs_b = GraphConfig(radius=8.0, atom_fea_len=128, n_conv=5).graph_kwargs()
+    assert kwargs_a == kwargs_b
+    assert _graph_cache_key(["cubic"], 2, kwargs_a) == _graph_cache_key(
+        ["cubic"], 2, kwargs_b
+    )
+
+    kwargs_c = GraphConfig(radius=5.0).graph_kwargs()
+    assert _graph_cache_key(["cubic"], 2, kwargs_a) != _graph_cache_key(
+        ["cubic"], 2, kwargs_c
+    )
+
+
+def test_graph_cache_key_prefixed_cgcnn_never_collides_with_soap_key():
+    graph_kwargs = GraphConfig().graph_kwargs()
+    key = _graph_cache_key(["cubic"], 2, graph_kwargs)
+    assert key.startswith("cgcnn-")
+
+
+def _cgcnn_run_config(data_source="fetch", pyxtal_config=None):
+    return RunConfig(
+        fetch=(
+            FetchConfig(crystal_systems=["cubic"], limit_per_system=2)
+            if data_source == "fetch"
+            else None
+        ),
+        soap=SoapConfig(),
+        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
+        train=TrainSettings(),
+        graph=GraphConfig(radius=3.0, max_num_nbr=4, max_species=2),
+        aux_heads=AuxHeadsConfig(mode="family_only"),
+        seed=0,
+        model_kind="cgcnn",
+        data_source=data_source,
+        pyxtal=pyxtal_config,
+    )
+
+
+def test_build_graph_dataset_for_run_dispatches_to_fetch(tmp_path):
+    fake_atoms = [_fake_multi_atom_structure("Cu", "mp-1", 225)]
+    config = _cgcnn_run_config(data_source="fetch")
+
+    with patch(
+        "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
+        return_value=fake_atoms,
+    ) as mock_fetch:
+        build_graph_dataset_for_run(config, cache_dir=tmp_path)
+
+    assert mock_fetch.call_count == 1
+
+
+def test_build_graph_dataset_for_run_dispatches_to_pyxtal(tmp_path):
+    pytest.importorskip("pyxtal")
+    fake_atoms = [_fake_generated_atoms("Cu", "pyxtal-225-0", 225, "Cubic")]
+    fake_atoms[0].set_cell([4.0, 4.0, 4.0])
+    fake_atoms[0].set_pbc(True)
+    pyxtal_config = PyxtalConfig(spacegroups=[225], structures_per_spacegroup=1)
+    config = _cgcnn_run_config(data_source="pyxtal", pyxtal_config=pyxtal_config)
+
+    with patch(
+        "dim_red.generate.generate_structures", return_value=fake_atoms
+    ) as mock_generate:
+        build_graph_dataset_for_run(config, cache_dir=tmp_path)
+
+    assert mock_generate.call_count == 1

@@ -1,10 +1,12 @@
 """
-Phase 2 pipeline entry point: freeze an already-trained ``model: supcon``
-run's body and train exactly one tail (classification or visualization) on
-its saved representations -- see ``dim_red.supcon.tail_training`` for the
-actual training loops, and ``dim_red.pipeline.inference`` for
-``load_run_embeddings``, the lightweight loader used here: this module only
-ever needs a run's ``config.yaml``/``embeddings.npz``, never the
+Phase 2 pipeline entry point: freeze an already-trained ``model: supcon`` or
+``model: cgcnn`` run's body and train exactly one tail (classification or
+visualization) on its saved representations -- see
+``dim_red.supcon.tail_training`` for the actual training loops (reused
+as-is regardless of which body produced the representations, since neither
+training loop ever touches the body itself), and ``dim_red.pipeline.inference``
+for ``load_run_embeddings``, the lightweight loader used here: this module
+only ever needs a run's ``config.yaml``/``embeddings.npz``, never the
 reconstructed body itself (no forward pass, no encoding), so it deliberately
 does *not* use ``load_trained_run`` (which would also reconstruct the model,
 resolve species, and compute/recompute standardization stats -- all wasted
@@ -134,7 +136,7 @@ def train_tail(config: TailTrainConfig) -> Path:
 
     Raises:
         ValueError: If ``config.run_dir`` is unset, or wasn't produced by a
-            ``model_kind == "supcon"`` run.
+            ``model_kind == "supcon"`` or ``model_kind == "cgcnn"`` run.
     """
     if config.run_dir is None:
         raise ValueError(
@@ -144,12 +146,13 @@ def train_tail(config: TailTrainConfig) -> Path:
         )
     run_dir = Path(config.run_dir)
     loaded = load_run_embeddings(run_dir)
-    if loaded.config.model_kind != "supcon":
+    if loaded.config.model_kind not in ("supcon", "cgcnn"):
         raise ValueError(
             f"{run_dir} is a model_kind={loaded.config.model_kind!r} run -- "
-            "tail training requires a completed model_kind='supcon' run "
-            "(only that body has no classification/visualization capability "
-            "of its own to begin with)"
+            "tail training requires a completed model_kind='supcon' or "
+            "model_kind='cgcnn' run (a vae/autoencoder body already has its "
+            "own classification heads and no separate tail-training "
+            "workflow makes sense for it)"
         )
 
     output_subdir = config.output_subdir or config.tail_kind

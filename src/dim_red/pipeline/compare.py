@@ -58,11 +58,12 @@ def _hashable(value: Any) -> Any:
     return value
 
 
-def _write_csv(
+def write_csv(
     path: Union[str, Path], fieldnames: List[str], rows: List[Dict[str, Any]]
 ) -> None:
-    """Write ``rows`` (a list of ``{fieldname: value}`` dicts) as CSV,
-    the tidy/long-format data backing one of this module's comparison plots.
+    """Write ``rows`` (a list of ``{fieldname: value}`` dicts) as CSV. Public
+    (not just this module's plot-data writer) so ``dim_red.pipeline.benchmark``
+    can reuse it for the cross-run benchmark table.
     """
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -284,7 +285,7 @@ def plot_loss_curves(
             if metric in run.loss_history
             for epoch, value in zip(run.loss_history["epoch"], run.loss_history[metric])
         ]
-        _write_csv(csv_path, ["run", "epoch", "metric", "value"], rows)
+        write_csv(csv_path, ["run", "epoch", "metric", "value"], rows)
 
     fig, axes = plt.subplots(
         1, len(metrics), figsize=(6 * len(metrics), 5), squeeze=False
@@ -377,7 +378,7 @@ def plot_final_metric_vs_hyperparam(
             }
             for run in runs
         ]
-        _write_csv(csv_path, ["run", hyperparam, metric], rows)
+        write_csv(csv_path, ["run", hyperparam, metric], rows)
     keys = sorted(groups) if is_numeric else sorted(groups, key=str)
     means = [float(np.mean(groups[k])) for k in keys]
     stds = [float(np.std(groups[k])) for k in keys]
@@ -543,7 +544,7 @@ def plot_spacegroup_family_histogram(
             {"spacegroup": sg, "family": family}
             for sg, family in zip(spacegroups, families)
         ]
-        _write_csv(csv_path, ["spacegroup", "family"], rows)
+        write_csv(csv_path, ["spacegroup", "family"], rows)
 
     plot_spacegroup_histogram(
         spacegroups,
@@ -816,7 +817,7 @@ def plot_latent_space_grid(
     fig.tight_layout(rect=[0, 0, 1, 0.94])
 
     if csv_path:
-        _write_csv(
+        write_csv(
             csv_path,
             [
                 "source",
@@ -837,19 +838,24 @@ def plot_latent_space_grid(
     plt.close(fig)
 
 
-def _aux_accuracies(run: RunData) -> Dict[str, float]:
-    """Family/spacegroup classification accuracy for one run, using whichever
-    auxiliary-head predictions and ground truth are present in its
-    ``embeddings.npz``. Returns an empty dict if no aux heads were active.
+def classification_accuracies_from_npz(npz: Dict[str, np.ndarray]) -> Dict[str, float]:
+    """Family/spacegroup classification accuracy from any npz-shaped dict
+    carrying ``family_probs``/``family_classes``/``labels`` and, optionally,
+    ``spacegroup_probs``/``spacegroup_classes``/``spacegroups`` -- the
+    payload shape both a run's own ``embeddings.npz`` (vae/autoencoder/cgcnn
+    built-in heads) and a ``dim_red.pipeline.tail_training`` classification
+    tail's ``tail_predictions.npz`` (supcon, or a cgcnn body's separate
+    classification tail) share, letting callers (e.g.
+    ``dim_red.pipeline.benchmark``) read either uniformly. Returns an empty
+    dict if neither is present.
     """
-    emb = run.embeddings
     accs: Dict[str, float] = {}
-    if "family_probs" in emb:
-        pred = emb["family_classes"][emb["family_probs"].argmax(axis=1)]
-        accs["family"] = float((pred == emb["labels"]).mean())
-    if "spacegroup_probs" in emb and "spacegroups" in emb:
-        pred = emb["spacegroup_classes"][emb["spacegroup_probs"].argmax(axis=1)]
-        accs["spacegroup"] = float((pred == emb["spacegroups"]).mean())
+    if "family_probs" in npz:
+        pred = npz["family_classes"][npz["family_probs"].argmax(axis=1)]
+        accs["family"] = float((pred == npz["labels"]).mean())
+    if "spacegroup_probs" in npz and "spacegroups" in npz:
+        pred = npz["spacegroup_classes"][npz["spacegroup_probs"].argmax(axis=1)]
+        accs["spacegroup"] = float((pred == npz["spacegroups"]).mean())
     return accs
 
 
@@ -863,7 +869,10 @@ def plot_aux_accuracy_comparison(
     skipped; if none had aux heads, no figure is produced.
     """
     run_label_map = run_labels(runs)
-    per_run_accs = [(run_label_map[r.run_dir], _aux_accuracies(r)) for r in runs]
+    per_run_accs = [
+        (run_label_map[r.run_dir], classification_accuracies_from_npz(r.embeddings))
+        for r in runs
+    ]
     per_run_accs = [(label, accs) for label, accs in per_run_accs if accs]
     if not per_run_accs:
         logger.warning(
@@ -877,7 +886,7 @@ def plot_aux_accuracy_comparison(
             for label, accs in per_run_accs
             for metric, accuracy in accs.items()
         ]
-        _write_csv(csv_path, ["run", "metric", "accuracy"], rows)
+        write_csv(csv_path, ["run", "metric", "accuracy"], rows)
 
     metric_names = sorted({m for _, accs in per_run_accs for m in accs})
     labels = [label for label, _ in per_run_accs]

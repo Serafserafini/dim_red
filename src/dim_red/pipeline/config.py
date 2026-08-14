@@ -20,7 +20,7 @@ logger = logging.getLogger("dim_red.pipeline")
 _AUX_HEADS_MODES = ("none", "family_only", "family_and_spacegroup")
 _SUPCON_MODES = ("family_only", "spacegroup_only", "family_and_spacegroup")
 _SUPCON_DISTANCES = ("euclidean", "cosine")
-_MODEL_KINDS = ("vae", "autoencoder", "supcon")
+_MODEL_KINDS = ("vae", "autoencoder", "supcon", "cgcnn")
 _DATA_SOURCES = ("fetch", "pyxtal")
 _OPTIMIZER_KINDS = ("adam", "velo")
 
@@ -51,6 +51,116 @@ class SoapConfig:
             "normalize_distances": self.normalize_distances,
             "species": self.species,
         }
+
+
+@dataclass(frozen=True)
+class GraphConfig:
+    """CGCNN graph-construction + architecture hyperparameters
+    (``RunConfig.model_kind == "cgcnn"`` only) -- used *instead of* ``soap``
+    for that model kind, the same "own dataclass, own kwargs helper" pattern
+    ``SoapConfig`` establishes.
+
+    ``latent_dim`` is deliberately NOT a field here -- it's read from the
+    shared ``vae:`` block (``vae.latent_dim``) instead, the same "shared
+    field, model-kind-specific subset" precedent ``supcon`` already sets
+    (it reads ``vae.encoder_hidden_dim``/``vae.latent_dim`` and ignores
+    ``vae.decoder_hidden_dim``/``vae.mirror``). For ``model_kind: cgcnn``,
+    every other ``vae:`` field is ignored -- only ``vae.latent_dim`` is read
+    (the body's output width, saved to ``embeddings.npz``, reused by every
+    downstream tail).
+
+    ``max_species`` doubles as both a graph-construction parameter (bounds
+    ``dim_red.cgcnn.graph.atoms_list_to_graph_arrays``' species-remapping,
+    part of the dataset cache key) and an architecture parameter (sizes
+    ``CGCNNEncoder``'s embedding table) -- both call sites read it straight
+    off this same field, so they can never drift apart.
+
+    Attributes:
+        radius: Cutoff radius (Angstroms) for periodic-boundary-aware
+            neighbor search (``dim_red.cgcnn.graph``, via
+            ``ase.neighborlist`` -- correct even when ``radius`` exceeds
+            half the unit cell's width, unlike a naive minimum-image-
+            convention distance matrix). CGCNN's own default (Xie &
+            Grossman 2018).
+        max_num_nbr: Maximum neighbors kept per atom -- the closest ones
+            within ``radius``; atoms with fewer are padded/masked.
+        dmin: Lower bound of the Gaussian distance-expansion filter bank.
+        dmax: Upper bound of the Gaussian distance-expansion filter bank.
+            ``None`` (default) resolves to ``radius``.
+        step: Spacing between Gaussian filters -- together with
+            ``dmin``/resolved ``dmax`` this sets ``n_gaussian`` (the
+            bond/edge feature width), see the ``n_gaussian`` property.
+        max_species: Maximum distinct species any one structure may have.
+            The model never sees which real chemical element a species is
+            -- only a per-structure local species slot (``1..max_species``)
+            -- see ``dim_red.cgcnn.graph._local_species_indices``.
+        atom_fea_len: Per-atom embedding/hidden width used throughout the
+            graph-convolution stack.
+        n_conv: Number of stacked gated graph-convolution layers.
+        h_fea_len: Hidden width of the post-pooling fully-connected block.
+        n_h: Number of post-pooling hidden layers.
+    """
+
+    radius: float = 8.0
+    max_num_nbr: int = 12
+    dmin: float = 0.0
+    dmax: Optional[float] = None
+    step: float = 0.2
+    max_species: int = 10
+    atom_fea_len: int = 64
+    n_conv: int = 3
+    h_fea_len: int = 128
+    n_h: int = 1
+
+    @property
+    def resolved_dmax(self) -> float:
+        """``dmax`` if explicitly set, otherwise ``radius``."""
+        return self.dmax if self.dmax is not None else self.radius
+
+    @property
+    def n_gaussian(self) -> int:
+        """Width of the Gaussian-expanded bond/edge feature vector."""
+        return int(round((self.resolved_dmax - self.dmin) / self.step)) + 1
+
+    def graph_kwargs(self) -> Dict[str, Any]:
+        """Keyword arguments for
+        ``dim_red.cgcnn.graph.atoms_list_to_graph_arrays`` -- the
+        graph-construction subset (``radius``/``max_num_nbr``/``dmin``/
+        ``dmax``/``step``/``max_species``), not the architecture-only
+        fields (``atom_fea_len``/``n_conv``/``h_fea_len``/``n_h``), which
+        affect model construction only, not the cached graph arrays --
+        mirrors ``SoapConfig.as_kwargs()``'s role in splitting
+        feature-computation params from architecture params.
+        """
+        return {
+            "radius": self.radius,
+            "max_num_nbr": self.max_num_nbr,
+            "dmin": self.dmin,
+            "dmax": self.dmax,
+            "step": self.step,
+            "max_species": self.max_species,
+        }
+
+    def __post_init__(self):
+        if self.radius <= 0:
+            raise ValueError("graph.radius must be > 0")
+        if self.max_num_nbr <= 0:
+            raise ValueError("graph.max_num_nbr must be a positive integer")
+        if self.step <= 0:
+            raise ValueError("graph.step must be > 0")
+        if self.dmax is not None and self.dmax <= self.dmin:
+            raise ValueError("graph.dmax must be > graph.dmin")
+        if self.max_species <= 0:
+            raise ValueError("graph.max_species must be a positive integer")
+        if (
+            self.atom_fea_len <= 0
+            or self.n_conv <= 0
+            or self.h_fea_len <= 0
+            or self.n_h <= 0
+        ):
+            raise ValueError(
+                "graph.atom_fea_len/n_conv/h_fea_len/n_h must all be positive integers"
+            )
 
 
 @dataclass(frozen=True)
@@ -461,18 +571,29 @@ class RunConfig:
         model_kind: Which model to train: ``"vae"`` (default, a
             variational autoencoder trained with a KL term/``beta``),
             ``"autoencoder"`` (a deterministic autoencoder, no KL/``beta``),
-            or ``"supcon"`` (an encoder-only model with no decoder/KL, trained
+            ``"supcon"`` (an encoder-only model with no decoder/KL, trained
             with a Supervised Contrastive loss on family/spacegroup labels
-            instead of reconstruction -- see ``dim_red.supcon``). All three
-            read their encoder architecture from ``vae`` (``encoder_hidden_dim``,
-            ``latent_dim`` -- ``decoder_hidden_dim``/``mirror`` are ignored by
-            ``"supcon"``, same treatment ``"autoencoder"`` gives ``beta``).
-            ``"vae"``/``"autoencoder"`` read their aux-head settings from
-            ``aux_heads``; ``"supcon"`` reads its loss settings from
-            ``supcon`` instead (``aux_heads`` is ignored for it), and its
-            training-batch sampling strategy from ``batching`` (ignored for
-            ``"vae"``/``"autoencoder"``, which always use a plain shuffle).
-            See ``dim_red.pipeline.single_run.run_single``.
+            instead of reconstruction -- see ``dim_red.supcon``), or
+            ``"cgcnn"`` (a graph-convolutional encoder-only body, trained
+            jointly with classifier head(s) via cross-entropy on
+            family/spacegroup labels -- no decoder/KL/contrastive loss at
+            all, single-phase, like ``"vae"``/``"autoencoder"``'s
+            ``aux_heads`` pattern applied to a graph-convolutional body
+            instead of a flat-feature encoder, always requires
+            ``aux_heads.mode != "none"``; see ``dim_red.cgcnn``). ``"vae"``/
+            ``"autoencoder"``/``"supcon"`` read their encoder architecture
+            from ``vae`` (``encoder_hidden_dim``, ``latent_dim`` --
+            ``decoder_hidden_dim``/``mirror`` are ignored by ``"supcon"``,
+            same treatment ``"autoencoder"`` gives ``beta``); ``"cgcnn"``
+            reads its graph-construction + architecture hyperparameters from
+            ``graph`` instead (only ``vae.latent_dim`` is still read).
+            ``"vae"``/``"autoencoder"``/``"cgcnn"`` read their aux-head
+            settings from ``aux_heads``; ``"supcon"`` reads its loss
+            settings from ``supcon`` instead (``aux_heads`` is ignored for
+            it), and its training-batch sampling strategy from ``batching``
+            (ignored for ``"vae"``/``"autoencoder"``/``"cgcnn"``, which
+            always use a plain shuffle). See
+            ``dim_red.pipeline.single_run.run_single``.
         data_source: How the dataset (before SOAP) is built: ``"fetch"``
             (default -- the ``fetch`` config block queries Materials
             Project) or ``"pyxtal"`` (the ``pyxtal`` config block builds a
@@ -492,9 +613,11 @@ class RunConfig:
             this run's body finishes phase-1 training -- the same entry
             point ``dimred-train-tail`` uses manually, just invoked
             automatically. ``None`` (default) disables it, current behavior
-            unchanged. Ignored for ``model_kind != "supcon"``, same
-            treatment ``aux_heads``/``supcon``/``batching`` get for the
-            model kinds they don't apply to. See ``AutoTailsConfig``.
+            unchanged. Ignored for ``model_kind not in ("supcon", "cgcnn")``
+            (a vae/autoencoder body already has its own classification heads
+            and no separate tail-training workflow makes sense for it), same
+            treatment ``aux_heads``/``supcon``/``batching`` get for the model
+            kinds they don't apply to. See ``AutoTailsConfig``.
     """
 
     soap: SoapConfig
@@ -503,6 +626,7 @@ class RunConfig:
     aux_heads: AuxHeadsConfig = field(default_factory=AuxHeadsConfig)
     supcon: SupConConfig = field(default_factory=SupConConfig)
     batching: BatchingConfig = field(default_factory=BatchingConfig)
+    graph: GraphConfig = field(default_factory=GraphConfig)
     seed: int = 42
     output_dir: str = "runs"
     name: Optional[str] = None
@@ -526,6 +650,13 @@ class RunConfig:
             raise ValueError("data_source='fetch' requires a 'fetch' config block.")
         if self.data_source == "pyxtal" and self.pyxtal is None:
             raise ValueError("data_source='pyxtal' requires a 'pyxtal' config block.")
+        if self.model_kind == "cgcnn" and self.aux_heads.mode == "none":
+            raise ValueError(
+                "model_kind='cgcnn' requires aux_heads.mode != 'none' "
+                "(family classification is CGCNN's only training objective, "
+                "unlike vae/autoencoder which can train an unsupervised "
+                "reconstruction objective alone)"
+            )
 
 
 @dataclass(frozen=True)
@@ -627,6 +758,7 @@ def run_config_from_dict(d: Dict[str, Any]) -> RunConfig:
     train = _parse_train_settings(TrainSettings, d.get("train", {}))
     aux_heads = _dataclass_from_dict(AuxHeadsConfig, d.get("aux_heads", {}))
     supcon = _dataclass_from_dict(SupConConfig, d.get("supcon", {}))
+    graph = _dataclass_from_dict(GraphConfig, d.get("graph", {}))
     batching_dict = d.get("batching", {})
     batching = BatchingConfig(
         strategy=str(batching_dict.get("strategy", "random")),
@@ -679,6 +811,7 @@ def run_config_from_dict(d: Dict[str, Any]) -> RunConfig:
         aux_heads=aux_heads,
         supcon=supcon,
         batching=batching,
+        graph=graph,
         seed=int(d.get("seed", 42)),
         output_dir=str(d.get("output_dir", "runs")),
         name=d.get("name"),
@@ -711,6 +844,7 @@ def run_config_to_dict(config: RunConfig) -> Dict[str, Any]:
         "aux_heads": dataclasses.asdict(config.aux_heads),
         "supcon": dataclasses.asdict(config.supcon),
         "batching": dataclasses.asdict(config.batching),
+        "graph": dataclasses.asdict(config.graph),
     }
     if config.fetch is not None:
         result["fetch"] = dataclasses.asdict(config.fetch)
@@ -924,12 +1058,12 @@ class TailTrainSettings:
 @dataclass(frozen=True)
 class AutoTailsConfig:
     """Config for ``RunConfig.tails``: automatically train one or both tails
-    on a completed ``model_kind == "supcon"`` run's frozen body, right after
-    phase-1 training finishes -- the same
+    on a completed ``model_kind == "supcon"`` or ``model_kind == "cgcnn"``
+    run's frozen body, right after phase-1 training finishes -- the same
     ``dim_red.pipeline.tail_training.train_tail`` entry point
     ``dimred-train-tail`` uses, just invoked automatically instead of as a
-    separate manual command. Ignored for ``model_kind != "supcon"``, same
-    treatment ``aux_heads``/``supcon``/``batching`` already get for the model
+    separate manual command. Ignored for ``model_kind not in ("supcon",
+    "cgcnn")``, same treatment ``aux_heads``/``supcon``/``batching`` already get for the model
     kinds they don't apply to.
 
     Attributes:

@@ -29,6 +29,7 @@ from dim_red.pipeline.config import (
     ClassificationTailConfig,
     EarlyStoppingConfig,
     FetchConfig,
+    GraphConfig,
     PyxtalConfig,
     RunConfig,
     SoapConfig,
@@ -1113,6 +1114,141 @@ def test_run_single_tails_ignored_for_non_supcon_model_kind(tmp_path):
         run_dir = run_single(config)
 
     assert not (run_dir / "tails").exists()
+
+
+# --- model_kind == "cgcnn" ---------------------------------------------------
+#
+# No SOAP mocking needed (dim_red.cgcnn.graph is cheap, pure NumPy/ASE) --
+# only fetch_structures_by_crystal_system is mocked, with real (if tiny)
+# periodic structures so graph construction is meaningful.
+
+
+def _fake_cgcnn_atoms(symbol: str, material_id: str, spacegroup: int) -> Atoms:
+    atoms = Atoms(
+        symbol * 2,
+        positions=[[0.0, 0.0, 0.0], [1.5, 0.0, 0.0]],
+        cell=[4.0, 4.0, 4.0],
+        pbc=True,
+    )
+    atoms.info["material_id"] = material_id
+    atoms.info["spacegroup"] = spacegroup
+    return atoms
+
+
+def _fake_fetch_cgcnn_with_spacegroups(spacegroup_offsets):
+    def fake_fetch(crystal_system, api_key=None, limit=10):
+        offset = spacegroup_offsets[crystal_system]
+        return [
+            _fake_cgcnn_atoms("Cu", f"mp-{crystal_system}-{i}", offset + (i % 2))
+            for i in range(limit)
+        ]
+
+    return fake_fetch
+
+
+def _make_cgcnn_config(tmp_path, aux_mode="family_only", tails=None) -> RunConfig:
+    return RunConfig(
+        fetch=FetchConfig(crystal_systems=["cubic", "hexagonal"], limit_per_system=10),
+        soap=SoapConfig(),
+        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=4),
+        train=TrainSettings(epochs=2, batch_size=4, val_ratio=0.2),
+        graph=GraphConfig(
+            radius=3.0,
+            max_num_nbr=4,
+            max_species=2,
+            atom_fea_len=8,
+            n_conv=1,
+            h_fea_len=8,
+        ),
+        aux_heads=AuxHeadsConfig(mode=aux_mode, head_hidden_dim=4),
+        seed=0,
+        output_dir=str(tmp_path / "runs"),
+        model_kind="cgcnn",
+        tails=tails,
+    )
+
+
+def test_run_single_cgcnn_writes_expected_artifacts(tmp_path):
+    config = _make_cgcnn_config(tmp_path)
+    spacegroup_offsets = {"cubic": 195, "hexagonal": 168}
+
+    with patch(
+        "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
+        side_effect=_fake_fetch_cgcnn_with_spacegroups(spacegroup_offsets),
+    ):
+        run_dir = run_single(config)
+
+    assert "model-cgcnn" in run_dir.name
+    assert (run_dir / "config.yaml").exists()
+    assert (run_dir / "run.log").exists()
+    assert (run_dir / "loss_history.csv").exists()
+    assert (run_dir / "dataset.extxyz").exists()
+    assert (run_dir / "embeddings.npz").exists()
+    assert (run_dir / "embeddings_plot.png").exists()
+    assert (run_dir / "model_params.msgpack").exists()
+
+    embeddings = np.load(run_dir / "embeddings.npz")
+    n_total = 20  # 2 crystal systems x limit_per_system=10
+    assert embeddings["embeddings"].shape == (n_total, 4)  # latent_dim=4
+    assert "family_probs" in embeddings.files
+    assert "family_classes" in embeddings.files
+    # No natural flat feature vector/standardization stats exist for graph
+    # features -- these are SOAP-only fields, omitted entirely for cgcnn.
+    assert "features" not in embeddings.files
+    assert "feature_mean" not in embeddings.files
+    assert "feature_std" not in embeddings.files
+
+
+def test_run_single_cgcnn_family_and_spacegroup_writes_expected_artifacts(tmp_path):
+    config = _make_cgcnn_config(tmp_path, aux_mode="family_and_spacegroup")
+    spacegroup_offsets = {"cubic": 195, "hexagonal": 168}
+
+    with patch(
+        "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
+        side_effect=_fake_fetch_cgcnn_with_spacegroups(spacegroup_offsets),
+    ):
+        run_dir = run_single(config)
+
+    with open(run_dir / "loss_history.csv") as f:
+        header = f.readline().strip().split(",")
+    assert header == [
+        "epoch",
+        "train_loss",
+        "train_family_ce",
+        "val_loss",
+        "val_family_ce",
+        "train_spacegroup_ce",
+        "val_spacegroup_ce",
+    ]
+
+    embeddings = np.load(run_dir / "embeddings.npz")
+    n_total = 20
+    assert set(embeddings["family_classes"].tolist()) == {"Cubic", "Hexagonal"}
+    assert set(embeddings["spacegroup_classes"].tolist()) == {168, 169, 195, 196}
+    assert embeddings["family_probs"].shape == (n_total, 2)
+    assert embeddings["spacegroup_probs"].shape == (n_total, 4)
+    np.testing.assert_allclose(
+        embeddings["family_probs"].sum(axis=1), np.ones(n_total), atol=1e-5
+    )
+
+
+def test_run_single_cgcnn_auto_trains_visualization_tail(tmp_path):
+    tails = AutoTailsConfig(
+        visualization=VisualizationTailConfig(viz_dim=2, mode="family_only"),
+        train=TailTrainSettings(epochs=1, batch_size=4),
+    )
+    config = _make_cgcnn_config(tmp_path, tails=tails)
+    spacegroup_offsets = {"cubic": 195, "hexagonal": 168}
+
+    with patch(
+        "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
+        side_effect=_fake_fetch_cgcnn_with_spacegroups(spacegroup_offsets),
+    ):
+        run_dir = run_single(config)
+
+    visualization_dir = run_dir / "tails" / "visualization"
+    assert (visualization_dir / "tail_embeddings.npz").exists()
+    assert (visualization_dir / "tail_params.msgpack").exists()
 
 
 def test_run_single_tails_none_leaves_behavior_unchanged(tmp_path):

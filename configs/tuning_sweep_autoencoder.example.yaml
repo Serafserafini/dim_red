@@ -1,0 +1,64 @@
+# Stage 1 (within-kind hyperparameter tuning) of the cross-architecture
+# tuning + benchmark playbook for model: autoencoder -- see
+# src/dim_red/pipeline/CLAUDE.md's "Benchmark" section and
+# configs/benchmark_pyxtal_base.example.yaml for the shared dataset this
+# fragment is copied from (keep in sync if you change it).
+#
+# aux_heads.mode is turned on here (unlike single_run_autoencoder.example.yaml's
+# default "none") specifically so autoencoder is apples-to-apples on
+# classification accuracy with cgcnn (where it's mandatory) in the final
+# benchmark. No train.beta here -- unused for this model_kind (no KL term).
+#
+# Selection criterion (see CLAUDE.md): primary = mean of
+# family_silhouette/family_knn_accuracy from `dimred-benchmark`'s table;
+# secondary sanity check = val_recon (equal to val_loss for this model_kind).
+#
+# Run with: dimred-sweep configs/tuning_sweep_autoencoder.example.yaml
+
+base:
+  seed: 42
+  output_dir: runs/tuning_autoencoder
+  model: autoencoder
+  data_source: pyxtal
+
+  pyxtal:
+    families: [cubic, hexagonal, orthorhombic, tetragonal]
+    structures_per_family: 60
+    distribution: uniform
+    n_species: 2
+    seed: 42
+
+  soap:
+    r_cut: 5.0
+    n_max: 4
+    l_max: 3
+    sigma: 0.5
+    element_agnostic: false
+    normalize_distances: false
+    species: null
+
+  vae:
+    encoder_hidden_dim: [128] # overridden by the grid below
+    latent_dim: 8
+    mirror: true
+
+  aux_heads:
+    mode: family_and_spacegroup
+    lambda_family: 1.0
+    lambda_spacegroup: 1.0
+    head_hidden_dim: 16
+
+  train:
+    epochs: 30
+    batch_size: 32
+    learning_rate: 0.001
+    optimizer: adam
+    val_ratio: 0.2
+    device: cpu
+
+# 3 hidden-dim configs = 3 runs, all sharing one cached dataset build.
+grid:
+  vae.encoder_hidden_dim:
+    - [64]
+    - [128, 64]
+    - [128, 64, 32]

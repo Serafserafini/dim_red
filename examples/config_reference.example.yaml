@@ -1,17 +1,19 @@
-# Reference config: every field the fetch/pyxtal -> SOAP -> vae/autoencoder/
-# supcon pipeline accepts (dim_red.pipeline.config.RunConfig and its nested
-# blocks), each set to its own default value, with a comment on what it does
-# and (where relevant) which other setting it depends on or is ignored by.
+# Reference config: every field the fetch/pyxtal -> SOAP/graph ->
+# vae/autoencoder/supcon/cgcnn pipeline accepts (dim_red.pipeline.config.RunConfig
+# and its nested blocks), each set to its own default value, with a comment on
+# what it does and (where relevant) which other setting it depends on or is
+# ignored by.
 #
 # This file documents the full schema -- it is NOT meant to be run as-is:
 # "fetch"/"pyxtal" are mutually exclusive (pick one via "data_source"), and
-# "aux_heads"/"supcon"/"batching" only apply to some values of "model". For a
-# runnable starting point, copy one of the other configs/*.example.yaml files
-# instead (single_run.example.yaml for fetch+vae, single_run_pyxtal.example.yaml
+# "aux_heads"/"supcon"/"batching"/"graph" only apply to some values of "model".
+# For a runnable starting point, copy one of the other configs/*.example.yaml
+# files instead (single_run.example.yaml for fetch+vae, single_run_pyxtal.example.yaml
 # for pyxtal+vae, single_run_supcon.example.yaml for pyxtal+supcon,
-# single_run_autoencoder.example.yaml for fetch+autoencoder) and only change
-# what you need -- every field omitted from a real config falls back to the
-# default shown here.
+# single_run_autoencoder.example.yaml for fetch+autoencoder,
+# single_run_cgcnn.example.yaml for pyxtal+cgcnn) and only change what you
+# need -- every field omitted from a real config falls back to the default
+# shown here.
 #
 # Run with: python -m dim_red.pipeline.cli --config <your_config.yaml>
 # or:       dimred-run <your_config.yaml>
@@ -23,9 +25,13 @@ seed: 42 # global RNG seed (train/val split, model init, ...); also the
 output_dir: runs # where this run's directory is created
 name: null # optional custom run-directory name; null -> auto-derived from
   # the swept/non-default hyperparameters (see pipeline.single_run.make_run_name)
-model: vae # "vae" (default) | "autoencoder" | "supcon" -- which model
-  # dim_red.pipeline.single_run.run_single trains; all three read their
-  # encoder architecture from "vae:" below
+model: vae # "vae" (default) | "autoencoder" | "supcon" | "cgcnn" -- which
+  # model dim_red.pipeline.single_run.run_single trains; "vae"/"autoencoder"/
+  # "supcon" read their encoder architecture from "vae:" below (SOAP-vector
+  # input); "cgcnn" reads its graph-construction + architecture
+  # hyperparameters from "graph:" instead (only "vae.latent_dim" is still
+  # read) and its input is built directly from crystal structures, no SOAP
+  # at all -- see "soap:"/"graph:" below
 data_source: fetch # "fetch" (default, Materials Project) | "pyxtal"
   # (synthetic, symmetry-valid structures via dim_red.generate) -- exactly
   # one of "fetch:"/"pyxtal:" below is required, matching this
@@ -74,7 +80,9 @@ augmentation: null # example block, all fields at their default:
   # supercell_radius: null  # Angstroms; null -> skip supercell expansion (see CLAUDE.md)
   # seed: null              # null -> falls back to the top-level "seed" above
 
-# --- SOAP featurization ----------------------------------------------------
+# --- SOAP featurization -- model: vae/autoencoder/supcon only --------------
+# Ignored for model: cgcnn (which reads "graph:" below instead and never
+# computes SOAP at all).
 
 soap:
   r_cut: 5.0
@@ -85,23 +93,57 @@ soap:
   normalize_distances: false
   species: null # auto-detected across all fetched/generated structures
 
-# --- Encoder/decoder architecture (all three model kinds) ------------------
+# --- Encoder/decoder architecture (vae/autoencoder/supcon/cgcnn) -----------
+# For model: cgcnn, only "latent_dim" is read (the body's output width,
+# saved to embeddings.npz, reused by every downstream tail) -- the rest of
+# this block is ignored, same treatment "supcon" already gives
+# decoder_hidden_dim/mirror.
 
 vae:
-  encoder_hidden_dim: [] # REQUIRED, no default -- e.g. [128, 64]
+  encoder_hidden_dim: [] # REQUIRED, no default -- e.g. [128, 64]; ignored for model: cgcnn
   decoder_hidden_dim: null # null -> mirrors the encoder (reversed); ignored
-    # for model: supcon (no decoder)
+    # for model: supcon/cgcnn (no decoder)
   latent_dim: 0 # REQUIRED, no default -- e.g. 2
   mirror: true # only consulted when decoder_hidden_dim is null; ignored for
-    # model: supcon
+    # model: supcon/cgcnn
 
-# --- model: vae / autoencoder only -----------------------------------------
-# Optional auxiliary classification heads on the latent z. Ignored for
-# model: supcon (use "supcon:" below instead).
+# --- model: cgcnn only: graph construction + architecture ------------------
+# Used INSTEAD of "soap:" for model: cgcnn -- a graph-convolutional body
+# reading crystal structures directly (dim_red.cgcnn.graph), not SOAP
+# vectors. Ignored for model: vae/autoencoder/supcon.
+
+graph:
+  radius: 8.0 # cutoff radius (Angstroms) for periodic-boundary-aware
+    # neighbor search (dim_red.cgcnn.graph, via ase.neighborlist -- correct
+    # even when radius exceeds half the unit cell's width, unlike a naive
+    # minimum-image-convention distance matrix). CGCNN's own default.
+  max_num_nbr: 12 # closest neighbors kept per atom; padded/masked if fewer found
+  dmin: 0.0 # lower bound of the Gaussian bond-distance expansion filter bank
+  dmax: null # upper bound of the filter bank; null -> resolves to "radius"
+  step: 0.2 # Gaussian filter spacing -> n_gaussian = (dmax-dmin)/step + 1
+    # (41 with the defaults above)
+  max_species: 10 # max distinct species any ONE structure may have -- not a
+    # real chemical vocabulary: the model only ever sees a per-structure
+    # LOCAL species slot (1..max_species), never which real element it is
+    # (see dim_red.cgcnn.graph._local_species_indices). Set this >= the
+    # largest species count any structure in the dataset can have (e.g. >=
+    # pyxtal.n_species above).
+  atom_fea_len: 64 # per-atom embedding/hidden width used throughout the
+    # graph-convolution stack
+  n_conv: 3 # number of stacked gated graph-convolution layers
+  h_fea_len: 128 # hidden width of the post-pooling fully-connected block
+  n_h: 1 # number of post-pooling hidden layers
+
+# --- model: vae / autoencoder / cgcnn only ----------------------------------
+# Optional auxiliary classification heads on the latent z for vae/autoencoder
+# (added on top of the reconstruction objective); for cgcnn this is instead
+# the model's ONLY training objective (no reconstruction/contrastive
+# fallback exists), so "mode: none" is rejected at config-parse time when
+# model: cgcnn. Ignored for model: supcon (use "supcon:" below instead).
 
 aux_heads:
-  mode: none # "none" (default, plain vae/autoencoder) | "family_only" |
-    # "family_and_spacegroup" (spacegroup head masked by family)
+  mode: none # "none" (default, plain vae/autoencoder; INVALID for model: cgcnn) |
+    # "family_only" | "family_and_spacegroup" (spacegroup head masked by family)
   lambda_family: 1.0 # weight of the family cross-entropy term; ignored when mode: none
   lambda_spacegroup: 1.0 # weight of the spacegroup term; ignored unless mode: family_and_spacegroup
   head_hidden_dim: 16 # hidden width of each head's single hidden layer
@@ -143,23 +185,28 @@ train:
     # the default); unused when optimizer: velo
   optimizer: adam # "adam" (default, fast) or "velo" (learned_optimization's
     # pretrained VeLO meta-learned optimizer -- much slower to start, see CLAUDE.md)
-  beta: 1.0 # KL weight; ignored for model: autoencoder/supcon (no KL term)
+  beta: 1.0 # KL weight; ignored for model: autoencoder/supcon/cgcnn (no KL term)
   val_ratio: 0.2
   device: cpu # "cpu" | "gpu" -- raises if no matching JAX device exists
-  early_stopping: # same mechanism for vae/autoencoder/supcon: stop once
+  early_stopping: # same mechanism for vae/autoencoder/supcon/cgcnn: stop once
     # val_loss hasn't improved by more than min_delta for "patience" epochs
     enabled: false
     patience: 10
     min_delta: 0.0
     restore_best_weights: true # keep the best-val_loss epoch's params, not necessarily the last
 
-# --- model: supcon only: auto-train tails ----------------------------------
+# --- model: supcon / cgcnn only: auto-train tails ---------------------------
 # Automatically train a classification and/or visualization tail on this
 # run's frozen body right after phase-1 training finishes -- the same
 # dim_red.pipeline.tail_training.train_tail entry point dimred-train-tail
 # uses, invoked automatically instead of as a separate manual command.
-# Ignored for model != "supcon". Omit this block entirely (default: null)
-# to disable, current behavior unchanged.
+# Ignored for model not in ("supcon", "cgcnn") -- a vae/autoencoder body
+# already has its own classification heads and no separate tail-training
+# workflow makes sense for it. For cgcnn, a classification tail is redundant
+# with its own built-in heads above but harmless (useful for ablation); a
+# visualization tail is genuinely useful since vae.latent_dim need not be 2.
+# Omit this block entirely (default: null) to disable, current behavior
+# unchanged.
 
 tails: null # example block, all fields at their default:
   # classification: null # set to auto-train a classification tail, e.g.:

@@ -17,6 +17,16 @@ jitter and/or vacancy removal) right after fetch/generation and before SOAP,
 when ``RunConfig.augmentation`` is set -- see ``_resolve_augmentation``. The
 augmentation settings are folded into the cache key (``_cache_key``/
 ``_pyxtal_cache_key``) so different augmentation configs don't collide.
+
+For ``RunConfig.model_kind == "cgcnn"``, ``build_graph_dataset_for_run`` (and
+its own ``get_or_build_cgcnn_dataset``/``get_or_build_pyxtal_cgcnn_dataset``)
+is used *instead of* ``build_dataset_for_run`` -- it reuses the exact same
+fetch/generate/augment/cache-raw-structures-to-``<hash>.extxyz`` plumbing
+(all of it operates on plain ``ase.Atoms``, agnostic to downstream
+featurization) but replaces SOAP with
+``dim_red.cgcnn.graph.atoms_list_to_graph_arrays`` and caches a different
+array schema (``_GRAPH_CACHE_ARRAY_KEYS``, keyed by graph hyperparameters
+instead of SOAP ones) -- see ``dim_red.cgcnn``.
 """
 
 from __future__ import annotations
@@ -32,6 +42,7 @@ import numpy as np
 from ase.io import write as write_atoms
 
 from dim_red.augmentation import AugmentationConfig, augment_structures
+from dim_red.cgcnn.graph import atoms_list_to_graph_arrays
 from dim_red.fetch import fetch_structures_by_crystal_system
 from dim_red.soap import compute_soap
 from dim_red.utils import apply_standardization, fit_standardization
@@ -448,6 +459,415 @@ def build_dataset_for_run(
     return get_or_build_dataset(
         crystal_systems=config.fetch.crystal_systems,
         soap_kwargs=config.soap.as_kwargs(),
+        limit_per_system=config.fetch.limit_per_system,
+        cache_dir=cache_dir,
+        api_key=config.fetch.api_key,
+        augmentation=augmentation,
+    )
+
+
+# --- CGCNN graph dataset caching (RunConfig.model_kind == "cgcnn" only) ----
+#
+# Parallel to the SOAP-based functions above: the fetch/generate/augment/
+# cache-raw-structures-to-<hash>.extxyz plumbing is reused unchanged (it
+# never depends on downstream featurization); only feature computation and
+# the cache array schema differ (graph arrays instead of a flat SOAP
+# matrix -- no standardization step, since Gaussian-expanded distances are
+# already bounded to [0, 1] by construction).
+
+_GRAPH_CACHE_ARRAY_KEYS = (
+    "local_species_idx",
+    "nbr_idx",
+    "nbr_fea",
+    "nbr_mask",
+    "atom_mask",
+    "labels",
+    "material_ids",
+    "spacegroups",
+)
+
+
+def _graph_cache_key(
+    crystal_systems: Sequence[str],
+    limit_per_system: int,
+    graph_kwargs: Dict[str, Any],
+    augmentation: Optional[AugmentationConfig] = None,
+) -> str:
+    """Stable hash identifying a graph dataset built from (crystal systems,
+    fetch limit, graph-construction hyperparameters, augmentation settings).
+    Prefixed ``"cgcnn-"`` so it can never collide with a ``_cache_key``
+    (SOAP) hash for the same underlying dataset-defining scope even if the
+    hashes matched numerically.
+    """
+    payload = {
+        "crystal_systems": sorted(cs.lower() for cs in crystal_systems),
+        "limit_per_system": limit_per_system,
+        "graph_kwargs": {k: graph_kwargs[k] for k in sorted(graph_kwargs)},
+        "augmentation": _augmentation_payload(augmentation),
+    }
+    blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    return "cgcnn-" + hashlib.sha256(blob).hexdigest()[:16]
+
+
+def _pyxtal_graph_cache_key(
+    pyxtal_config: "PyxtalConfig",
+    seed: int,
+    graph_kwargs: Dict[str, Any],
+    augmentation: Optional[AugmentationConfig] = None,
+) -> str:
+    """Stable hash identifying a graph dataset built from (pyxtal generation
+    config, seed, graph-construction hyperparameters, augmentation
+    settings). Prefixed ``"cgcnn-pyxtal-"``, mirrors ``_pyxtal_cache_key``.
+    """
+    payload = {
+        "pyxtal": dataclasses.asdict(pyxtal_config),
+        "seed": seed,
+        "graph_kwargs": {k: graph_kwargs[k] for k in sorted(graph_kwargs)},
+        "augmentation": _augmentation_payload(augmentation),
+    }
+    blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    return "cgcnn-pyxtal-" + hashlib.sha256(blob).hexdigest()[:16]
+
+
+def _load_cached_graph_dataset(
+    cache_path: Path,
+) -> Optional[
+    Tuple[
+        Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+        List[str],
+        List[str],
+        List[int],
+    ]
+]:
+    """Mirrors ``_load_cached_dataset``: ``None`` on cache miss/stale schema,
+    otherwise ``((local_species_idx, nbr_idx, nbr_fea, nbr_mask, atom_mask),
+    labels, material_ids, spacegroups)``.
+    """
+    if not cache_path.exists():
+        return None
+    if not _structures_cache_path(cache_path).exists():
+        logger.info(
+            "Graph dataset cache at %s has no cached structures (%s); rebuilding",
+            cache_path,
+            _structures_cache_path(cache_path),
+        )
+        return None
+    cached = np.load(cache_path)
+    if not all(k in cached.files for k in _GRAPH_CACHE_ARRAY_KEYS):
+        logger.info(
+            "Graph dataset cache at %s is missing expected fields (stale schema); rebuilding",
+            cache_path,
+        )
+        return None
+    graph_arrays = (
+        cached["local_species_idx"],
+        cached["nbr_idx"],
+        cached["nbr_fea"],
+        cached["nbr_mask"],
+        cached["atom_mask"],
+    )
+    return (
+        graph_arrays,
+        cached["labels"].tolist(),
+        cached["material_ids"].tolist(),
+        cached["spacegroups"].tolist(),
+    )
+
+
+def _save_graph_dataset_cache(
+    cache_path: Path,
+    local_species_idx: np.ndarray,
+    nbr_idx: np.ndarray,
+    nbr_fea: np.ndarray,
+    nbr_mask: np.ndarray,
+    atom_mask: np.ndarray,
+    labels: List[str],
+    material_ids: List[str],
+    spacegroups: List[int],
+) -> None:
+    """Mirrors ``_save_dataset_cache`` for the graph array schema."""
+    np.savez(
+        cache_path,
+        local_species_idx=local_species_idx,
+        nbr_idx=nbr_idx,
+        nbr_fea=nbr_fea,
+        nbr_mask=nbr_mask,
+        atom_mask=atom_mask,
+        labels=np.array(labels),
+        material_ids=np.array(material_ids),
+        spacegroups=np.array(spacegroups, dtype=np.int64),
+    )
+    logger.info(
+        "Graph dataset cached at %s (local_species_idx.shape=%s)",
+        cache_path,
+        local_species_idx.shape,
+    )
+
+
+def _compute_graphs(
+    atoms_list: list, graph_kwargs: Dict[str, Any]
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Returns ``(local_species_idx, nbr_idx, nbr_fea, nbr_mask, atom_mask)``
+    for the whole dataset -- the CGCNN counterpart to
+    ``_compute_soap_and_standardize``, used *instead of* it when
+    ``RunConfig.model_kind == "cgcnn"``. Unlike SOAP, there is no
+    standardization step (Gaussian-expanded distances are already bounded
+    to ``[0, 1]`` by construction) and no species list needs resolving (the
+    model uses a fixed-size embedding keyed by a per-structure LOCAL species
+    slot, not a real chemical species vocabulary -- see
+    ``dim_red.cgcnn.graph``). ``max_atoms`` is auto-resolved across this
+    ``atoms_list`` (dataset-wide).
+    """
+    logger.info("Computing CGCNN graphs for %d structures", len(atoms_list))
+    return atoms_list_to_graph_arrays(atoms_list, **graph_kwargs)
+
+
+def get_or_build_cgcnn_dataset(
+    crystal_systems: Sequence[str],
+    graph_kwargs: Dict[str, Any],
+    limit_per_system: int,
+    cache_dir: Union[str, Path],
+    api_key: Optional[str] = None,
+    augmentation: Optional[AugmentationConfig] = None,
+) -> Tuple[
+    Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    List[str],
+    List[str],
+    List[int],
+    Path,
+]:
+    """Fetch structures and build CGCNN graph arrays -- reusing a cached copy
+    on disk when available. The graph-based counterpart to
+    ``get_or_build_dataset``; the fetch/augment/cache-structures plumbing is
+    reused unchanged (see module docstring), only the featurization step and
+    cache-array schema differ.
+
+    Args:
+        crystal_systems: Crystal systems to include (as accepted by
+            ``fetch_structures_by_crystal_system``).
+        graph_kwargs: Keyword arguments for ``atoms_list_to_graph_arrays``
+            (``dim_red.pipeline.config.GraphConfig.graph_kwargs()``).
+        limit_per_system: Max structures fetched per crystal system.
+        cache_dir: Directory where cached datasets (``<hash>.npz``/
+            ``<hash>.extxyz``) live.
+        api_key: Materials Project API key (falls back to ``MP_API_KEY``).
+        augmentation: Optional ``dim_red.augmentation.AugmentationConfig``,
+            applied before graph construction. ``None`` (default) disables it.
+
+    Returns:
+        ``(graph_arrays, labels, material_ids, spacegroups, structures_path)``
+        -- ``graph_arrays`` is the 5-tuple ``(local_species_idx, nbr_idx,
+        nbr_fea, nbr_mask, atom_mask)``. Note: 5 elements, not 7 like
+        ``get_or_build_dataset`` -- no ``feature_mean``/``feature_std`` (not
+        applicable to graph features).
+    """
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    key = _graph_cache_key(
+        crystal_systems, limit_per_system, graph_kwargs, augmentation
+    )
+    cache_path = cache_dir / f"{key}.npz"
+    structures_path = _structures_cache_path(cache_path)
+
+    cached = _load_cached_graph_dataset(cache_path)
+    if cached is not None:
+        logger.info(
+            "CGCNN dataset cache hit (%s) for crystal_systems=%s",
+            key,
+            list(crystal_systems),
+        )
+        graph_arrays, labels, material_ids, spacegroups = cached
+        return graph_arrays, labels, material_ids, spacegroups, structures_path
+
+    logger.info(
+        "CGCNN dataset cache miss (%s); fetching structures for crystal_systems=%s",
+        key,
+        list(crystal_systems),
+    )
+
+    all_atoms = []
+    labels: List[str] = []
+    for cs in crystal_systems:
+        atoms_list = fetch_structures_by_crystal_system(
+            crystal_system=cs, api_key=api_key, limit=limit_per_system
+        )
+        n_fetched = len(atoms_list)
+        if augmentation is not None:
+            atoms_list = augment_structures(atoms_list, augmentation)
+            logger.info(
+                "Fetched %d structures for crystal_system=%s (%d after augmentation)",
+                n_fetched,
+                cs,
+                len(atoms_list),
+            )
+        else:
+            logger.info("Fetched %d structures for crystal_system=%s", n_fetched, cs)
+        all_atoms.extend(atoms_list)
+        labels.extend([cs.capitalize()] * len(atoms_list))
+
+    if not all_atoms:
+        raise ValueError("No structures fetched for the requested crystal systems.")
+
+    material_ids = [a.info.get("material_id", "unknown") for a in all_atoms]
+    spacegroups = [a.info.get("spacegroup", _UNKNOWN_SPACEGROUP) for a in all_atoms]
+
+    _save_structures_cache(cache_path, all_atoms)
+    local_species_idx, nbr_idx, nbr_fea, nbr_mask, atom_mask = _compute_graphs(
+        all_atoms, graph_kwargs
+    )
+    _save_graph_dataset_cache(
+        cache_path,
+        local_species_idx,
+        nbr_idx,
+        nbr_fea,
+        nbr_mask,
+        atom_mask,
+        labels,
+        material_ids,
+        spacegroups,
+    )
+
+    return (
+        (local_species_idx, nbr_idx, nbr_fea, nbr_mask, atom_mask),
+        labels,
+        material_ids,
+        spacegroups,
+        structures_path,
+    )
+
+
+def get_or_build_pyxtal_cgcnn_dataset(
+    pyxtal_config: "PyxtalConfig",
+    seed: int,
+    graph_kwargs: Dict[str, Any],
+    cache_dir: Union[str, Path],
+    augmentation: Optional[AugmentationConfig] = None,
+) -> Tuple[
+    Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    List[str],
+    List[str],
+    List[int],
+    Path,
+]:
+    """Generate a synthetic structure database with ``dim_red.generate`` and
+    build CGCNN graph arrays -- reusing a cached copy on disk when
+    available. The graph-based, ``pyxtal`` counterpart to
+    ``get_or_build_pyxtal_dataset``.
+
+    Args:
+        pyxtal_config: Generation settings (``dim_red.pipeline.config.PyxtalConfig``).
+        seed: The *effective* seed to generate with -- see
+            ``get_or_build_pyxtal_dataset``'s ``seed`` docs; resolving
+            ``pyxtal_config.seed or RunConfig.seed`` is the caller's job
+            (``build_graph_dataset_for_run`` does this).
+        graph_kwargs: Keyword arguments for ``atoms_list_to_graph_arrays``.
+        cache_dir: Directory where cached datasets (``<hash>.npz``/
+            ``<hash>.extxyz``) live.
+        augmentation: Optional ``dim_red.augmentation.AugmentationConfig``,
+            applied before graph construction. ``None`` (default) disables it.
+
+    Returns:
+        Same shape as ``get_or_build_cgcnn_dataset``: ``(graph_arrays,
+        labels, material_ids, spacegroups, structures_path)``.
+    """
+    # Lazy: dim_red.generate requires pyxtal, not a hard dim_red dependency.
+    from dim_red.generate import GenerationConfig, generate_structures
+
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    key = _pyxtal_graph_cache_key(pyxtal_config, seed, graph_kwargs, augmentation)
+    cache_path = cache_dir / f"{key}.npz"
+    structures_path = _structures_cache_path(cache_path)
+
+    cached = _load_cached_graph_dataset(cache_path)
+    if cached is not None:
+        logger.info("CGCNN dataset cache hit (%s) for pyxtal generation", key)
+        graph_arrays, labels, material_ids, spacegroups = cached
+        return graph_arrays, labels, material_ids, spacegroups, structures_path
+
+    logger.info("CGCNN dataset cache miss (%s); generating structures with pyxtal", key)
+
+    generation_kwargs = dataclasses.asdict(pyxtal_config)
+    generation_kwargs.pop("seed", None)  # the resolved "seed" arg wins
+    if generation_kwargs.get("candidate_num_ions") is None:
+        generation_kwargs.pop("candidate_num_ions")
+    all_atoms = generate_structures(GenerationConfig(seed=seed, **generation_kwargs))
+
+    if not all_atoms:
+        raise ValueError(
+            "pyxtal generated no structures for the requested configuration."
+        )
+
+    n_generated = len(all_atoms)
+    if augmentation is not None:
+        all_atoms = augment_structures(all_atoms, augmentation)
+        logger.info(
+            "Generated %d structures with pyxtal (%d after augmentation)",
+            n_generated,
+            len(all_atoms),
+        )
+
+    labels = [a.info["family"] for a in all_atoms]
+    material_ids = [a.info["material_id"] for a in all_atoms]
+    spacegroups = [a.info["spacegroup"] for a in all_atoms]
+
+    _save_structures_cache(cache_path, all_atoms)
+    local_species_idx, nbr_idx, nbr_fea, nbr_mask, atom_mask = _compute_graphs(
+        all_atoms, graph_kwargs
+    )
+    _save_graph_dataset_cache(
+        cache_path,
+        local_species_idx,
+        nbr_idx,
+        nbr_fea,
+        nbr_mask,
+        atom_mask,
+        labels,
+        material_ids,
+        spacegroups,
+    )
+
+    return (
+        (local_species_idx, nbr_idx, nbr_fea, nbr_mask, atom_mask),
+        labels,
+        material_ids,
+        spacegroups,
+        structures_path,
+    )
+
+
+def build_graph_dataset_for_run(
+    config: "RunConfig", cache_dir: Union[str, Path]
+) -> Tuple[
+    Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    List[str],
+    List[str],
+    List[int],
+    Path,
+]:
+    """Dispatches to ``get_or_build_cgcnn_dataset`` or
+    ``get_or_build_pyxtal_cgcnn_dataset`` per ``config.data_source`` --
+    the graph-based counterpart to ``build_dataset_for_run``, called by
+    ``dim_red.pipeline.single_run.run_single`` only when
+    ``config.model_kind == "cgcnn"``. Additive: ``build_dataset_for_run``'s
+    own contract is untouched. Returns the 5-element graph-shaped tuple
+    ``(graph_arrays, labels, material_ids, spacegroups, structures_path)``
+    instead of the 7-element SOAP-shaped one.
+    """
+    augmentation = _resolve_augmentation(config)
+    graph_kwargs = config.graph.graph_kwargs()
+    if config.data_source == "pyxtal":
+        seed = config.pyxtal.seed if config.pyxtal.seed is not None else config.seed
+        return get_or_build_pyxtal_cgcnn_dataset(
+            pyxtal_config=config.pyxtal,
+            seed=seed,
+            graph_kwargs=graph_kwargs,
+            cache_dir=cache_dir,
+            augmentation=augmentation,
+        )
+    return get_or_build_cgcnn_dataset(
+        crystal_systems=config.fetch.crystal_systems,
+        graph_kwargs=graph_kwargs,
         limit_per_system=config.fetch.limit_per_system,
         cache_dir=cache_dir,
         api_key=config.fetch.api_key,

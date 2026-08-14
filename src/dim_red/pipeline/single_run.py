@@ -7,18 +7,27 @@ structures used for training (``dataset.extxyz``), the latent embeddings of
 every point in the dataset used for training (with soft-masked auxiliary
 head predictions when active), and a 2D scatter plot of those embeddings.
 ``config.model_kind`` selects between a VAE (``dim_red.vae``), a
-deterministic Autoencoder (``dim_red.autoencoder``), or an encoder-only
+deterministic Autoencoder (``dim_red.autoencoder``), an encoder-only
 Supervised Contrastive body (``dim_red.supcon``, no reconstruction/KL/
 classifier heads at all -- its family/spacegroup labels drive a contrastive
 loss, gated by ``config.supcon.mode`` instead of ``config.aux_heads.mode``,
 computed on a jointly-trained ``dim_red.supcon.tails.ProjectionTail``'s
 output rather than the body's own representation -- see
-``dim_red.supcon.training``). All three share the same encoder architecture
-(``config.vae``); ``supcon`` reads its own loss settings from
-``config.supcon`` and ignores ``config.aux_heads``, the reverse of what
-``vae``/``autoencoder`` do. A completed ``supcon`` run's frozen body can
-then have a classification or visualization tail trained on top of it
-separately -- see ``dim_red.pipeline.tail_training``.
+``dim_red.supcon.training``), or a graph-convolutional encoder-only body
+(``dim_red.cgcnn``, no decoder/KL/contrastive loss at all -- trained
+directly against family/spacegroup labels via cross-entropy, single-phase,
+like ``vae``/``autoencoder``'s ``aux_heads`` pattern applied to a
+graph-convolutional body instead of a flat-feature encoder; it reads
+crystal structures directly, via ``dim_red.cgcnn.graph``, rather than SOAP
+descriptors). ``vae``/``autoencoder``/``supcon`` share the same encoder
+architecture (``config.vae``); ``cgcnn`` reads its graph-construction +
+architecture hyperparameters from ``config.graph`` instead (only
+``config.vae.latent_dim`` is still read). ``supcon`` reads its own loss
+settings from ``config.supcon`` and ignores ``config.aux_heads``, the
+reverse of what ``vae``/``autoencoder``/``cgcnn`` do. A completed
+``supcon``/``cgcnn`` run's frozen body can then have a classification or
+visualization tail trained on top of it separately -- see
+``dim_red.pipeline.tail_training``.
 """
 
 from __future__ import annotations
@@ -41,8 +50,16 @@ from dim_red.autoencoder.model import Autoencoder
 from dim_red.autoencoder.model import apply_family_mask as ae_apply_family_mask
 from dim_red.autoencoder.training import TrainConfig as AETrainConfig
 from dim_red.autoencoder.training import train_autoencoder
+from dim_red.cgcnn.database import GraphDatabase
+from dim_red.cgcnn.model import CGCNNEncoder
+from dim_red.cgcnn.model import apply_family_mask as cgcnn_apply_family_mask
+from dim_red.cgcnn.training import TrainConfig as CGCNNTrainConfig
+from dim_red.cgcnn.training import train_cgcnn
 from dim_red.pipeline.config import RunConfig, TailTrainConfig, run_config_to_dict
-from dim_red.pipeline.dataset_cache import build_dataset_for_run
+from dim_red.pipeline.dataset_cache import (
+    build_dataset_for_run,
+    build_graph_dataset_for_run,
+)
 from dim_red.pipeline.tail_training import train_tail
 from dim_red.supcon.model import SupConEncoder
 from dim_red.supcon.tails import ProjectionTail
@@ -233,13 +250,17 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
         ``model_params.msgpack``, ``loss_history.csv``, ``dataset.extxyz``
         (the exact structures used for training, same order as
         ``embeddings.npz``'s arrays), ``embeddings.npz`` (latent embeddings
-        of every point in the training dataset, the raw standardized SOAP
+        of every point in the training dataset; for ``model_kind in
+        ("vae", "autoencoder", "supcon")`` also the raw standardized SOAP
         ``features`` fed to the model plus the ``feature_mean``/``feature_std``
         they were standardized with -- from
         ``dim_red.pipeline.dataset_cache.build_dataset_for_run``, so
         ``dim_red.pipeline.inference.load_trained_run`` can standardize new
         structures the same way without ever recomputing SOAP on this run's
-        own training set -- the true ``spacegroups`` per point, plus
+        own training set -- omitted for ``model_kind == "cgcnn"``, which has
+        no natural flat feature vector or standardization step at all
+        (Gaussian-expanded bond features are already bounded to ``[0, 1]``
+        by construction) -- the true ``spacegroups`` per point, plus
         ``family_probs``/``spacegroup_probs`` and their class vocabularies
         when auxiliary heads are active -- never the case for
         ``model_kind == "supcon"``, which has no classifier heads at all),
@@ -261,16 +282,35 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
         resolved_cache_dir = (
             Path(cache_dir) if cache_dir else output_dir / "_dataset_cache"
         )
-        (
-            X,
-            labels,
-            material_ids,
-            spacegroups,
-            structures_path,
-            feature_mean,
-            feature_std,
-        ) = build_dataset_for_run(config, cache_dir=resolved_cache_dir)
-        logger.info("Dataset ready: X.shape=%s, %d samples", X.shape, len(labels))
+        is_cgcnn = config.model_kind == "cgcnn"
+        if is_cgcnn:
+            (
+                graph_arrays,
+                labels,
+                material_ids,
+                spacegroups,
+                structures_path,
+            ) = build_graph_dataset_for_run(config, cache_dir=resolved_cache_dir)
+            local_species_idx, nbr_idx, nbr_fea, nbr_mask, atom_mask = graph_arrays
+            n_samples = local_species_idx.shape[0]
+            logger.info(
+                "Dataset ready: %d samples, max_atoms=%d, max_num_nbr=%d",
+                n_samples,
+                local_species_idx.shape[1],
+                nbr_idx.shape[2],
+            )
+        else:
+            (
+                X,
+                labels,
+                material_ids,
+                spacegroups,
+                structures_path,
+                feature_mean,
+                feature_std,
+            ) = build_dataset_for_run(config, cache_dir=resolved_cache_dir)
+            n_samples = X.shape[0]
+            logger.info("Dataset ready: X.shape=%s, %d samples", X.shape, len(labels))
 
         dataset_path = run_dir / "dataset.extxyz"
         shutil.copyfile(structures_path, dataset_path)
@@ -343,19 +383,33 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
             logger.info("%d spacegroup classes observed", len(spacegroup_classes))
 
         train_idx, val_idx = _split_indices(
-            X.shape[0], config.train.val_ratio, config.seed
+            n_samples, config.train.val_ratio, config.seed
         )
-        train_db = VAEDatabase.from_array(X[train_idx])
-        val_db = VAEDatabase.from_array(X[val_idx])
-        split = np.full(X.shape[0], "train", dtype="<U5")
+        if is_cgcnn:
+            graph_db = GraphDatabase.from_arrays(
+                local_species_idx, nbr_idx, nbr_fea, nbr_mask, atom_mask
+            )
+            train_db = graph_db[train_idx]
+            val_db = graph_db[val_idx]
+            logger.info(
+                "Train/val split: %d train / %d val (val_ratio=%.2f, seed=%d)",
+                train_db.n_samples,
+                val_db.n_samples,
+                config.train.val_ratio,
+                config.seed,
+            )
+        else:
+            train_db = VAEDatabase.from_array(X[train_idx])
+            val_db = VAEDatabase.from_array(X[val_idx])
+            logger.info(
+                "Train/val split: %d train / %d val (val_ratio=%.2f, seed=%d)",
+                train_db.data.shape[0],
+                val_db.data.shape[0],
+                config.train.val_ratio,
+                config.seed,
+            )
+        split = np.full(n_samples, "train", dtype="<U5")
         split[val_idx] = "val"
-        logger.info(
-            "Train/val split: %d train / %d val (val_ratio=%.2f, seed=%d)",
-            train_db.data.shape[0],
-            val_db.data.shape[0],
-            config.train.val_ratio,
-            config.seed,
-        )
 
         is_vae = config.model_kind == "vae"
 
@@ -380,6 +434,26 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
                 projection_dim=config.supcon.projection_dim,
                 seed=config.seed,
             )
+            # Unused: the family/spacegroup probability-inference block below
+            # is guarded by `not is_supcon`, which never touches this branch.
+            apply_family_mask = None
+        elif is_cgcnn:
+            apply_family_mask = cgcnn_apply_family_mask
+            model = CGCNNEncoder(
+                atom_fea_len=config.graph.atom_fea_len,
+                n_conv=config.graph.n_conv,
+                h_fea_len=config.graph.h_fea_len,
+                n_h=config.graph.n_h,
+                latent_dim=config.vae.latent_dim,
+                n_gaussian=config.graph.n_gaussian,
+                max_species=config.graph.max_species,
+                n_family_classes=len(family_classes) if use_family else None,
+                n_spacegroup_classes=(
+                    len(spacegroup_classes) if use_spacegroup else None
+                ),
+                head_hidden_dim=config.aux_heads.head_hidden_dim,
+                seed=config.seed,
+            )
         else:
             apply_family_mask = (
                 vae_apply_family_mask if is_vae else ae_apply_family_mask
@@ -399,9 +473,9 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
                 seed=config.seed,
             )
 
-        # Shared across all three model kinds' TrainConfig -- same field
-        # names on VAETrainConfig/AETrainConfig/SupConTrainConfig, see
-        # dim_red.pipeline.config.EarlyStoppingConfig.
+        # Shared across every model kind's TrainConfig -- same field
+        # names on VAETrainConfig/AETrainConfig/SupConTrainConfig/
+        # CGCNNTrainConfig, see dim_red.pipeline.config.EarlyStoppingConfig.
         early_stopping_kwargs = dict(
             early_stopping=config.train.early_stopping.enabled,
             early_stopping_patience=config.train.early_stopping.patience,
@@ -475,6 +549,37 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
                 ),
                 config.train.early_stopping.enabled,
             )
+        elif is_cgcnn:
+            train_config = CGCNNTrainConfig(
+                epochs=config.train.epochs,
+                batch_size=config.train.batch_size,
+                learning_rate=config.train.learning_rate,
+                optimizer=config.train.optimizer,
+                lambda_family=config.aux_heads.lambda_family,
+                lambda_spacegroup=config.aux_heads.lambda_spacegroup,
+                seed=config.seed,
+                device=config.train.device,
+                **early_stopping_kwargs,
+            )
+            logger.info(
+                "Training CGCNN: atom_fea_len=%d n_conv=%d h_fea_len=%d n_h=%d "
+                "latent_dim=%d radius=%.1f max_num_nbr=%d n_gaussian=%d epochs=%d "
+                "batch_size=%d aux_heads=%s device=%s optimizer=%s early_stopping=%s",
+                config.graph.atom_fea_len,
+                config.graph.n_conv,
+                config.graph.h_fea_len,
+                config.graph.n_h,
+                config.vae.latent_dim,
+                config.graph.radius,
+                config.graph.max_num_nbr,
+                config.graph.n_gaussian,
+                config.train.epochs,
+                config.train.batch_size,
+                aux_mode,
+                config.train.device,
+                config.train.optimizer,
+                config.train.early_stopping.enabled,
+            )
         else:
             train_config = AETrainConfig(
                 epochs=config.train.epochs,
@@ -527,6 +632,22 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
                 batching_K=config.batching.balanced_params.K,
                 batching_S=config.batching.balanced_params.S,
             )
+        elif is_cgcnn:
+            history = train_cgcnn(
+                model,
+                train_db,
+                val_db,
+                train_config,
+                train_family_ids=family_ids[train_idx],
+                val_family_ids=family_ids[val_idx],
+                train_spacegroup_ids=(
+                    spacegroup_ids[train_idx] if use_spacegroup else None
+                ),
+                val_spacegroup_ids=spacegroup_ids[val_idx] if use_spacegroup else None,
+                family_spacegroup_mask=(
+                    family_spacegroup_mask if use_spacegroup else None
+                ),
+            )
         else:
             train_fn = train_vae if is_vae else train_autoencoder
             history = train_fn(
@@ -565,30 +686,53 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
 
         # Apply the trained encoder to every point of the dataset used for
         # training (train + val), not just the held-out validation split.
-        # A VAE's encode returns (mu, logvar); an Autoencoder's/SupConEncoder's
-        # returns just z, since encoding is deterministic (no posterior to
-        # describe).
-        mu_all = model.encode(X)[0] if is_vae else model.encode(X)
+        # A VAE's encode returns (mu, logvar); an Autoencoder's/SupConEncoder's/
+        # CGCNNEncoder's returns just z, since encoding is deterministic (no
+        # posterior to describe).
+        if is_cgcnn:
+            mu_all = model.encode(
+                (local_species_idx, nbr_idx, nbr_fea, nbr_mask, atom_mask)
+            )
+        elif is_vae:
+            mu_all = model.encode(X)[0]
+        else:
+            mu_all = model.encode(X)
         mu_all = np.asarray(mu_all)
-        embeddings_payload = dict(
-            embeddings=mu_all,
-            # Raw standardized SOAP features (the model's actual input), so
-            # downstream comparison tooling (see dim_red.pipeline.compare)
-            # can fit classical baselines (PCA, UMAP) on the exact same data
-            # without needing to re-fetch/re-run SOAP.
-            features=X,
-            labels=np.array(labels),
-            material_ids=np.array(material_ids),
-            spacegroups=np.array(spacegroups, dtype=np.int64),
-            split=split,
-            # Per-feature standardization stats these SOAP features were
-            # derived from (dim_red.pipeline.dataset_cache._compute_soap_and_standardize),
-            # so dim_red.pipeline.inference.load_trained_run can standardize
-            # new structures the same way without ever recomputing SOAP on
-            # this run's own training set.
-            feature_mean=feature_mean,
-            feature_std=feature_std,
-        )
+        if is_cgcnn:
+            # No natural flat feature vector or standardization step exists
+            # for graph features (Gaussian-expanded bond distances are
+            # already bounded to [0, 1] by construction) -- features/
+            # feature_mean/feature_std are omitted entirely for this
+            # model_kind. A consequence: dim_red.pipeline.compare's
+            # classical-baseline (PCA/UMAP-on-features) comparisons have
+            # nothing to fit against for cgcnn runs.
+            embeddings_payload = dict(
+                embeddings=mu_all,
+                labels=np.array(labels),
+                material_ids=np.array(material_ids),
+                spacegroups=np.array(spacegroups, dtype=np.int64),
+                split=split,
+            )
+        else:
+            embeddings_payload = dict(
+                embeddings=mu_all,
+                # Raw standardized SOAP features (the model's actual input), so
+                # downstream comparison tooling (see dim_red.pipeline.compare)
+                # can fit classical baselines (PCA, UMAP) on the exact same data
+                # without needing to re-fetch/re-run SOAP.
+                features=X,
+                labels=np.array(labels),
+                material_ids=np.array(material_ids),
+                spacegroups=np.array(spacegroups, dtype=np.int64),
+                split=split,
+                # Per-feature standardization stats these SOAP features were
+                # derived from (dim_red.pipeline.dataset_cache._compute_soap_and_standardize),
+                # so dim_red.pipeline.inference.load_trained_run can standardize
+                # new structures the same way without ever recomputing SOAP on
+                # this run's own training set.
+                feature_mean=feature_mean,
+                feature_std=feature_std,
+            )
         logger.info(
             "Encoded %d points into %d-dim latent space",
             mu_all.shape[0],
@@ -603,7 +747,11 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
         # used inside the contrastive loss during training, never at
         # inference) so this whole block is skipped for it -- embeddings.npz
         # keeps only the base fields (embeddings/features/labels/
-        # material_ids/spacegroups/split) for that model_kind.
+        # material_ids/spacegroups/split) for that model_kind. CGCNN, unlike
+        # SupCon, does have classifier heads (its only training objective),
+        # so this block runs for it -- family_probs/spacegroup_probs are
+        # saved same as vae/autoencoder, just alongside a smaller base
+        # payload (no features/feature_mean/feature_std, see above).
         if use_family and not is_supcon:
             family_logits_all = model.classify_family(mu_all)
             family_probs_all = np.asarray(jax.nn.softmax(family_logits_all, axis=-1))
@@ -667,15 +815,16 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
         # Auto-train tails (dim_red.pipeline.config.RunConfig.tails): the
         # exact same dim_red.pipeline.tail_training.train_tail entry point
         # dimred-train-tail invokes manually, just triggered automatically
-        # right after phase-1 training finishes. train_tail re-reads
-        # config.yaml/dataset.extxyz/embeddings.npz from run_dir (already
-        # written above) and recomputes SOAP to recover standardization
-        # stats -- the same cost a manual dimred-train-tail call would incur,
-        # not extra cost from automating it. Its own run.log FileHandler is
+        # right after phase-1 training finishes. train_tail only re-reads
+        # config.yaml/embeddings.npz from run_dir (already written above) via
+        # load_run_embeddings -- it never touches dataset.extxyz and never
+        # recomputes SOAP/graphs, so this is the same cost a manual
+        # dimred-train-tail call would incur, not extra cost from automating
+        # it. Its own run.log FileHandler is
         # added to this same "dim_red.pipeline" logger while ours is still
         # attached, so this run's run.log ends up containing a full trace of
         # any auto-triggered tail training too.
-        if is_supcon and config.tails is not None:
+        if (is_supcon or is_cgcnn) and config.tails is not None:
             if config.tails.classification is not None:
                 logger.info("Auto-training classification tail on this run")
                 tail_dir = train_tail(

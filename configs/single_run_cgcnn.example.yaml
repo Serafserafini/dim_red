@@ -1,0 +1,116 @@
+# Example config for a single pyxtal -> graph -> CGCNN run: a
+# graph-convolutional encoder-only body (Xie & Grossman 2018, reimplemented
+# natively in JAX/Flax -- no torch/torch_geometric/dgl/jraph dependency),
+# trained JOINTLY with classifier head(s) via cross-entropy on family
+# (+ optional spacegroup) labels -- single-phase, mirroring
+# vae/autoencoder's aux_heads pattern, NOT supcon's two-phase
+# contrastive-pretrain-then-freeze-and-train-a-tail design. Unlike SOAP,
+# CGCNN builds its own graph representation directly from a crystal's atoms
+# and bonds -- no soap: block at all for this model. See CLAUDE.md /
+# dim_red.cgcnn.
+# Run with: python -m dim_red.pipeline.cli --config configs/single_run_cgcnn.example.yaml
+# or:       dimred-run configs/single_run_cgcnn.example.yaml
+
+seed: 42
+output_dir: runs
+model: cgcnn # "vae" (default), "autoencoder", "supcon", or "cgcnn"
+data_source: pyxtal # pyxtal recommended: guarantees a known family/spacegroup
+# label for every generated structure, exactly what aux_heads needs. "fetch"
+# (Materials Project) works too, but MP structures are missing spacegroup
+# data for some entries (see fetch.py's -1 "unknown" sentinel).
+
+# "fetch" (crystal_systems/limit_per_system/api_key) is unused with
+# data_source: pyxtal -- omitted here.
+
+pyxtal:
+  families: [cubic, hexagonal, orthorhombic]
+  structures_per_family: 40
+  distribution: uniform
+  n_species: 2
+  seed: 42
+
+# "soap" block is unused for model: cgcnn -- CGCNN reads "graph" below
+# instead. Omitted here.
+
+# Same shared vae: block every model_kind reads its latent_dim from --
+# encoder_hidden_dim/decoder_hidden_dim/mirror are all IGNORED for
+# model: cgcnn (only latent_dim is read: the body's output width, saved to
+# embeddings.npz, reused by every downstream tail). encoder_hidden_dim
+# still needs *some* value below purely because it's a required field with
+# no default -- same pre-existing wart model: supcon configs already carry
+# for decoder_hidden_dim.
+vae:
+  encoder_hidden_dim: [1] # ignored for model: cgcnn (dummy placeholder value)
+  decoder_hidden_dim: null # ignored (no decoder)
+  latent_dim: 32 # READ: CGCNN body's output width
+  mirror: true # ignored
+
+# CGCNN graph-construction + architecture hyperparameters.
+graph:
+  radius: 8.0 # cutoff radius (Angstroms) for periodic-boundary-aware
+    # neighbor search (dim_red.cgcnn.graph, via ase.neighborlist -- correct
+    # even when radius exceeds half the unit cell's width, unlike a naive
+    # minimum-image-convention distance matrix). CGCNN's own default.
+  max_num_nbr: 12 # closest neighbors kept per atom; padded/masked if fewer found
+  dmin: 0.0
+  dmax: null # null (default) -> resolves to radius
+  step: 0.2 # Gaussian filter spacing -> n_gaussian = (dmax-dmin)/step + 1
+    # (41 with the defaults above)
+  # Maximum distinct species any one structure may have. The model NEVER
+  # sees which real chemical element a species is -- only a per-structure
+  # local species slot (1..max_species), so it can distinguish "species A"
+  # from "species B" within a structure without learning any real
+  # chemistry. This fits pyxtal's own species pool perfectly (sampled from
+  # an arbitrary placeholder pool -- see dim_red.generate -- with no
+  # chemical meaning to begin with). Set this >= pyxtal.n_species above (or
+  # >= the largest species count any fetched structure has, for
+  # data_source: fetch).
+  max_species: 10
+  atom_fea_len: 64 # per-atom embedding/hidden width (nn.Embed keyed by the
+    # local species slot above, learnable -- a deliberate, simpler
+    # substitute for the original repo's fixed 92-dim atom_init.json
+    # lookup table, which was itself keyed by real atomic number)
+  n_conv: 3 # number of stacked gated graph-convolution layers
+  h_fea_len: 128 # post-pooling hidden width
+  n_h: 1 # number of post-pooling hidden layers
+
+# aux_heads is CGCNN's ONLY training objective (no reconstruction, no
+# contrastive loss exists for this model) -- mode must NOT be "none",
+# enforced at config-parse time (RunConfig.__post_init__ raises otherwise).
+aux_heads:
+  mode: family_and_spacegroup # "family_only" or "family_and_spacegroup"
+  lambda_family: 1.0
+  lambda_spacegroup: 1.0
+  head_hidden_dim: 16
+
+train:
+  epochs: 30
+  batch_size: 16
+  learning_rate: 0.001 # Adam's learning rate (used when optimizer: adam,
+    # the default); unused when optimizer: velo
+  optimizer: adam # "adam" (default, fast) or "velo" (learned_optimization's
+    # pretrained VeLO meta-learned optimizer -- much slower to start, see CLAUDE.md)
+  val_ratio: 0.2
+  device: cpu
+  early_stopping:
+    enabled: false
+    patience: 10
+    min_delta: 0.0
+    restore_best_weights: true
+
+# Optional -- automatically train a classification and/or visualization
+# tail on this run's frozen body right after phase-1 training finishes
+# (the same dim_red.pipeline.tail_training.train_tail entry point
+# dimred-train-tail uses manually). Both are allowed for model: cgcnn (not
+# just model: supcon) -- classification-tail is redundant with CGCNN's own
+# built-in heads above but harmless, useful for ablation/comparison;
+# visualization-tail is genuinely useful since latent_dim above need not be 2.
+# tails:
+#   classification:
+#     mode: family_and_spacegroup
+#   visualization:
+#     viz_dim: 2
+#   train:
+#     epochs: 20
+#     batch_size: 32
+#     optimizer: adam

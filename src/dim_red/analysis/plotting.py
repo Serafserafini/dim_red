@@ -344,6 +344,30 @@ def plot_spacegroup_histogram(
     plt.close()
 
 
+_MAX_HEATMAP_INCHES = 20.0
+_MAX_BAR_CHART_INCHES = 30.0
+_MAX_TICK_LABELS = 40
+_MAX_ANNOTATED_CM_CLASSES = 25
+
+
+def _thin_tick_positions(
+    n: int, max_labels: int, must_keep: Sequence[int] = ()
+) -> np.ndarray:
+    """Evenly-spaced tick positions, thinned to at most ``max_labels`` when
+    there are more classes than that -- avoids an axis of overlapping,
+    unreadable labels for a high-cardinality vocabulary (e.g. up to 230
+    Materials Project spacegroups, vs. a handful of crystal families).
+    ``must_keep`` positions (e.g. a trailing "macro avg" bar) are always
+    included even if regular-interval thinning would otherwise skip them.
+    """
+    if n <= max_labels:
+        return np.arange(n)
+    step = int(np.ceil(n / max_labels))
+    positions = set(range(0, n, step))
+    positions.update(must_keep)
+    return np.array(sorted(positions))
+
+
 def _predicted_labels(y_probs: np.ndarray, class_names: Sequence) -> np.ndarray:
     """Argmax-decode a softmax probability matrix into predicted labels,
     shared by every classifier-evaluation plot below.
@@ -395,6 +419,14 @@ def plot_confusion_matrix(
         normalize: If True (default), each row is normalized to sum to 1 (so
             cells read as per-true-class recall); otherwise raw counts.
 
+    For a high-cardinality ``class_names`` (e.g. up to 230 spacegroups), tick
+    labels are thinned to at most ``_MAX_TICK_LABELS`` and the figure size is
+    capped at ``_MAX_HEATMAP_INCHES`` rather than growing with ``n`` without
+    bound; per-cell count/fraction text is dropped above
+    ``_MAX_ANNOTATED_CM_CLASSES`` classes, since it would be both illegible
+    and slow to render -- the colorbar-mapped color still conveys the same
+    information.
+
     Raises:
         ValueError: If ``y_true``/``y_probs`` have mismatched lengths, or
             ``y_probs.shape[1]`` doesn't match ``len(class_names)``.
@@ -416,9 +448,15 @@ def plot_confusion_matrix(
 
     n = len(class_names)
     tick_labels = [str(c) for c in class_names]
-    rotation = 45 if n > 6 else 0
+    # Thin tick labels and cap figure growth for a high-cardinality
+    # vocabulary (e.g. spacegroups) -- an unbounded 0.6*n figure would
+    # otherwise grow to tens of thousands of pixels and every label would
+    # still overlap illegibly.
+    tick_positions = _thin_tick_positions(n, _MAX_TICK_LABELS)
+    rotation = 45 if len(tick_positions) > 6 else 0
+    tick_fontsize = 6 if n > _MAX_TICK_LABELS else 10
 
-    fig_size = max(6.0, 0.6 * n)
+    fig_size = min(_MAX_HEATMAP_INCHES, max(6.0, 0.6 * n))
     # Extra width beyond the square plot area for the colorbar strip, so a
     # long title doesn't visually collide with its top tick label.
     plt.figure(figsize=(fig_size + 1.8, fig_size))
@@ -426,24 +464,36 @@ def plot_confusion_matrix(
     plt.colorbar(label="Fraction of true class" if normalize else "Count")
 
     plt.xticks(
-        range(n), tick_labels, rotation=rotation, ha="right" if rotation else "center"
+        tick_positions,
+        [tick_labels[i] for i in tick_positions],
+        rotation=rotation,
+        ha="right" if rotation else "center",
+        fontsize=tick_fontsize,
     )
-    plt.yticks(range(n), tick_labels)
+    plt.yticks(
+        tick_positions,
+        [tick_labels[i] for i in tick_positions],
+        fontsize=tick_fontsize,
+    )
 
-    peak = cm_display.max() if cm_display.max() > 0 else 1.0
-    for i in range(n):
-        for j in range(n):
-            value = cm_display[i, j]
-            text = f"{value:.2f}" if normalize else str(int(cm[i, j]))
-            plt.text(
-                j,
-                i,
-                text,
-                ha="center",
-                va="center",
-                fontsize=8,
-                color="white" if value > peak / 2 else "black",
-            )
+    # Per-cell text becomes both illegible and slow to render past a few
+    # hundred cells (e.g. 230 spacegroups squared) -- skip it for a
+    # high-cardinality vocabulary and rely on the colorbar-mapped color alone.
+    if n <= _MAX_ANNOTATED_CM_CLASSES:
+        peak = cm_display.max() if cm_display.max() > 0 else 1.0
+        for i in range(n):
+            for j in range(n):
+                value = cm_display[i, j]
+                text = f"{value:.2f}" if normalize else str(int(cm[i, j]))
+                plt.text(
+                    j,
+                    i,
+                    text,
+                    ha="center",
+                    va="center",
+                    fontsize=8,
+                    color="white" if value > peak / 2 else "black",
+                )
 
     plt.xlabel("Predicted label")
     plt.ylabel("True label")
@@ -486,6 +536,12 @@ def plot_classification_report(
         title: The plot title.
         save_path: If provided, saves the plot to this filepath; otherwise the figure is shown (interactively, or captured inline in a notebook).
 
+    For a high-cardinality ``class_names`` (e.g. up to 230 spacegroups), x
+    labels are thinned to at most ``_MAX_TICK_LABELS`` (the trailing "macro
+    avg" bar is always kept) and the figure width is capped at
+    ``_MAX_BAR_CHART_INCHES`` rather than growing with ``n_groups`` without
+    bound.
+
     Raises:
         ValueError: If ``y_true``/``y_probs`` have mismatched lengths, or
             ``y_probs.shape[1]`` doesn't match ``len(class_names)``.
@@ -511,7 +567,8 @@ def plot_classification_report(
     x = np.arange(n_groups)
     width = 0.25
 
-    plt.figure(figsize=(max(10.0, 0.6 * n_groups), 6))
+    fig_width = min(_MAX_BAR_CHART_INCHES, max(10.0, 0.6 * n_groups))
+    plt.figure(figsize=(fig_width, 6))
     for i, metric in enumerate(metrics):
         values = [report[str(c)][metric] for c in class_names]
         values.append(report["macro avg"][metric])
@@ -523,8 +580,21 @@ def plot_classification_report(
             color=metric_color[metric],
         )
 
-    rotation = 45 if n_groups > 6 else 0
-    plt.xticks(x, group_labels, rotation=rotation, ha="right" if rotation else "center")
+    # Thin x labels for a high-cardinality vocabulary (e.g. spacegroups) so
+    # they don't overlap into an unreadable axis; the trailing "macro avg"
+    # bar is always labeled regardless of thinning.
+    tick_positions = _thin_tick_positions(
+        n_groups, _MAX_TICK_LABELS, must_keep=(n_groups - 1,)
+    )
+    rotation = 45 if len(tick_positions) > 6 else 0
+    tick_fontsize = 6 if n_groups > _MAX_TICK_LABELS else 10
+    plt.xticks(
+        tick_positions,
+        [group_labels[i] for i in tick_positions],
+        rotation=rotation,
+        ha="right" if rotation else "center",
+        fontsize=tick_fontsize,
+    )
     plt.ylim(0.0, 1.05)
     plt.ylabel("Score")
     plt.title(title, fontsize=14, fontweight="bold", pad=15)

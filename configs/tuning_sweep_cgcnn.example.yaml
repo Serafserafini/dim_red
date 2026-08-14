@@ -1,0 +1,69 @@
+# Stage 1 (within-kind hyperparameter tuning) of the cross-architecture
+# tuning + benchmark playbook for model: cgcnn -- see
+# src/dim_red/pipeline/CLAUDE.md's "Benchmark" section and
+# configs/benchmark_pyxtal_base.example.yaml for the shared dataset this
+# fragment is copied from (keep in sync if you change it).
+#
+# No soap: block -- cgcnn uses graph: instead. aux_heads.mode is mandatory
+# (RunConfig.__post_init__ enforces != "none" for this model_kind).
+# graph.max_species matches pyxtal.n_species below.
+#
+# Selection criterion (see CLAUDE.md): primary = mean of
+# family_silhouette/family_knn_accuracy from `dimred-benchmark`'s table;
+# secondary = family accuracy straight from embeddings.npz's built-in head
+# (more interpretable than val_family_ce).
+#
+# Run with: dimred-sweep configs/tuning_sweep_cgcnn.example.yaml
+
+base:
+  seed: 42
+  output_dir: runs/tuning_cgcnn
+  model: cgcnn
+  data_source: pyxtal
+
+  pyxtal:
+    families: [cubic, hexagonal, orthorhombic, tetragonal]
+    structures_per_family: 60
+    distribution: uniform
+    n_species: 2
+    seed: 42
+
+  # Only vae.latent_dim is read for model: cgcnn -- see
+  # configs/single_run_cgcnn.example.yaml's comments.
+  vae:
+    encoder_hidden_dim: [1]
+    latent_dim: 8
+
+  graph:
+    radius: 8.0
+    max_num_nbr: 12
+    dmin: 0.0
+    dmax: null
+    step: 0.2
+    max_species: 2
+    atom_fea_len: 64 # overridden by the grid below
+    n_conv: 3 # overridden by the grid below
+    h_fea_len: 128 # overridden by the grid below
+    n_h: 1
+
+  aux_heads:
+    mode: family_and_spacegroup
+    lambda_family: 1.0
+    lambda_spacegroup: 1.0
+    head_hidden_dim: 16
+
+  train:
+    epochs: 30
+    batch_size: 16
+    learning_rate: 0.001
+    optimizer: adam
+    val_ratio: 0.2
+    device: cpu
+
+# 2 conv depths x 2 atom_fea_len widths x 2 h_fea_len widths = 8 runs, all
+# sharing one cached graph dataset build (only pyxtal/graph-construction
+# settings affect the dataset cache key).
+grid:
+  graph.n_conv: [3, 4]
+  graph.atom_fea_len: [32, 64]
+  graph.h_fea_len: [64, 128]

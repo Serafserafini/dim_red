@@ -1,0 +1,87 @@
+# Stage 1 (within-kind hyperparameter tuning) of the cross-architecture
+# tuning + benchmark playbook for model: supcon -- see
+# src/dim_red/pipeline/CLAUDE.md's "Benchmark" section and
+# configs/benchmark_pyxtal_base.example.yaml for the shared dataset this
+# fragment is copied from (keep in sync if you change it).
+#
+# tails.classification is fixed on (not swept) so every run in this sweep
+# gets a `family` accuracy in dimred-benchmark's table via its
+# tails/classification/tail_predictions.npz -- supcon has no built-in
+# classifier heads (embeddings.npz never carries family_probs), unlike
+# vae/autoencoder/cgcnn.
+#
+# Selection criterion (see CLAUDE.md): primary = mean of
+# family_silhouette/family_knn_accuracy, weighted higher than for the other
+# three kinds since it's what the SupCon objective directly targets;
+# secondary = val_loss (legitimately comparable *within* this sweep only --
+# every run here shares the same contrastive objective); tertiary = family
+# accuracy from the auto-trained tail.
+#
+# Run with: dimred-sweep configs/tuning_sweep_supcon.example.yaml
+
+base:
+  seed: 42
+  output_dir: runs/tuning_supcon
+  model: supcon
+  data_source: pyxtal
+
+  pyxtal:
+    families: [cubic, hexagonal, orthorhombic, tetragonal]
+    structures_per_family: 60
+    distribution: uniform
+    n_species: 2
+    seed: 42
+
+  soap:
+    r_cut: 5.0
+    n_max: 4
+    l_max: 3
+    sigma: 0.5
+    element_agnostic: false
+    normalize_distances: false
+    species: null
+
+  vae:
+    encoder_hidden_dim: [128] # overridden by the grid below
+    latent_dim: 8
+    mirror: true
+
+  supcon:
+    mode: family_and_spacegroup
+    lambda_family: 1.0
+    lambda_spacegroup: 1.0
+    tau: 0.1 # overridden by the grid below
+    distance: euclidean # overridden by the grid below
+    lambda_norm: 0.0
+
+  # K/S only take effect for the runs where the grid below picks
+  # batching.strategy: balanced; harmlessly ignored for the "random" runs.
+  batching:
+    strategy: random # overridden by the grid below
+    balanced_params: {P: null, K: 16, S: 4}
+
+  tails:
+    classification:
+      mode: family_and_spacegroup
+    train:
+      epochs: 20
+      batch_size: 32
+      optimizer: adam
+
+  train:
+    epochs: 30
+    batch_size: 32
+    learning_rate: 0.001
+    optimizer: adam
+    val_ratio: 0.2
+    device: cpu
+
+# 2 hidden-dim configs x 2 tau values x 2 distances x 2 batching strategies
+# = 16 runs, all sharing one cached dataset build.
+grid:
+  vae.encoder_hidden_dim:
+    - [64]
+    - [128, 64]
+  supcon.tau: [0.05, 0.1]
+  supcon.distance: [euclidean, cosine]
+  batching.strategy: [random, balanced]

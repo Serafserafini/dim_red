@@ -1,0 +1,66 @@
+# Example sweep config for CGCNN, using the generic "base" + "grid" sweep
+# schema (see sweep.example.yaml for the general explanation): a grid over
+# graph-convolution depth/width and the spacegroup loss weight, so this
+# single sweep compares model capacity and loss balance side by side at
+# parity of every other hyperparameter.
+# Run with: python -m dim_red.pipeline.cli --config configs/sweep_cgcnn.example.yaml --sweep
+# or:       dimred-sweep configs/sweep_cgcnn.example.yaml
+
+base:
+  seed: 42
+  output_dir: runs
+  model: cgcnn
+  data_source: pyxtal
+
+  pyxtal:
+    families: [cubic, hexagonal, orthorhombic]
+    structures_per_family: 40
+    distribution: uniform
+    n_species: 2
+    seed: 42
+
+  # Only vae.latent_dim is read for model: cgcnn -- see
+  # configs/single_run_cgcnn.example.yaml's comments.
+  vae:
+    encoder_hidden_dim: [1]
+    latent_dim: 32
+
+  graph:
+    radius: 8.0
+    max_num_nbr: 12
+    max_species: 10
+    atom_fea_len: 64
+    n_conv: 3
+    h_fea_len: 128
+    n_h: 1
+
+  aux_heads:
+    mode: family_and_spacegroup
+    lambda_family: 1.0
+    lambda_spacegroup: 1.0
+
+  train:
+    epochs: 30
+    batch_size: 16
+    learning_rate: 0.001
+    optimizer: adam
+    val_ratio: 0.2
+    device: cpu
+
+  # tails:
+  #   classification:
+  #     mode: family_and_spacegroup
+  #   visualization:
+  #     viz_dim: 2
+  #   train:
+  #     epochs: 20
+  #     batch_size: 32
+  #     optimizer: adam
+
+# 3 conv depths x 2 atom_fea_len widths x 2 spacegroup-loss weights = 12
+# runs. Since only pyxtal/graph settings affect the dataset cache key, all
+# 12 runs share one cached graph dataset build.
+grid:
+  graph.n_conv: [2, 3, 4]
+  graph.atom_fea_len: [32, 64]
+  aux_heads.lambda_spacegroup: [0.5, 1.0]

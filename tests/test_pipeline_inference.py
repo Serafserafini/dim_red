@@ -19,6 +19,7 @@ pytest.importorskip("jax")
 from dim_red.pipeline.config import (
     AuxHeadsConfig,
     FetchConfig,
+    GraphConfig,
     RunConfig,
     SoapConfig,
     TrainSettings,
@@ -314,3 +315,107 @@ def test_apply_model_to_structures_projects_non_2d_latent_via_umap(tmp_path):
     with np.load(output_dir / "new_structures_3d_embeddings.npz") as npz:
         assert npz["embeddings"].shape == (2, 3)  # raw latent coords, not projected
     assert (output_dir / "new_structures_3d_latent_space.png").exists()
+
+
+# --- model_kind == "cgcnn" ---------------------------------------------------
+#
+# No SOAP mocking needed anywhere here (cgcnn never calls compute_soap) --
+# only fetch_structures_by_crystal_system is mocked, with real (if tiny)
+# periodic structures.
+
+N_TRAIN_CGCNN = 8
+
+
+def _fake_cgcnn_atoms(symbol: str, material_id: str) -> Atoms:
+    atoms = Atoms(
+        symbol * 2,
+        positions=[[0.0, 0.0, 0.0], [1.5, 0.0, 0.0]],
+        cell=[4.0, 4.0, 4.0],
+        pbc=True,
+    )
+    atoms.info["material_id"] = material_id
+    atoms.info["spacegroup"] = 195
+    return atoms
+
+
+def _train_a_cgcnn_run(tmp_path, name="cgcnn-run"):
+    config = RunConfig(
+        fetch=FetchConfig(crystal_systems=["cubic"], limit_per_system=N_TRAIN_CGCNN),
+        soap=SoapConfig(),
+        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=4),
+        train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
+        graph=GraphConfig(
+            radius=3.0,
+            max_num_nbr=4,
+            max_species=1,
+            atom_fea_len=8,
+            n_conv=1,
+            h_fea_len=8,
+        ),
+        aux_heads=AuxHeadsConfig(mode="family_only", head_hidden_dim=4),
+        model_kind="cgcnn",
+        seed=0,
+        output_dir=str(tmp_path / "runs"),
+        name=name,
+    )
+    fake_atoms = [_fake_cgcnn_atoms("Cu", f"mp-{i}") for i in range(N_TRAIN_CGCNN)]
+    with patch(
+        "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
+        return_value=fake_atoms,
+    ):
+        run_dir = run_single(config)
+    return run_dir
+
+
+def test_load_trained_run_cgcnn(tmp_path):
+    run_dir = _train_a_cgcnn_run(tmp_path)
+    loaded = load_trained_run(run_dir)
+
+    assert loaded.config.model_kind == "cgcnn"
+    assert loaded.species == []
+    assert loaded.feature_mean.shape == (0,)
+    assert loaded.feature_std.shape == (0,)
+
+
+def test_encode_structures_cgcnn_new_structure_larger_than_training_max_atoms(tmp_path):
+    """The key regression test for max_atoms being a per-call array-shape
+    convenience, not a trained-parameter constraint: a brand-new structure
+    with more atoms than any training structure ever had must encode
+    without error."""
+    run_dir = _train_a_cgcnn_run(tmp_path)
+    loaded = load_trained_run(run_dir)
+
+    big = Atoms(
+        "Cu" * 20,
+        positions=np.random.default_rng(0).uniform(0, 10, size=(20, 3)),
+        cell=[15, 15, 15],
+        pbc=True,
+    )
+    z = encode_structures(loaded, [big])
+    assert z.shape == (1, 4)  # latent_dim=4
+    assert np.all(np.isfinite(z))
+
+
+def test_encode_structures_cgcnn_rejects_empty_list(tmp_path):
+    run_dir = _train_a_cgcnn_run(tmp_path)
+    loaded = load_trained_run(run_dir)
+    with pytest.raises(ValueError, match="atoms_list is empty"):
+        encode_structures(loaded, [])
+
+
+def test_apply_model_to_structures_cgcnn_writes_expected_artifacts(tmp_path):
+    run_dir = _train_a_cgcnn_run(tmp_path)
+
+    new_atoms = [_fake_cgcnn_atoms("Cu", "new-1"), _fake_cgcnn_atoms("Cu", "new-2")]
+    structures_path = tmp_path / "new_cgcnn_structures.extxyz"
+    write_atoms(str(structures_path), new_atoms, format="extxyz")
+
+    output_dir = apply_model_to_structures(run_dir, structures_path)
+
+    npz_path = output_dir / "new_cgcnn_structures_embeddings.npz"
+    plot_path = output_dir / "new_cgcnn_structures_latent_space.png"
+    assert npz_path.exists()
+    assert plot_path.exists()
+    with np.load(npz_path) as npz:
+        assert npz["embeddings"].shape == (2, 4)
+        assert npz["material_ids"].tolist() == ["new-1", "new-2"]

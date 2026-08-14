@@ -16,10 +16,12 @@ from ase import Atoms
 pytest.importorskip("jax")
 
 from dim_red.pipeline.config import (
+    AuxHeadsConfig,
     BalancedBatchingParams,
     BatchingConfig,
     ClassificationTailConfig,
     FetchConfig,
+    GraphConfig,
     RunConfig,
     SoapConfig,
     SupConConfig,
@@ -273,9 +275,7 @@ def test_train_tail_rejects_non_supcon_run(tmp_path):
         classification=ClassificationTailConfig(mode="family_only"),
     )
 
-    with pytest.raises(
-        ValueError, match="requires a completed model_kind='supcon' run"
-    ):
+    with pytest.raises(ValueError, match="requires a completed model_kind='supcon' or"):
         train_tail(config)
 
 
@@ -373,3 +373,68 @@ def test_train_tail_optimizer_velo_still_works_end_to_end(tmp_path):
     with open(tail_dir / "run.log") as f:
         run_log = f.read()
     assert "optimizer=velo" in run_log
+
+
+# --- model_kind == "cgcnn" ---------------------------------------------------
+
+
+def _fake_cgcnn_atoms(symbol: str, material_id: str, spacegroup: int) -> Atoms:
+    atoms = Atoms(
+        symbol * 2,
+        positions=[[0.0, 0.0, 0.0], [1.5, 0.0, 0.0]],
+        cell=[4.0, 4.0, 4.0],
+        pbc=True,
+    )
+    atoms.info["material_id"] = material_id
+    atoms.info["spacegroup"] = spacegroup
+    return atoms
+
+
+def _train_a_cgcnn_run(tmp_path):
+    config = RunConfig(
+        fetch=FetchConfig(crystal_systems=["cubic", "hexagonal"], limit_per_system=10),
+        soap=SoapConfig(),
+        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=3),
+        train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
+        graph=GraphConfig(
+            radius=3.0,
+            max_num_nbr=4,
+            max_species=1,
+            atom_fea_len=8,
+            n_conv=1,
+            h_fea_len=8,
+        ),
+        aux_heads=AuxHeadsConfig(mode="family_only", head_hidden_dim=4),
+        seed=0,
+        output_dir=str(tmp_path / "runs"),
+        model_kind="cgcnn",
+    )
+    spacegroup_offsets = {"cubic": 195, "hexagonal": 168}
+    with patch(
+        "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
+        side_effect=lambda crystal_system, api_key=None, limit=10: [
+            _fake_cgcnn_atoms(
+                "Cu",
+                f"mp-{crystal_system}-{i}",
+                spacegroup_offsets[crystal_system] + (i % 2),
+            )
+            for i in range(limit)
+        ],
+    ):
+        run_dir = run_single(config)
+    return run_dir
+
+
+def test_train_tail_accepts_cgcnn_run(tmp_path):
+    run_dir = _train_a_cgcnn_run(tmp_path)
+    config = TailTrainConfig(
+        run_dir=str(run_dir),
+        tail_kind="visualization",
+        visualization=VisualizationTailConfig(viz_dim=2, mode="family_only"),
+        train=TailTrainSettings(epochs=1, batch_size=4),
+    )
+
+    tail_dir = train_tail(config)
+
+    assert (tail_dir / "tail_embeddings.npz").exists()
+    assert (tail_dir / "tail_params.msgpack").exists()
