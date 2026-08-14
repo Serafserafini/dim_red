@@ -26,7 +26,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-from learned_optimization.research.general_lopt import prefab
 
 from dim_red.cgcnn.database import GraphDatabase
 from dim_red.cgcnn.model import CGCNNEncoder, apply_family_mask
@@ -113,6 +112,8 @@ def _make_optimizer(optimizer: str, learning_rate: float, num_steps: int):
     pretrained VeLO meta-learned optimizer instead.
     """
     if optimizer == "velo":
+        from learned_optimization.research.general_lopt import prefab
+
         return prefab.optax_lopt(num_steps=num_steps)
     return optax.with_extra_args_support(optax.adam(learning_rate))
 
