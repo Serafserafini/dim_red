@@ -193,6 +193,20 @@ def _compute_soap_and_standardize(
     and, ultimately, saved into a completed run's ``embeddings.npz`` --
     letting ``dim_red.pipeline.inference.load_trained_run`` standardize new
     structures without ever recomputing SOAP on the training set again.
+
+    All three are cast to float32 before being returned -- this is the one
+    place a run's full SOAP feature matrix (potentially several GB at
+    dataset sizes like 35000 structures / thousands of SOAP dimensions) gets
+    produced, and both consumers already treat it as float32-precision
+    anyway: nothing in this codebase enables jax's x64 mode, so `X`
+    ends up truncated to float32 the moment training converts it to a jnp
+    array regardless of what dtype it's stored as; `dim_red.pipeline.compare`
+    (PCA/UMAP) and `dim_red.pipeline.inference` (standardizing new points)
+    have no precision requirement beyond that either. Fitting mean/std in
+    float64 first (inside fit_standardization/apply_standardization) and
+    only downcasting the final result, rather than computing in float32
+    throughout, avoids compounding rounding error across ~35000+ summed
+    terms in the mean/std reduction itself.
     """
     effective_soap_kwargs = dict(soap_kwargs)
     if effective_soap_kwargs.get("species") is None:
@@ -205,7 +219,8 @@ def _compute_soap_and_standardize(
     soap_vectors = compute_soap(atoms_list, **effective_soap_kwargs)
     X = np.asarray(soap_vectors).reshape(len(atoms_list), -1)
     mean, std = fit_standardization(X)
-    return apply_standardization(X, mean, std), mean, std
+    X_std = apply_standardization(X, mean, std)
+    return X_std.astype(np.float32), mean.astype(np.float32), std.astype(np.float32)
 
 
 def get_or_build_dataset(

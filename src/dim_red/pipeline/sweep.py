@@ -31,11 +31,42 @@ from dim_red.pipeline.config import (
     flatten_config_dict,
     run_config_to_dict,
 )
+from dim_red.pipeline.dataset_cache import (
+    _cache_key,
+    _pyxtal_cache_key,
+    _resolve_augmentation,
+)
 from dim_red.pipeline.single_run import run_single
 
 logger = logging.getLogger("dim_red.pipeline")
 
 _SWEEP_DIR_RE = re.compile(r"^\d{8}-(\d+)$")
+
+
+def _dataset_cache_key(config: RunConfig) -> str:
+    """The same dataset cache key ``dim_red.pipeline.dataset_cache.build_dataset_for_run``
+    would compute for ``config`` -- used by ``run_sweep`` to detect which
+    runs in a grid share an identical dataset (crystal systems/pyxtal
+    config + SOAP settings + augmentation), so it can avoid saving a
+    redundant copy of the (potentially multi-GB) SOAP feature matrix into
+    every one of their ``embeddings.npz`` files (see
+    ``dim_red.pipeline.single_run.run_single``'s ``save_features`` docs).
+    Not meaningful for ``model_kind == "cgcnn"`` (a different, graph-based
+    cache key applies there instead) -- harmless to compute anyway, since
+    cgcnn runs never save ``features`` regardless of this key.
+    """
+    augmentation = _resolve_augmentation(config)
+    if config.data_source == "pyxtal":
+        seed = config.pyxtal.seed if config.pyxtal.seed is not None else config.seed
+        return _pyxtal_cache_key(
+            config.pyxtal, seed, config.soap.as_kwargs(), augmentation
+        )
+    return _cache_key(
+        config.fetch.crystal_systems,
+        config.fetch.limit_per_system,
+        config.soap.as_kwargs(),
+        augmentation,
+    )
 
 
 def _next_sweep_dir(output_dir: Path) -> Path:
@@ -189,6 +220,7 @@ def run_sweep(
     )
 
     run_dirs = []
+    seen_dataset_keys: set = set()
     for i, config in enumerate(run_configs, start=1):
         data_scope = (
             config.fetch.crystal_systems
@@ -203,8 +235,20 @@ def run_sweep(
             data_scope,
             config.vae.encoder_hidden_dim,
         )
+        # Only the first run seen for a given dataset (crystal systems/pyxtal
+        # config + SOAP settings + augmentation) gets its SOAP features saved
+        # into embeddings.npz -- every later run sharing that same dataset
+        # would just be duplicating the identical, potentially multi-GB
+        # array. See run_single's save_features docs.
+        dataset_key = _dataset_cache_key(config)
+        save_features = dataset_key not in seen_dataset_keys
+        seen_dataset_keys.add(dataset_key)
         config = dataclasses.replace(config, output_dir=str(sweep_dir))
-        run_dirs.append(run_single(config, cache_dir=resolved_cache_dir))
+        run_dirs.append(
+            run_single(
+                config, cache_dir=resolved_cache_dir, save_features=save_features
+            )
+        )
 
     logger.info("Sweep complete: %d run(s) saved under %s", len(run_dirs), sweep_dir)
     return run_dirs

@@ -242,8 +242,32 @@ def _save_loss_history(path: Path, history: Dict[str, List[float]]) -> None:
             writer.writerow(row)
 
 
-def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) -> Path:
+def run_single(
+    config: RunConfig,
+    cache_dir: Optional[Union[str, Path]] = None,
+    save_features: bool = True,
+) -> Path:
     """Run one fetch -> SOAP -> VAE training pass and persist all artifacts.
+
+    Args:
+        config: The run's configuration.
+        cache_dir: Dataset cache directory (default: ``<output_dir>/_dataset_cache``).
+        save_features: Whether to include the raw standardized SOAP
+            ``features`` matrix in this run's ``embeddings.npz`` (ignored for
+            ``model_kind == "cgcnn"``, which never has one -- see below).
+            Defaults to ``True`` for a standalone run. ``X`` is identical
+            across every run of a sweep that shares the same dataset cache
+            key (same crystal systems/pyxtal config + SOAP settings +
+            augmentation) -- since ``dim_red.pipeline.compare.compute_embedding_baselines``
+            only ever reads ``features`` from one run per sweep, and
+            ``dim_red.pipeline.inference.load_trained_run``'s fast path
+            (``feature_mean``/``feature_std`` present) doesn't read it at
+            all -- saving a full copy into *every* run's ``embeddings.npz``
+            is pure duplication once a sweep has more than a couple of runs;
+            X alone was measured at multiple GB per run on a real
+            ~35000-structure pyxtal dataset. ``dim_red.pipeline.sweep.run_sweep``
+            passes ``False`` here for every run after the first one sharing a
+            given dataset cache key.
 
     Returns:
         Path to the run directory containing ``config.yaml``,
@@ -251,20 +275,23 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
         (the exact structures used for training, same order as
         ``embeddings.npz``'s arrays), ``embeddings.npz`` (latent embeddings
         of every point in the training dataset; for ``model_kind in
-        ("vae", "autoencoder", "supcon")`` also the raw standardized SOAP
-        ``features`` fed to the model plus the ``feature_mean``/``feature_std``
-        they were standardized with -- from
+        ("vae", "autoencoder", "supcon")`` also, when ``save_features`` is
+        True, the raw standardized SOAP ``features`` fed to the model --
+        ``feature_mean``/``feature_std`` (the standardization stats they
+        were derived from) are saved unconditionally, regardless of
+        ``save_features``, since ``dim_red.pipeline.inference.load_trained_run``
+        needs those for every run, not just one per sweep -- from
         ``dim_red.pipeline.dataset_cache.build_dataset_for_run``, so
         ``dim_red.pipeline.inference.load_trained_run`` can standardize new
         structures the same way without ever recomputing SOAP on this run's
-        own training set -- omitted for ``model_kind == "cgcnn"``, which has
-        no natural flat feature vector or standardization step at all
-        (Gaussian-expanded bond features are already bounded to ``[0, 1]``
-        by construction) -- the true ``spacegroups`` per point, plus
-        ``family_probs``/``spacegroup_probs`` and their class vocabularies
-        when auxiliary heads are active -- never the case for
-        ``model_kind == "supcon"``, which has no classifier heads at all),
-        ``embeddings_plot.png`` and ``run.log``.
+        own training set -- ``features`` omitted entirely for
+        ``model_kind == "cgcnn"``, which has no natural flat feature vector
+        or standardization step at all (Gaussian-expanded bond features are
+        already bounded to ``[0, 1]`` by construction) -- the true
+        ``spacegroups`` per point, plus ``family_probs``/``spacegroup_probs``
+        and their class vocabularies when auxiliary heads are active --
+        never the case for ``model_kind == "supcon"``, which has no
+        classifier heads at all), ``embeddings_plot.png`` and ``run.log``.
     """
     output_dir = Path(config.output_dir)
     run_dir = _make_unique_run_dir(output_dir, make_run_name(config))
@@ -716,11 +743,6 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
         else:
             embeddings_payload = dict(
                 embeddings=mu_all,
-                # Raw standardized SOAP features (the model's actual input), so
-                # downstream comparison tooling (see dim_red.pipeline.compare)
-                # can fit classical baselines (PCA, UMAP) on the exact same data
-                # without needing to re-fetch/re-run SOAP.
-                features=X,
                 labels=np.array(labels),
                 material_ids=np.array(material_ids),
                 spacegroups=np.array(spacegroups, dtype=np.int64),
@@ -729,10 +751,23 @@ def run_single(config: RunConfig, cache_dir: Optional[Union[str, Path]] = None) 
                 # derived from (dim_red.pipeline.dataset_cache._compute_soap_and_standardize),
                 # so dim_red.pipeline.inference.load_trained_run can standardize
                 # new structures the same way without ever recomputing SOAP on
-                # this run's own training set.
+                # this run's own training set. Saved unconditionally (unlike
+                # "features" below) since every run needs its own copy for that.
                 feature_mean=feature_mean,
                 feature_std=feature_std,
             )
+            if save_features:
+                # Raw standardized SOAP features (the model's actual input),
+                # so downstream comparison tooling (see
+                # dim_red.pipeline.compare.compute_embedding_baselines) can
+                # fit classical baselines (PCA, UMAP) on the exact same data
+                # without needing to re-fetch/re-run SOAP. X is identical
+                # across every run in a sweep sharing this run's dataset
+                # cache key (see this function's save_features docs), so
+                # dim_red.pipeline.sweep.run_sweep only requests this for the
+                # first such run rather than duplicating a multi-GB array
+                # into every run's embeddings.npz.
+                embeddings_payload["features"] = X
         logger.info(
             "Encoded %d points into %d-dim latent space",
             mu_all.shape[0],
