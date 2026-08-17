@@ -39,28 +39,38 @@ echo "$(hostname) - array task ${SLURM_ARRAY_TASK_ID}"
 
 # .novalocal nodes are a known-flaky node class on this cluster (recurring
 # CUDA/jaxlib and /tmp-permission failures unrelated to dim_red itself). If
-# we land on one, exclude it from this array task's job record and requeue
-# just this task -- SLURM_JOB_ID is this specific array task's own job id
-# (distinct from SLURM_ARRAY_JOB_ID, the shared parent id), so this never
-# touches the other array tasks. Capped via SLURM_RESTART_COUNT (auto-set by
-# SLURM, incremented on every requeue) so a cluster with nothing but
-# .novalocal nodes free still fails loudly instead of looping forever.
+# we land on one, resubmit just this array task with that node excluded and
+# exit this attempt cleanly.
+#
+# NOT `scontrol update jobid=... ExcludeNodes=...` + `scontrol requeue`: by
+# the time this line runs the job is already RUNNING (that's how we know
+# which node we landed on), and this cluster refuses to update a running
+# job's ExcludeNodes ("Update of this parameter is not supported") -- so
+# that combination always aborted (via set -e) instead of retrying. A fresh
+# `sbatch --exclude=...` works because that job hasn't been scheduled yet.
+# Since a fresh submission is a brand-new job with no memory of this one,
+# the exclude list and retry count are threaded through via --export
+# (colon-separated in DIMRED_NOVALOCAL_EXCLUDE, not comma-separated, so it
+# survives being embedded inside --export's own comma-separated VAR=val
+# list) -- capped so a cluster with nothing but .novalocal nodes free still
+# fails loudly instead of looping forever.
 if [[ "$(hostname)" == *.novalocal ]]; then
     MAX_RETRIES=5
-    RESTART_COUNT="${SLURM_RESTART_COUNT:-0}"
-    if [ "${RESTART_COUNT}" -ge "${MAX_RETRIES}" ]; then
-        echo "ERROR: still landing on .novalocal nodes after ${RESTART_COUNT} retries, giving up on $(hostname)" >&2
+    RETRY_COUNT="${DIMRED_NOVALOCAL_RETRY:-0}"
+    if [ "${RETRY_COUNT}" -ge "${MAX_RETRIES}" ]; then
+        echo "ERROR: still landing on .novalocal nodes after ${RETRY_COUNT} retries, giving up on $(hostname)" >&2
         exit 1
     fi
-    echo "$(hostname) is a .novalocal node -- excluding it and requeuing this array task (retry ${RESTART_COUNT}/${MAX_RETRIES})"
-    EXISTING_EXCLUDES=$(scontrol show job -o "${SLURM_JOB_ID}" | grep -oP 'ExcludeNodes=\K\S+' || true)
-    if [ -z "${EXISTING_EXCLUDES}" ] || [ "${EXISTING_EXCLUDES}" = "(null)" ]; then
-        NEW_EXCLUDES="$(hostname -s)"
-    else
-        NEW_EXCLUDES="${EXISTING_EXCLUDES},$(hostname -s)"
+    EXCLUDE_LIST="$(hostname -s)"
+    if [ -n "${DIMRED_NOVALOCAL_EXCLUDE:-}" ]; then
+        EXCLUDE_LIST="${DIMRED_NOVALOCAL_EXCLUDE}:$(hostname -s)"
     fi
-    scontrol update jobid="${SLURM_JOB_ID}" ExcludeNodes="${NEW_EXCLUDES}"
-    scontrol requeue "${SLURM_JOB_ID}"
+    echo "$(hostname) is a .novalocal node -- resubmitting array task ${SLURM_ARRAY_TASK_ID} excluding [${EXCLUDE_LIST}] (retry $((RETRY_COUNT + 1))/${MAX_RETRIES})"
+    sbatch \
+        --array="${SLURM_ARRAY_TASK_ID}" \
+        --exclude="${EXCLUDE_LIST//:/,}" \
+        --export="ALL,DIMRED_NOVALOCAL_EXCLUDE=${EXCLUDE_LIST},DIMRED_NOVALOCAL_RETRY=$((RETRY_COUNT + 1))" \
+        "${SLURM_SUBMIT_DIR}/slurm/tune_all_models.sbatch"
     exit 0
 fi
 

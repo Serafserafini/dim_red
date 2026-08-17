@@ -33,25 +33,29 @@ echo "$(hostname) - dataset cache warm-up"
 
 # .novalocal nodes are a known-flaky node class on this cluster (recurring
 # CUDA/jaxlib and /tmp-permission failures unrelated to dim_red itself) --
-# same guard as tune_all_models.sbatch, see that file for the full
-# explanation. Capped via SLURM_RESTART_COUNT so a cluster with nothing but
-# .novalocal nodes free still fails loudly instead of looping forever.
+# resubmit a fresh job excluding this node and exit this attempt cleanly.
+# Same guard as tune_all_models.sbatch (see that file for why this can't be
+# `scontrol update ExcludeNodes` + `scontrol requeue` on the current job --
+# it's already running by the time we detect the bad node, and this cluster
+# refuses ExcludeNodes updates on running jobs). Capped so a cluster with
+# nothing but .novalocal nodes free still fails loudly instead of looping
+# forever.
 if [[ "$(hostname)" == *.novalocal ]]; then
     MAX_RETRIES=5
-    RESTART_COUNT="${SLURM_RESTART_COUNT:-0}"
-    if [ "${RESTART_COUNT}" -ge "${MAX_RETRIES}" ]; then
-        echo "ERROR: still landing on .novalocal nodes after ${RESTART_COUNT} retries, giving up on $(hostname)" >&2
+    RETRY_COUNT="${DIMRED_NOVALOCAL_RETRY:-0}"
+    if [ "${RETRY_COUNT}" -ge "${MAX_RETRIES}" ]; then
+        echo "ERROR: still landing on .novalocal nodes after ${RETRY_COUNT} retries, giving up on $(hostname)" >&2
         exit 1
     fi
-    echo "$(hostname) is a .novalocal node -- excluding it and requeuing (retry ${RESTART_COUNT}/${MAX_RETRIES})"
-    EXISTING_EXCLUDES=$(scontrol show job -o "${SLURM_JOB_ID}" | grep -oP 'ExcludeNodes=\K\S+' || true)
-    if [ -z "${EXISTING_EXCLUDES}" ] || [ "${EXISTING_EXCLUDES}" = "(null)" ]; then
-        NEW_EXCLUDES="$(hostname -s)"
-    else
-        NEW_EXCLUDES="${EXISTING_EXCLUDES},$(hostname -s)"
+    EXCLUDE_LIST="$(hostname -s)"
+    if [ -n "${DIMRED_NOVALOCAL_EXCLUDE:-}" ]; then
+        EXCLUDE_LIST="${DIMRED_NOVALOCAL_EXCLUDE}:$(hostname -s)"
     fi
-    scontrol update jobid="${SLURM_JOB_ID}" ExcludeNodes="${NEW_EXCLUDES}"
-    scontrol requeue "${SLURM_JOB_ID}"
+    echo "$(hostname) is a .novalocal node -- resubmitting excluding [${EXCLUDE_LIST}] (retry $((RETRY_COUNT + 1))/${MAX_RETRIES})"
+    sbatch \
+        --exclude="${EXCLUDE_LIST//:/,}" \
+        --export="ALL,DIMRED_NOVALOCAL_EXCLUDE=${EXCLUDE_LIST},DIMRED_NOVALOCAL_RETRY=$((RETRY_COUNT + 1))" \
+        "${SLURM_SUBMIT_DIR}/slurm/warmup_shared_dataset.sbatch"
     exit 0
 fi
 
