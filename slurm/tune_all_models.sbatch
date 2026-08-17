@@ -27,6 +27,33 @@ set -euo pipefail
 
 echo "$(hostname) - array task ${SLURM_ARRAY_TASK_ID}"
 
+# .novalocal nodes are a known-flaky node class on this cluster (recurring
+# CUDA/jaxlib and /tmp-permission failures unrelated to dim_red itself). If
+# we land on one, exclude it from this array task's job record and requeue
+# just this task -- SLURM_JOB_ID is this specific array task's own job id
+# (distinct from SLURM_ARRAY_JOB_ID, the shared parent id), so this never
+# touches the other array tasks. Capped via SLURM_RESTART_COUNT (auto-set by
+# SLURM, incremented on every requeue) so a cluster with nothing but
+# .novalocal nodes free still fails loudly instead of looping forever.
+if [[ "$(hostname)" == *.novalocal ]]; then
+    MAX_RETRIES=5
+    RESTART_COUNT="${SLURM_RESTART_COUNT:-0}"
+    if [ "${RESTART_COUNT}" -ge "${MAX_RETRIES}" ]; then
+        echo "ERROR: still landing on .novalocal nodes after ${RESTART_COUNT} retries, giving up on $(hostname)" >&2
+        exit 1
+    fi
+    echo "$(hostname) is a .novalocal node -- excluding it and requeuing this array task (retry ${RESTART_COUNT}/${MAX_RETRIES})"
+    EXISTING_EXCLUDES=$(scontrol show job -o "${SLURM_JOB_ID}" | grep -oP 'ExcludeNodes=\K\S+' || true)
+    if [ -z "${EXISTING_EXCLUDES}" ] || [ "${EXISTING_EXCLUDES}" = "(null)" ]; then
+        NEW_EXCLUDES="$(hostname -s)"
+    else
+        NEW_EXCLUDES="${EXISTING_EXCLUDES},$(hostname -s)"
+    fi
+    scontrol update jobid="${SLURM_JOB_ID}" ExcludeNodes="${NEW_EXCLUDES}"
+    scontrol requeue "${SLURM_JOB_ID}"
+    exit 0
+fi
+
 source ~/miniconda3/bin/activate
 conda activate dmred
 if [ "${CONDA_DEFAULT_ENV:-}" != "dmred" ]; then

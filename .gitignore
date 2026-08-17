@@ -53,3 +53,6 @@ Thumbs.db
 # Pipeline experiment outputs
 runs/
 experiments/
+
+# Slurm output files
+slurm-*.out
