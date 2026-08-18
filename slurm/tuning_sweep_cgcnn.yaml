@@ -49,7 +49,7 @@ base:
 
   pyxtal:
     families: [cubic, hexagonal, orthorhombic, tetragonal, trigonal, monoclinic, triclinic]
-    structures_per_family: 1000
+    structures_per_family: 100
     distribution: uniform
     n_species: 2
     seed: 42
@@ -61,7 +61,7 @@ base:
     latent_dim: 8 # overridden by the grid below
 
   graph:
-    radius: 8.0
+    radius: 6.0
     max_num_nbr: 12
     dmin: 0.0
     dmax: null
@@ -112,7 +112,7 @@ base:
 # build.
 grid:
   graph.n_conv: [3, 4]
-  graph.atom_fea_len: [32, 64]
-  graph.h_fea_len: [64, 128]
+  graph.atom_fea_len: [8, 16]
+  graph.h_fea_len: [16, 32]
   aux_heads.mode: [family_only, family_and_spacegroup]
   vae.latent_dim: [4, 8]
