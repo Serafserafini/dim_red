@@ -69,7 +69,14 @@ def embedding_quality_metrics(
     metrics: Dict[str, float] = {}
     for name, raw_labels in label_sets.items():
         raw_labels = np.asarray(raw_labels)
-        valid = raw_labels >= 0
+        # The negative-sentinel exclusion only applies to numeric label sets
+        # (e.g. spacegroup, where dim_red.fetch uses -1 for "unknown MP
+        # spacegroup"); a string label set (e.g. family, always known) has
+        # no such sentinel and `>= 0` isn't even a valid comparison for it.
+        if np.issubdtype(raw_labels.dtype, np.number):
+            valid = raw_labels >= 0
+        else:
+            valid = np.ones(len(raw_labels), dtype=bool)
         x = embeddings[valid]
         y = raw_labels[valid]
 
