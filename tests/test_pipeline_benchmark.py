@@ -19,7 +19,10 @@ from dim_red.pipeline.benchmark import (
     _resolve_2d_embedding,
     benchmark_row,
     collect_run_dirs,
+    generate_benchmark_plots,
     generate_benchmark_table,
+    plot_2d_quality_by_model_kind,
+    plot_classification_accuracy_by_model_kind,
     run_classification_accuracies,
     run_wall_clock_seconds,
 )
@@ -35,6 +38,7 @@ from dim_red.pipeline.config import (
 )
 
 pytest.importorskip("sklearn")
+matplotlib = pytest.importorskip("matplotlib")
 
 
 # --- dim_red.analysis.metrics.embedding_quality_metrics -------------------
@@ -361,3 +365,87 @@ def test_generate_benchmark_table_end_to_end_mixed_model_kinds(tmp_path):
     # still present (not missing) in the shared column set.
     supcon_row = next(r for r in rows if r["model_kind"] == "supcon")
     assert float(supcon_row["family"]) == pytest.approx(1.0)
+
+
+# --- benchmark plots ----------------------------------------------------------
+
+
+def _rows_for_plots(tmp_path):
+    vae_a = _write_run(tmp_path / "vae_a", model_kind="vae", with_aux=True)
+    vae_b = _write_run(tmp_path / "vae_b", model_kind="vae", with_aux=True)
+    cgcnn_run = _write_run(tmp_path / "cgcnn_run", model_kind="cgcnn", with_aux=True)
+    return [benchmark_row(load_run(d)) for d in [vae_a, vae_b, cgcnn_run]]
+
+
+def test_plot_classification_accuracy_by_model_kind_writes_png_and_csv(tmp_path):
+    rows = _rows_for_plots(tmp_path)
+    save_path = tmp_path / "accuracy.png"
+    csv_path = tmp_path / "accuracy.csv"
+
+    plot_classification_accuracy_by_model_kind(
+        rows, save_path=save_path, csv_path=csv_path
+    )
+
+    assert save_path.exists()
+    with open(csv_path, newline="") as f:
+        csv_rows = list(csv.DictReader(f))
+    assert {r["model_kind"] for r in csv_rows} == {"vae", "cgcnn"}
+    assert {r["metric"] for r in csv_rows} == {"family"}
+
+
+def test_plot_classification_accuracy_by_model_kind_skips_when_no_accuracy(tmp_path):
+    run_dir = _write_run(tmp_path / "run", model_kind="supcon", with_aux=False)
+    rows = [benchmark_row(load_run(run_dir))]
+    save_path = tmp_path / "accuracy.png"
+
+    plot_classification_accuracy_by_model_kind(rows, save_path=save_path)
+
+    assert not save_path.exists()
+
+
+def test_plot_2d_quality_by_model_kind_writes_png_and_csv(tmp_path):
+    rows = _rows_for_plots(tmp_path)
+    save_path = tmp_path / "quality2d.png"
+    csv_path = tmp_path / "quality2d.csv"
+
+    plot_2d_quality_by_model_kind(rows, save_path=save_path, csv_path=csv_path)
+
+    assert save_path.exists()
+    with open(csv_path, newline="") as f:
+        csv_rows = list(csv.DictReader(f))
+    assert {r["label_set"] for r in csv_rows} == {"family_2d"}
+    assert {r["model_kind"] for r in csv_rows} == {"vae", "cgcnn"}
+
+
+def test_generate_benchmark_plots_writes_both_pngs(tmp_path):
+    rows = _rows_for_plots(tmp_path)
+    output_dir = tmp_path / "benchmark_plots"
+
+    result_dir = generate_benchmark_plots(rows, output_dir, write_data_files=True)
+
+    assert result_dir == output_dir
+    assert (output_dir / "accuracy_by_model_kind.png").exists()
+    assert (output_dir / "accuracy_by_model_kind.csv").exists()
+    assert (output_dir / "embedding_quality_2d_by_model_kind.png").exists()
+    assert (output_dir / "embedding_quality_2d_by_model_kind.csv").exists()
+
+
+def test_generate_benchmark_table_plot_true_also_writes_plots(tmp_path):
+    vae_dir = _write_run(tmp_path / "vae_run", model_kind="vae", with_aux=True)
+    cgcnn_dir = _write_run(tmp_path / "cgcnn_run", model_kind="cgcnn", with_aux=True)
+    output_csv = tmp_path / "benchmark.csv"
+
+    generate_benchmark_table([vae_dir, cgcnn_dir], output_csv, plot=True)
+
+    plots_dir = tmp_path / "benchmark_plots"
+    assert (plots_dir / "accuracy_by_model_kind.png").exists()
+    assert (plots_dir / "embedding_quality_2d_by_model_kind.png").exists()
+
+
+def test_generate_benchmark_table_plot_false_skips_plots(tmp_path):
+    vae_dir = _write_run(tmp_path / "vae_run", model_kind="vae", with_aux=True)
+    output_csv = tmp_path / "benchmark.csv"
+
+    generate_benchmark_table([vae_dir], output_csv)
+
+    assert not (tmp_path / "benchmark_plots").exists()

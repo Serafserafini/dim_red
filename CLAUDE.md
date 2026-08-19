@@ -46,6 +46,7 @@ The `MP_API_KEY` environment variable is required for any code path that calls `
 - **`autoencoder/`**: see `src/dim_red/autoencoder/CLAUDE.md`.
 - **`supcon/`**: see `src/dim_red/supcon/CLAUDE.md`.
 - **`cgcnn/`**: see `src/dim_red/cgcnn/CLAUDE.md`.
+- **`mace/`**: see `src/dim_red/mace/CLAUDE.md`. A frozen, pretrained equivariant body (`model_kind: mace`) wrapping the external `mace_jax` package (https://github.com/ACEsuit/mace-jax, **not** in the assumed-installed dependency list above -- optional, only needed for this model kind) — unlike `vae`/`autoencoder`/`supcon`/`cgcnn`, this model kind never trains: it runs one forward pass through an already-pretrained foundation-model checkpoint (e.g. MACE-MP-0), converted from Torch to MACE-JAX's own format via a one-time, out-of-band step (`mace_jax`'s own `mace-jax-from-torch` CLI — needs `torch`/`mace-torch` only for that conversion, never as a `dim_red` runtime dependency). Captures 3-body/angular interactions natively (higher-order equivariant message passing), unlike `cgcnn`'s pairwise-only graph. Classification on top of its embeddings comes entirely from `pipeline.tail_training` (phase 2) — the frozen body has no classifier heads of its own.
 
 `pipeline.tail_training` (phase 2 of the SupCon body/tail workflow) and `RunConfig.tails` (auto-invoking phase 2 from `dimred-run`/`dimred-sweep`) are documented in `src/dim_red/pipeline/CLAUDE.md`.
 

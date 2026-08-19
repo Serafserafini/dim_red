@@ -18,6 +18,7 @@ __all__ = [
     "autoencoder",
     "supcon",
     "cgcnn",
+    "mace",
     "pipeline",
     "augmentation",
     "generate",
@@ -44,6 +45,8 @@ def __getattr__(name: str):
         return import_module("dim_red.supcon")
     if name == "cgcnn":
         return import_module("dim_red.cgcnn")
+    if name == "mace":
+        return import_module("dim_red.mace")
     if name == "pipeline":
         return import_module("dim_red.pipeline")
     raise AttributeError(f"module 'dim_red' has no attribute '{name}'")

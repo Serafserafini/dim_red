@@ -182,6 +182,14 @@ def _build_model(config: RunConfig, input_dim: int, embeddings: Dict[str, np.nda
             seed=config.seed,
         )
 
+    if config.model_kind == "mace":
+        from dim_red.mace.model import MaceEncoder
+
+        # input_dim/embeddings unused: a frozen body's architecture (and
+        # therefore its output width) is whatever the loaded checkpoint
+        # says, not derived from this run's saved artifacts at all.
+        return MaceEncoder(**config.mace.mace_kwargs())
+
     if config.model_kind == "cgcnn":
         from dim_red.cgcnn.model import CGCNNEncoder
 
@@ -285,6 +293,28 @@ def load_trained_run(run_dir: Union[str, Path]) -> LoadedRun:
         mean = np.zeros(0, dtype=np.float32)
         std = np.ones(0, dtype=np.float32)
         input_dim = 0
+    elif config.model_kind == "mace":
+        # Like SOAP-based kinds, feature_mean/feature_std are always saved
+        # (dim_red.pipeline.dataset_cache.build_mace_dataset_for_run always
+        # returns them -- there's no "pre-existing run predating this field"
+        # fallback case for mace, since this model_kind didn't exist before
+        # that field did) -- taken directly from embeddings.npz, same fast
+        # path as the SOAP-based kinds below. No species list: MaceEncoder
+        # doesn't use dim_red.soap's chemical-species machinery at all (its
+        # checkpoint carries its own supported-species table internally,
+        # loaded from config.mace.checkpoint_path at construction time) --
+        # kept as an inert empty placeholder, same treatment cgcnn's species
+        # field gets above, so LoadedRun's shape stays uniform.
+        # dataset.extxyz isn't read here, and the SOAP-recompute fallback
+        # below never applies to this model_kind at all.
+        species = []
+        mean = embeddings["feature_mean"]
+        std = embeddings["feature_std"]
+        input_dim = (
+            embeddings["features"].shape[1]
+            if "features" in embeddings
+            else mean.shape[0]
+        )
     else:
         # Species resolution is cheap (just reads back which chemical
         # symbols dataset.extxyz's atoms contain) -- no SOAP computation
@@ -354,6 +384,13 @@ def load_trained_run(run_dir: Union[str, Path]) -> LoadedRun:
             run_dir,
             config.vae.latent_dim,
         )
+    elif config.model_kind == "mace":
+        logger.info(
+            "Loaded frozen mace model from %s (checkpoint=%s, %d-dim embedding)",
+            run_dir,
+            config.mace.checkpoint_path,
+            input_dim,
+        )
     else:
         logger.info(
             "Loaded %s model from %s (%d species, %d-dim SOAP input, latent_dim=%d)",
@@ -404,6 +441,15 @@ def encode_structures(loaded: LoadedRun, atoms_list: List[Atoms]) -> np.ndarray:
             atoms_list, **loaded.config.graph.graph_kwargs()
         )
         return np.asarray(loaded.model.encode(graph_batch))
+
+    if loaded.config.model_kind == "mace":
+        # Unlike cgcnn's raw (unstandardized) graph features, mace's
+        # dataset-cache path standardizes the pooled embedding the same way
+        # SOAP does (dim_red.pipeline.dataset_cache._compute_mace_and_standardize)
+        # -- new structures must go through that same standardization to
+        # land in a comparable space, not just the raw forward pass.
+        raw = np.asarray(loaded.model.encode(atoms_list))
+        return apply_standardization(raw, loaded.feature_mean, loaded.feature_std)
 
     X_raw = _raw_soap_matrix(atoms_list, loaded.config.soap.as_kwargs(), loaded.species)
     X_std = apply_standardization(X_raw, loaded.feature_mean, loaded.feature_std)

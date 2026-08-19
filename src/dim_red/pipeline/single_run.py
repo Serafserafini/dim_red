@@ -19,15 +19,25 @@ directly against family/spacegroup labels via cross-entropy, single-phase,
 like ``vae``/``autoencoder``'s ``aux_heads`` pattern applied to a
 graph-convolutional body instead of a flat-feature encoder; it reads
 crystal structures directly, via ``dim_red.cgcnn.graph``, rather than SOAP
-descriptors). ``vae``/``autoencoder``/``supcon`` share the same encoder
+descriptors), or a frozen, pretrained equivariant body (``dim_red.mace`` --
+no training phase at all: this model_kind's "phase 1" is a single forward
+pass through an already-pretrained MACE foundation model checkpoint,
+producing embeddings that already account for 3-body/angular interactions;
+``loss_history.csv``/epoch logging are skipped entirely for it, since there
+is no loss). ``vae``/``autoencoder``/``supcon`` share the same encoder
 architecture (``config.vae``); ``cgcnn`` reads its graph-construction +
 architecture hyperparameters from ``config.graph`` instead (only
-``config.vae.latent_dim`` is still read). ``supcon`` reads its own loss
+``config.vae.latent_dim`` is still read); ``mace`` reads its checkpoint
+path/cutoff from ``config.mace`` instead (its embedding width comes from the
+checkpoint itself, not a config choice). ``supcon`` reads its own loss
 settings from ``config.supcon`` and ignores ``config.aux_heads``, the
-reverse of what ``vae``/``autoencoder``/``cgcnn`` do. A completed
-``supcon``/``cgcnn`` run's frozen body can then have a classification or
-visualization tail trained on top of it separately -- see
-``dim_red.pipeline.tail_training``.
+reverse of what ``vae``/``autoencoder``/``cgcnn`` do; ``mace`` ignores
+``config.aux_heads``/``config.supcon`` entirely (a frozen body has no
+training objective, so no loss settings apply). A completed
+``supcon``/``cgcnn``/``mace`` run's frozen body can then have a
+classification or visualization tail trained on top of it separately -- see
+``dim_red.pipeline.tail_training`` (for ``mace``, this is the *only* way to
+get a classifier out of it, since the frozen body has no heads of its own).
 """
 
 from __future__ import annotations
@@ -59,6 +69,7 @@ from dim_red.pipeline.config import RunConfig, TailTrainConfig, run_config_to_di
 from dim_red.pipeline.dataset_cache import (
     build_dataset_for_run,
     build_graph_dataset_for_run,
+    build_mace_dataset_for_run,
 )
 from dim_red.pipeline.tail_training import train_tail
 from dim_red.supcon.model import SupConEncoder
@@ -310,6 +321,7 @@ def run_single(
             Path(cache_dir) if cache_dir else output_dir / "_dataset_cache"
         )
         is_cgcnn = config.model_kind == "cgcnn"
+        is_mace = config.model_kind == "mace"
         if is_cgcnn:
             (
                 graph_arrays,
@@ -327,6 +339,10 @@ def run_single(
                 nbr_idx.shape[2],
             )
         else:
+            if is_mace:
+                build_fn = build_mace_dataset_for_run
+            else:
+                build_fn = build_dataset_for_run
             (
                 X,
                 labels,
@@ -335,7 +351,7 @@ def run_single(
                 structures_path,
                 feature_mean,
                 feature_std,
-            ) = build_dataset_for_run(config, cache_dir=resolved_cache_dir)
+            ) = build_fn(config, cache_dir=resolved_cache_dir)
             n_samples = X.shape[0]
             logger.info("Dataset ready: X.shape=%s, %d samples", X.shape, len(labels))
 
@@ -481,6 +497,17 @@ def run_single(
                 head_hidden_dim=config.aux_heads.head_hidden_dim,
                 seed=config.seed,
             )
+        elif is_mace:
+            from dim_red.mace.model import MaceEncoder
+
+            # Frozen body: no classifier heads, no training objective at all
+            # -- see is_supcon's identical comment above. The post-hoc
+            # family/spacegroup-probability block below is guarded by
+            # `not is_supcon`, so it would otherwise try to call
+            # model.classify_family on this model, which doesn't have one;
+            # guarded there too (see that block).
+            apply_family_mask = None
+            model = MaceEncoder(**config.mace.mace_kwargs())
         else:
             apply_family_mask = (
                 vae_apply_family_mask if is_vae else ae_apply_family_mask
@@ -607,6 +634,18 @@ def run_single(
                 config.train.optimizer,
                 config.train.early_stopping.enabled,
             )
+        elif is_mace:
+            # No training loop at all for a frozen body -- see is_supcon's
+            # sibling comment on `apply_family_mask` above. train_config is
+            # never read below (the training-call branch below skips it too).
+            train_config = None
+            logger.info(
+                "Encoding with frozen MACE checkpoint=%s r_max=%.2f pooling=%s "
+                "(no training -- see dim_red.mace)",
+                config.mace.checkpoint_path,
+                config.mace.r_max,
+                config.mace.pooling,
+            )
         else:
             train_config = AETrainConfig(
                 epochs=config.train.epochs,
@@ -675,6 +714,11 @@ def run_single(
                     family_spacegroup_mask if use_spacegroup else None
                 ),
             )
+        elif is_mace:
+            # Nothing to train -- history stays empty, so the epoch-logging/
+            # loss-history-CSV steps below are skipped entirely for this
+            # model_kind (there is no loss to report).
+            history = {}
         else:
             train_fn = train_vae if is_vae else train_autoencoder
             history = train_fn(
@@ -692,31 +736,36 @@ def run_single(
                     family_spacegroup_mask if use_spacegroup else None
                 ),
             )
-        # Actual epoch count, not config.train.epochs: early stopping (see
-        # dim_red.pipeline.config.EarlyStoppingConfig) can make history
-        # shorter than the configured epochs, and indexing _log_epoch past
-        # the end of a shortened history would raise.
-        actual_epochs = len(history["train_loss"])
-        for epoch in range(1, actual_epochs + 1):
-            _log_epoch(epoch, actual_epochs, history)
-        if actual_epochs < config.train.epochs:
-            logger.info(
-                "Early stopping: training stopped after %d/%d epochs "
-                "(patience=%d, min_delta=%g)",
-                actual_epochs,
-                config.train.epochs,
-                config.train.early_stopping.patience,
-                config.train.early_stopping.min_delta,
-            )
-
-        _save_loss_history(run_dir / "loss_history.csv", history)
+        if history:
+            # Actual epoch count, not config.train.epochs: early stopping
+            # (see dim_red.pipeline.config.EarlyStoppingConfig) can make
+            # history shorter than the configured epochs, and indexing
+            # _log_epoch past the end of a shortened history would raise.
+            actual_epochs = len(history["train_loss"])
+            for epoch in range(1, actual_epochs + 1):
+                _log_epoch(epoch, actual_epochs, history)
+            if actual_epochs < config.train.epochs:
+                logger.info(
+                    "Early stopping: training stopped after %d/%d epochs "
+                    "(patience=%d, min_delta=%g)",
+                    actual_epochs,
+                    config.train.epochs,
+                    config.train.early_stopping.patience,
+                    config.train.early_stopping.min_delta,
+                )
+            _save_loss_history(run_dir / "loss_history.csv", history)
 
         # Apply the trained encoder to every point of the dataset used for
         # training (train + val), not just the held-out validation split.
         # A VAE's encode returns (mu, logvar); an Autoencoder's/SupConEncoder's/
         # CGCNNEncoder's returns just z, since encoding is deterministic (no
-        # posterior to describe).
-        if is_cgcnn:
+        # posterior to describe). MaceEncoder has no encode() call to make
+        # here at all -- X (build_mace_dataset_for_run's already-pooled,
+        # already-standardized MACE embedding) IS mu_all; running the frozen
+        # forward pass a second time would be pure waste.
+        if is_mace:
+            mu_all = X
+        elif is_cgcnn:
             mu_all = model.encode(
                 (local_species_idx, nbr_idx, nbr_fea, nbr_mask, atom_mask)
             )
@@ -786,8 +835,12 @@ def run_single(
         # SupCon, does have classifier heads (its only training objective),
         # so this block runs for it -- family_probs/spacegroup_probs are
         # saved same as vae/autoencoder, just alongside a smaller base
-        # payload (no features/feature_mean/feature_std, see above).
-        if use_family and not is_supcon:
+        # payload (no features/feature_mean/feature_std, see above). MACE,
+        # like SupCon, is skipped too -- a frozen pretrained body has no
+        # classifier heads of its own either (classification for it only
+        # ever happens via a `tails` classification tail, see
+        # dim_red.pipeline.tail_training).
+        if use_family and not is_supcon and not is_mace:
             family_logits_all = model.classify_family(mu_all)
             family_probs_all = np.asarray(jax.nn.softmax(family_logits_all, axis=-1))
             embeddings_payload["family_probs"] = family_probs_all
@@ -813,7 +866,13 @@ def run_single(
 
         np.savez(run_dir / "embeddings.npz", **embeddings_payload)
 
-        if config.vae.latent_dim >= 2:
+        # mu_all.shape[1], not config.vae.latent_dim -- for model_kind=="mace"
+        # the actual embedding width is whatever the loaded checkpoint
+        # produces, not a config choice (see MaceConfig), so it can only be
+        # read off the encoded array itself; this check is equally correct
+        # for every other model_kind too, since mu_all.shape[1] always equals
+        # config.vae.latent_dim for them.
+        if mu_all.shape[1] >= 2:
             plot_path = run_dir / "embeddings_plot.png"
             plot_reduced_space(
                 mu_all,
@@ -829,7 +888,7 @@ def run_single(
             logger.info("Saved 2D latent-space plot to %s", plot_path)
         else:
             logger.warning(
-                "latent_dim=%d < 2: skipping 2D embeddings plot", config.vae.latent_dim
+                "latent_dim=%d < 2: skipping 2D embeddings plot", mu_all.shape[1]
             )
 
         with open(run_dir / "model_params.msgpack", "wb") as f:
@@ -859,7 +918,7 @@ def run_single(
         # added to this same "dim_red.pipeline" logger while ours is still
         # attached, so this run's run.log ends up containing a full trace of
         # any auto-triggered tail training too.
-        if (is_supcon or is_cgcnn) and config.tails is not None:
+        if (is_supcon or is_cgcnn or is_mace) and config.tails is not None:
             if config.tails.classification is not None:
                 logger.info("Auto-training classification tail on this run")
                 tail_dir = train_tail(

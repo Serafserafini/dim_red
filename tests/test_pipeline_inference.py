@@ -20,6 +20,7 @@ from dim_red.pipeline.config import (
     AuxHeadsConfig,
     FetchConfig,
     GraphConfig,
+    MaceConfig,
     RunConfig,
     SoapConfig,
     TrainSettings,
@@ -418,4 +419,119 @@ def test_apply_model_to_structures_cgcnn_writes_expected_artifacts(tmp_path):
     assert plot_path.exists()
     with np.load(npz_path) as npz:
         assert npz["embeddings"].shape == (2, 4)
+        assert npz["material_ids"].tolist() == ["new-1", "new-2"]
+
+
+# --- model_kind == "mace" -----------------------------------------------------
+#
+# dim_red.mace.model.MaceEncoder requires mace_jax (not installed in every
+# test environment), so it's mocked out entirely here -- same pattern as
+# test_pipeline_single_run.py's _FakeMaceEncoder.
+
+N_TRAIN_MACE = 8
+
+
+class _FakeMaceEncoder:
+    """Deterministic stand-in for dim_red.mace.model.MaceEncoder -- returns
+    one fixed-width row per structure, keyed only by each structure's
+    material_id (so distinct new structures don't collide with training
+    ones), ignoring geometry entirely.
+    """
+
+    _DIM = 3
+
+    def __init__(self, **kwargs):
+        self.params = {"dummy": np.zeros(1, dtype=np.float32)}
+
+    def encode(self, atoms_list):
+        rows = []
+        for a in atoms_list:
+            seed = abs(hash(a.info.get("material_id", "unknown"))) % (2**31)
+            rows.append(np.random.default_rng(seed).normal(size=self._DIM))
+        return np.asarray(rows, dtype=np.float32)
+
+
+def _fake_mace_atoms(symbol: str, material_id: str) -> Atoms:
+    atoms = Atoms(
+        symbol * 2,
+        positions=[[0.0, 0.0, 0.0], [1.5, 0.0, 0.0]],
+        cell=[4.0, 4.0, 4.0],
+        pbc=True,
+    )
+    atoms.info["material_id"] = material_id
+    atoms.info["spacegroup"] = 195
+    return atoms
+
+
+def _train_a_mace_run(tmp_path, name="mace-run"):
+    config = RunConfig(
+        fetch=FetchConfig(crystal_systems=["cubic"], limit_per_system=N_TRAIN_MACE),
+        soap=SoapConfig(),
+        vae=VAEArchConfig(encoder_hidden_dim=[1], latent_dim=1),
+        train=TrainSettings(device="cpu"),
+        mace=MaceConfig(checkpoint_path="/fake/ckpt", r_max=5.0),
+        model_kind="mace",
+        seed=0,
+        output_dir=str(tmp_path / "runs"),
+        name=name,
+    )
+    fake_atoms = [_fake_mace_atoms("Cu", f"mp-{i}") for i in range(N_TRAIN_MACE)]
+    with (
+        patch(
+            "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
+            return_value=fake_atoms,
+        ),
+        patch("dim_red.mace.model.MaceEncoder", _FakeMaceEncoder),
+    ):
+        run_dir = run_single(config)
+    return run_dir
+
+
+def test_load_trained_run_mace(tmp_path):
+    run_dir = _train_a_mace_run(tmp_path)
+    with patch("dim_red.mace.model.MaceEncoder", _FakeMaceEncoder):
+        loaded = load_trained_run(run_dir)
+
+    assert loaded.config.model_kind == "mace"
+    assert loaded.species == []
+    # Real (non-placeholder) standardization stats, unlike cgcnn's zeros/ones
+    # -- mace embeddings are standardized the same way SOAP features are.
+    assert loaded.feature_mean.shape == (3,)
+    assert loaded.feature_std.shape == (3,)
+
+
+def test_encode_structures_mace_applies_saved_standardization(tmp_path):
+    run_dir = _train_a_mace_run(tmp_path)
+    with patch("dim_red.mace.model.MaceEncoder", _FakeMaceEncoder):
+        loaded = load_trained_run(run_dir)
+        z = encode_structures(loaded, [_fake_mace_atoms("Cu", "new-1")])
+
+    assert z.shape == (1, 3)
+    assert np.all(np.isfinite(z))
+
+
+def test_encode_structures_mace_rejects_empty_list(tmp_path):
+    run_dir = _train_a_mace_run(tmp_path)
+    with patch("dim_red.mace.model.MaceEncoder", _FakeMaceEncoder):
+        loaded = load_trained_run(run_dir)
+    with pytest.raises(ValueError, match="atoms_list is empty"):
+        encode_structures(loaded, [])
+
+
+def test_apply_model_to_structures_mace_writes_expected_artifacts(tmp_path):
+    run_dir = _train_a_mace_run(tmp_path)
+
+    new_atoms = [_fake_mace_atoms("Cu", "new-1"), _fake_mace_atoms("Cu", "new-2")]
+    structures_path = tmp_path / "new_mace_structures.extxyz"
+    write_atoms(str(structures_path), new_atoms, format="extxyz")
+
+    with patch("dim_red.mace.model.MaceEncoder", _FakeMaceEncoder):
+        output_dir = apply_model_to_structures(run_dir, structures_path)
+
+    npz_path = output_dir / "new_mace_structures_embeddings.npz"
+    plot_path = output_dir / "new_mace_structures_latent_space.png"
+    assert npz_path.exists()
+    assert plot_path.exists()
+    with np.load(npz_path) as npz:
+        assert npz["embeddings"].shape == (2, 3)
         assert npz["material_ids"].tolist() == ["new-1", "new-2"]

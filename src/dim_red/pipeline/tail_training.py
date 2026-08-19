@@ -136,7 +136,8 @@ def train_tail(config: TailTrainConfig) -> Path:
 
     Raises:
         ValueError: If ``config.run_dir`` is unset, or wasn't produced by a
-            ``model_kind == "supcon"`` or ``model_kind == "cgcnn"`` run.
+            ``model_kind == "supcon"``, ``model_kind == "cgcnn"``, or
+            ``model_kind == "mace"`` run.
     """
     if config.run_dir is None:
         raise ValueError(
@@ -146,13 +147,13 @@ def train_tail(config: TailTrainConfig) -> Path:
         )
     run_dir = Path(config.run_dir)
     loaded = load_run_embeddings(run_dir)
-    if loaded.config.model_kind not in ("supcon", "cgcnn"):
+    if loaded.config.model_kind not in ("supcon", "cgcnn", "mace"):
         raise ValueError(
             f"{run_dir} is a model_kind={loaded.config.model_kind!r} run -- "
-            "tail training requires a completed model_kind='supcon' or "
-            "model_kind='cgcnn' run (a vae/autoencoder body already has its "
-            "own classification heads and no separate tail-training "
-            "workflow makes sense for it)"
+            "tail training requires a completed model_kind='supcon', "
+            "model_kind='cgcnn', or model_kind='mace' run (a vae/autoencoder "
+            "body already has its own classification heads and no separate "
+            "tail-training workflow makes sense for it)"
         )
 
     output_subdir = config.output_subdir or config.tail_kind

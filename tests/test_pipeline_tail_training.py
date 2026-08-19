@@ -22,6 +22,7 @@ from dim_red.pipeline.config import (
     ClassificationTailConfig,
     FetchConfig,
     GraphConfig,
+    MaceConfig,
     RunConfig,
     SoapConfig,
     SupConConfig,
@@ -275,7 +276,9 @@ def test_train_tail_rejects_non_supcon_run(tmp_path):
         classification=ClassificationTailConfig(mode="family_only"),
     )
 
-    with pytest.raises(ValueError, match="requires a completed model_kind='supcon' or"):
+    with pytest.raises(
+        ValueError, match="requires a completed model_kind='supcon', model_kind='cgcnn'"
+    ):
         train_tail(config)
 
 
@@ -437,4 +440,63 @@ def test_train_tail_accepts_cgcnn_run(tmp_path):
     tail_dir = train_tail(config)
 
     assert (tail_dir / "tail_embeddings.npz").exists()
+    assert (tail_dir / "tail_params.msgpack").exists()
+
+
+class _FakeMaceEncoder:
+    """Deterministic stand-in for dim_red.mace.model.MaceEncoder -- see
+    test_pipeline_single_run.py's identical fixture."""
+
+    _DIM = 3
+
+    def __init__(self, **kwargs):
+        self.params = {"dummy": np.zeros(1, dtype=np.float32)}
+
+    def encode(self, atoms_list):
+        rng = np.random.default_rng(0)
+        return rng.normal(size=(len(atoms_list), self._DIM)).astype(np.float32)
+
+
+def _train_a_mace_run(tmp_path):
+    config = RunConfig(
+        fetch=FetchConfig(crystal_systems=["cubic", "hexagonal"], limit_per_system=10),
+        soap=SoapConfig(),
+        vae=VAEArchConfig(encoder_hidden_dim=[1], latent_dim=1),
+        train=TrainSettings(device="cpu"),
+        mace=MaceConfig(checkpoint_path="/fake/ckpt", r_max=5.0),
+        seed=0,
+        output_dir=str(tmp_path / "runs"),
+        model_kind="mace",
+    )
+    spacegroup_offsets = {"cubic": 195, "hexagonal": 168}
+    with (
+        patch(
+            "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
+            side_effect=lambda crystal_system, api_key=None, limit=10: [
+                _fake_cgcnn_atoms(
+                    "Cu",
+                    f"mp-{crystal_system}-{i}",
+                    spacegroup_offsets[crystal_system] + (i % 2),
+                )
+                for i in range(limit)
+            ],
+        ),
+        patch("dim_red.mace.model.MaceEncoder", _FakeMaceEncoder),
+    ):
+        run_dir = run_single(config)
+    return run_dir
+
+
+def test_train_tail_accepts_mace_run(tmp_path):
+    run_dir = _train_a_mace_run(tmp_path)
+    config = TailTrainConfig(
+        run_dir=str(run_dir),
+        tail_kind="classification",
+        classification=ClassificationTailConfig(mode="family_only"),
+        train=TailTrainSettings(epochs=1, batch_size=4),
+    )
+
+    tail_dir = train_tail(config)
+
+    assert (tail_dir / "tail_predictions.npz").exists()
     assert (tail_dir / "tail_params.msgpack").exists()

@@ -16,6 +16,7 @@ from dim_red.pipeline.config import (
     EarlyStoppingConfig,
     FetchConfig,
     GraphConfig,
+    MaceConfig,
     PyxtalConfig,
     RunConfig,
     SoapConfig,
@@ -1178,3 +1179,84 @@ def test_expand_sweep_can_vary_graph_n_conv(tmp_path):
     runs = expand_sweep(sweep)
     assert {r.graph.n_conv for r in runs} == {2, 3, 4}
     assert all(r.model_kind == "cgcnn" for r in runs)
+
+
+# --- MaceConfig / model_kind == "mace" ---------------------------------------
+
+
+def _mace_run_dict():
+    d = _single_run_dict()
+    d["model"] = "mace"
+    d["mace"] = {"checkpoint_path": "/fake/ckpt", "r_max": 5.0}
+    return d
+
+
+def test_run_config_defaults_mace_block(tmp_path):
+    config_path = _write_yaml(tmp_path / "run.yaml", _single_run_dict())
+    config = load_run_config(config_path)
+    assert config.mace == MaceConfig()
+
+
+def test_mace_config_mace_kwargs():
+    m = MaceConfig(checkpoint_path="/ckpt", r_max=6.0, pooling="sum")
+    assert m.mace_kwargs() == {
+        "checkpoint_path": "/ckpt",
+        "r_max": 6.0,
+        "pooling": "sum",
+    }
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        dict(r_max=0),
+        dict(r_max=-1.0),
+        dict(pooling="max"),
+    ],
+)
+def test_mace_config_rejects_invalid_values(kwargs):
+    with pytest.raises(ValueError):
+        MaceConfig(**kwargs)
+
+
+def test_run_config_parses_model_kind_mace(tmp_path):
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", _mace_run_dict()))
+    assert config.model_kind == "mace"
+    assert config.mace.checkpoint_path == "/fake/ckpt"
+    assert config.mace.r_max == 5.0
+
+
+def test_run_config_mace_requires_checkpoint_path(tmp_path):
+    d = _single_run_dict()
+    d["model"] = "mace"
+    with pytest.raises(ValueError, match="requires mace.checkpoint_path"):
+        load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+
+
+def test_run_config_to_dict_roundtrips_mace_block(tmp_path):
+    d = _mace_run_dict()
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+
+    saved_path = _write_yaml(tmp_path / "saved.yaml", run_config_to_dict(config))
+    reloaded = load_run_config(saved_path)
+
+    assert reloaded == config
+    assert reloaded.mace.checkpoint_path == "/fake/ckpt"
+
+
+def test_run_config_to_dict_always_includes_mace_block(tmp_path):
+    # Unlike fetch/pyxtal/augmentation/tails, "mace" is always serialized
+    # (same treatment as "vae"/"soap"/"graph"), even for non-mace model kinds.
+    config_path = _write_yaml(tmp_path / "run.yaml", _single_run_dict())
+    config = load_run_config(config_path)
+    saved = run_config_to_dict(config)
+    assert "mace" in saved
+
+
+def test_expand_sweep_can_vary_mace_r_max(tmp_path):
+    base = _mace_run_dict()
+    sweep_dict = {"base": base, "grid": {"mace.r_max": [4.0, 5.0, 6.0]}}
+    sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
+    runs = expand_sweep(sweep)
+    assert {r.mace.r_max for r in runs} == {4.0, 5.0, 6.0}
+    assert all(r.model_kind == "mace" for r in runs)

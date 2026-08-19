@@ -134,7 +134,11 @@ def _do_compare(
 
 
 def _do_benchmark(
-    inputs: list, output_csv: str, key_hyperparams: Optional[str]
+    inputs: list,
+    output_csv: str,
+    key_hyperparams: Optional[str],
+    plot: bool = False,
+    plot_data_file: bool = False,
 ) -> Path:
     from dim_red.pipeline.benchmark import (
         _DEFAULT_KEY_HYPERPARAMS,
@@ -148,9 +152,15 @@ def _do_benchmark(
         else _DEFAULT_KEY_HYPERPARAMS
     )
     table_path = generate_benchmark_table(
-        inputs, output_csv, key_hyperparams=hyperparams
+        inputs,
+        output_csv,
+        key_hyperparams=hyperparams,
+        plot=plot,
+        write_data_files=plot_data_file,
     )
     print(f"Benchmark table saved to {table_path}")
+    if plot:
+        print(f"Benchmark plots saved to {Path(output_csv).parent / 'benchmark_plots'}")
     return table_path
 
 
@@ -303,8 +313,29 @@ def benchmark_command(argv=None) -> None:
         "(default: model,vae.latent_dim,vae.encoder_hidden_dim,"
         "train.learning_rate,train.batch_size,train.epochs,seed).",
     )
+    parser.add_argument(
+        "--plot",
+        action="store_true",
+        help="Also render a visual-comparison suite (box plots of "
+        "classification accuracy and 2D embedding-quality metrics, pooled "
+        "by model_kind) into <output>'s sibling benchmark_plots/ directory.",
+    )
+    parser.add_argument(
+        "--plot-data-file",
+        type=_str_to_bool,
+        default=False,
+        metavar="{true,false}",
+        help="With --plot: also write the data behind each plot to a CSV "
+        "file next to its PNG (default: false, PNGs only).",
+    )
     args = parser.parse_args(argv)
-    _do_benchmark(args.inputs, args.output, args.key_hyperparams)
+    _do_benchmark(
+        args.inputs,
+        args.output,
+        args.key_hyperparams,
+        plot=args.plot,
+        plot_data_file=args.plot_data_file,
+    )
 
 
 def _do_apply(
@@ -543,6 +574,22 @@ def _build_parser() -> argparse.ArgumentParser:
         help="With --benchmark: comma-separated dotted config paths to "
         "include as columns (default: see benchmark_command's --key-hyperparams).",
     )
+    parser.add_argument(
+        "--benchmark-plot",
+        action="store_true",
+        help="With --benchmark: also render a visual-comparison suite (box "
+        "plots of classification accuracy and 2D embedding-quality metrics, "
+        "pooled by model_kind) into --benchmark-output's sibling "
+        "benchmark_plots/ directory.",
+    )
+    parser.add_argument(
+        "--benchmark-plot-data-file",
+        type=_str_to_bool,
+        default=False,
+        metavar="{true,false}",
+        help="With --benchmark-plot: also write the data behind each plot "
+        "to a CSV file next to its PNG (default: false, PNGs only).",
+    )
     _add_umap_args(parser)
     return parser
 
@@ -571,7 +618,11 @@ def main(argv=None) -> None:
         if not args.benchmark_output:
             parser.error("--benchmark requires --benchmark-output.")
         _do_benchmark(
-            args.benchmark, args.benchmark_output, args.benchmark_key_hyperparams
+            args.benchmark,
+            args.benchmark_output,
+            args.benchmark_key_hyperparams,
+            plot=args.benchmark_plot,
+            plot_data_file=args.benchmark_plot_data_file,
         )
         return
 

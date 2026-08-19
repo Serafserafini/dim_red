@@ -888,3 +888,294 @@ def build_graph_dataset_for_run(
         api_key=config.fetch.api_key,
         augmentation=augmentation,
     )
+
+
+# --- MACE dataset caching (RunConfig.model_kind == "mace" only) ------------
+#
+# Unlike the CGCNN graph path above, MACE's body is frozen/pretrained -- there
+# is no training loop to feed padded per-atom graph arrays into, so this
+# caches the *final pooled per-structure embedding* directly, the same array
+# schema as the SOAP path (_CACHE_ARRAY_KEYS), just produced by a frozen
+# MaceEncoder forward pass instead of dscribe SOAP. The fetch/generate/
+# augment/cache-raw-structures-to-<hash>.extxyz plumbing is reused unchanged
+# once again (see module docstring) -- only feature computation and the cache
+# key prefix ("mace-"/"mace-pyxtal-") differ. Reuses _CACHE_ARRAY_KEYS/
+# _load_cached_dataset/_save_dataset_cache as-is (same schema as SOAP).
+
+
+def _mace_cache_key(
+    crystal_systems: Sequence[str],
+    limit_per_system: int,
+    mace_kwargs: Dict[str, Any],
+    augmentation: Optional[AugmentationConfig] = None,
+) -> str:
+    """Stable hash identifying a MACE-featurized dataset built from (crystal
+    systems, fetch limit, MACE hyperparameters, augmentation settings).
+    Prefixed ``"mace-"`` so it can never collide with a SOAP/cgcnn cache hash
+    even if it matched numerically.
+    """
+    payload = {
+        "crystal_systems": sorted(cs.lower() for cs in crystal_systems),
+        "limit_per_system": limit_per_system,
+        "mace_kwargs": {k: mace_kwargs[k] for k in sorted(mace_kwargs)},
+        "augmentation": _augmentation_payload(augmentation),
+    }
+    blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    return "mace-" + hashlib.sha256(blob).hexdigest()[:16]
+
+
+def _pyxtal_mace_cache_key(
+    pyxtal_config: "PyxtalConfig",
+    seed: int,
+    mace_kwargs: Dict[str, Any],
+    augmentation: Optional[AugmentationConfig] = None,
+) -> str:
+    """Stable hash identifying a MACE-featurized dataset built from (pyxtal
+    generation config, seed, MACE hyperparameters, augmentation settings).
+    Prefixed ``"mace-pyxtal-"``, mirrors ``_pyxtal_cache_key``.
+    """
+    payload = {
+        "pyxtal": dataclasses.asdict(pyxtal_config),
+        "seed": seed,
+        "mace_kwargs": {k: mace_kwargs[k] for k in sorted(mace_kwargs)},
+        "augmentation": _augmentation_payload(augmentation),
+    }
+    blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    return "mace-pyxtal-" + hashlib.sha256(blob).hexdigest()[:16]
+
+
+def _compute_mace_and_standardize(
+    atoms_list: list, mace_kwargs: Dict[str, Any]
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Returns ``(X_std, feature_mean, feature_std)`` -- the MACE counterpart
+    to ``_compute_soap_and_standardize``, used *instead of* it when
+    ``RunConfig.model_kind == "mace"``. Runs a frozen, pretrained
+    ``dim_red.mace.model.MaceEncoder`` forward pass over every structure
+    (no training, no gradient), then standardizes the resulting embedding
+    matrix the same way SOAP features are -- kept for consistency with
+    ``dim_red.pipeline.benchmark``'s kNN/silhouette metrics and so
+    ``dim_red.pipeline.inference`` can standardize newly-applied structures
+    the same way without ever recomputing anything on the training set.
+
+    ``mace_kwargs`` is imported lazily inside this function (not at module
+    top) since ``dim_red.mace.model.MaceEncoder`` requires ``mace_jax``, not
+    a hard ``dim_red`` dependency -- same convention
+    ``get_or_build_pyxtal_dataset`` uses for ``dim_red.generate``/``pyxtal``.
+    """
+    from dim_red.mace.model import MaceEncoder
+
+    logger.info("Computing MACE embeddings for %d structures", len(atoms_list))
+    encoder = MaceEncoder(**mace_kwargs)
+    X = np.asarray(encoder.encode(atoms_list), dtype=np.float64)
+    mean, std = fit_standardization(X)
+    X_std = apply_standardization(X, mean, std)
+    return X_std.astype(np.float32), mean.astype(np.float32), std.astype(np.float32)
+
+
+def get_or_build_mace_dataset(
+    crystal_systems: Sequence[str],
+    mace_kwargs: Dict[str, Any],
+    limit_per_system: int,
+    cache_dir: Union[str, Path],
+    api_key: Optional[str] = None,
+    augmentation: Optional[AugmentationConfig] = None,
+) -> Tuple[np.ndarray, List[str], List[str], List[int], Path, np.ndarray, np.ndarray]:
+    """Fetch structures and compute frozen MACE embeddings -- reusing a
+    cached copy on disk when available. Same 7-element return shape as
+    ``get_or_build_dataset`` (the SOAP path); only the featurization step
+    (``_compute_mace_and_standardize``) and the cache key prefix differ.
+
+    Args:
+        crystal_systems: Crystal systems to include.
+        mace_kwargs: Keyword arguments for
+            ``dim_red.mace.model.MaceEncoder`` (``dim_red.pipeline.config.MaceConfig.mace_kwargs()``).
+        limit_per_system: Max structures fetched per crystal system.
+        cache_dir: Directory where cached datasets (``<hash>.npz``/
+            ``<hash>.extxyz``) live.
+        api_key: Materials Project API key (falls back to ``MP_API_KEY``).
+        augmentation: Optional augmentation, applied before MACE featurization.
+
+    Returns:
+        ``(X_std, labels, material_ids, spacegroups, structures_path,
+        feature_mean, feature_std)`` -- same shape/semantics as
+        ``get_or_build_dataset``.
+    """
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    key = _mace_cache_key(crystal_systems, limit_per_system, mace_kwargs, augmentation)
+    cache_path = cache_dir / f"{key}.npz"
+    structures_path = _structures_cache_path(cache_path)
+
+    cached = _load_cached_dataset(cache_path)
+    if cached is not None:
+        logger.info(
+            "MACE dataset cache hit (%s) for crystal_systems=%s",
+            key,
+            list(crystal_systems),
+        )
+        return (*cached[:4], structures_path, *cached[4:])
+
+    logger.info(
+        "MACE dataset cache miss (%s); fetching structures for crystal_systems=%s",
+        key,
+        list(crystal_systems),
+    )
+
+    all_atoms = []
+    labels: List[str] = []
+    for cs in crystal_systems:
+        atoms_list = fetch_structures_by_crystal_system(
+            crystal_system=cs, api_key=api_key, limit=limit_per_system
+        )
+        n_fetched = len(atoms_list)
+        if augmentation is not None:
+            atoms_list = augment_structures(atoms_list, augmentation)
+            logger.info(
+                "Fetched %d structures for crystal_system=%s (%d after augmentation)",
+                n_fetched,
+                cs,
+                len(atoms_list),
+            )
+        else:
+            logger.info("Fetched %d structures for crystal_system=%s", n_fetched, cs)
+        all_atoms.extend(atoms_list)
+        labels.extend([cs.capitalize()] * len(atoms_list))
+
+    if not all_atoms:
+        raise ValueError("No structures fetched for the requested crystal systems.")
+
+    material_ids = [a.info.get("material_id", "unknown") for a in all_atoms]
+    spacegroups = [a.info.get("spacegroup", _UNKNOWN_SPACEGROUP) for a in all_atoms]
+
+    _save_structures_cache(cache_path, all_atoms)
+    X_std, feature_mean, feature_std = _compute_mace_and_standardize(
+        all_atoms, mace_kwargs
+    )
+    _save_dataset_cache(
+        cache_path, X_std, labels, material_ids, spacegroups, feature_mean, feature_std
+    )
+
+    return (
+        X_std,
+        labels,
+        material_ids,
+        spacegroups,
+        structures_path,
+        feature_mean,
+        feature_std,
+    )
+
+
+def get_or_build_pyxtal_mace_dataset(
+    pyxtal_config: "PyxtalConfig",
+    seed: int,
+    mace_kwargs: Dict[str, Any],
+    cache_dir: Union[str, Path],
+    augmentation: Optional[AugmentationConfig] = None,
+) -> Tuple[np.ndarray, List[str], List[str], List[int], Path, np.ndarray, np.ndarray]:
+    """Generate a synthetic structure database with ``dim_red.generate`` and
+    compute frozen MACE embeddings -- reusing a cached copy on disk when
+    available. The MACE, ``pyxtal`` counterpart to ``get_or_build_mace_dataset``.
+
+    Args:
+        pyxtal_config: Generation settings.
+        seed: The *effective* seed to generate with -- see
+            ``get_or_build_pyxtal_dataset``'s ``seed`` docs.
+        mace_kwargs: Keyword arguments for ``dim_red.mace.model.MaceEncoder``.
+        cache_dir: Directory where cached datasets live.
+        augmentation: Optional augmentation, applied before MACE featurization.
+
+    Returns:
+        Same shape as ``get_or_build_mace_dataset``.
+    """
+    # Lazy: dim_red.generate requires pyxtal, not a hard dim_red dependency.
+    from dim_red.generate import GenerationConfig, generate_structures
+
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    key = _pyxtal_mace_cache_key(pyxtal_config, seed, mace_kwargs, augmentation)
+    cache_path = cache_dir / f"{key}.npz"
+    structures_path = _structures_cache_path(cache_path)
+
+    cached = _load_cached_dataset(cache_path)
+    if cached is not None:
+        logger.info("MACE dataset cache hit (%s) for pyxtal generation", key)
+        return (*cached[:4], structures_path, *cached[4:])
+
+    logger.info("MACE dataset cache miss (%s); generating structures with pyxtal", key)
+
+    generation_kwargs = dataclasses.asdict(pyxtal_config)
+    generation_kwargs.pop("seed", None)  # the resolved "seed" arg wins
+    if generation_kwargs.get("candidate_num_ions") is None:
+        generation_kwargs.pop("candidate_num_ions")
+    all_atoms = generate_structures(GenerationConfig(seed=seed, **generation_kwargs))
+
+    if not all_atoms:
+        raise ValueError(
+            "pyxtal generated no structures for the requested configuration."
+        )
+
+    n_generated = len(all_atoms)
+    if augmentation is not None:
+        all_atoms = augment_structures(all_atoms, augmentation)
+        logger.info(
+            "Generated %d structures with pyxtal (%d after augmentation)",
+            n_generated,
+            len(all_atoms),
+        )
+
+    labels = [a.info["family"] for a in all_atoms]
+    material_ids = [a.info["material_id"] for a in all_atoms]
+    spacegroups = [a.info["spacegroup"] for a in all_atoms]
+
+    _save_structures_cache(cache_path, all_atoms)
+    X_std, feature_mean, feature_std = _compute_mace_and_standardize(
+        all_atoms, mace_kwargs
+    )
+    _save_dataset_cache(
+        cache_path, X_std, labels, material_ids, spacegroups, feature_mean, feature_std
+    )
+
+    return (
+        X_std,
+        labels,
+        material_ids,
+        spacegroups,
+        structures_path,
+        feature_mean,
+        feature_std,
+    )
+
+
+def build_mace_dataset_for_run(
+    config: "RunConfig", cache_dir: Union[str, Path]
+) -> Tuple[np.ndarray, List[str], List[str], List[int], Path, np.ndarray, np.ndarray]:
+    """Dispatches to ``get_or_build_mace_dataset`` or
+    ``get_or_build_pyxtal_mace_dataset`` per ``config.data_source`` -- the
+    MACE-based counterpart to ``build_dataset_for_run``, called by
+    ``dim_red.pipeline.single_run.run_single`` only when
+    ``config.model_kind == "mace"``. Same 7-element SOAP-shaped return as
+    ``build_dataset_for_run`` (unlike ``build_graph_dataset_for_run``'s
+    5-element shape) -- MACE's body is frozen, so there is no per-atom graph
+    batch to carry forward for training; the final pooled embedding is all
+    any downstream step needs.
+    """
+    augmentation = _resolve_augmentation(config)
+    mace_kwargs = config.mace.mace_kwargs()
+    if config.data_source == "pyxtal":
+        seed = config.pyxtal.seed if config.pyxtal.seed is not None else config.seed
+        return get_or_build_pyxtal_mace_dataset(
+            pyxtal_config=config.pyxtal,
+            seed=seed,
+            mace_kwargs=mace_kwargs,
+            cache_dir=cache_dir,
+            augmentation=augmentation,
+        )
+    return get_or_build_mace_dataset(
+        crystal_systems=config.fetch.crystal_systems,
+        mace_kwargs=mace_kwargs,
+        limit_per_system=config.fetch.limit_per_system,
+        cache_dir=cache_dir,
+        api_key=config.fetch.api_key,
+        augmentation=augmentation,
+    )

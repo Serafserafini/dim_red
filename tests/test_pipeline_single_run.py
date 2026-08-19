@@ -30,6 +30,7 @@ from dim_red.pipeline.config import (
     EarlyStoppingConfig,
     FetchConfig,
     GraphConfig,
+    MaceConfig,
     PyxtalConfig,
     RunConfig,
     SoapConfig,
@@ -1249,6 +1250,105 @@ def test_run_single_cgcnn_auto_trains_visualization_tail(tmp_path):
     visualization_dir = run_dir / "tails" / "visualization"
     assert (visualization_dir / "tail_embeddings.npz").exists()
     assert (visualization_dir / "tail_params.msgpack").exists()
+
+
+# --- model_kind == "mace" -----------------------------------------------------
+#
+# dim_red.mace.model.MaceEncoder requires mace_jax (not installed in every
+# test environment), so it's mocked out entirely here -- the same pattern
+# tests/test_pipeline_dataset_cache.py uses. Reuses _fake_cgcnn_atoms/
+# _fake_fetch_cgcnn_with_spacegroups above (generic to any model_kind).
+
+
+class _FakeMaceEncoder:
+    """Deterministic stand-in for dim_red.mace.model.MaceEncoder: encode()
+    returns one fixed-width row per structure, ignoring atoms_list content.
+    ``params`` is a plain dict of numpy arrays -- flax.serialization can
+    (de)serialize any pytree of arrays, not just an nn.Module's output, so
+    this round-trips through run_single's model_params.msgpack save exactly
+    like a real MaceEncoder's frozen checkpoint params would.
+    """
+
+    _DIM = 3
+
+    def __init__(self, **kwargs):
+        self.params = {"dummy": np.zeros(1, dtype=np.float32)}
+
+    def encode(self, atoms_list):
+        rng = np.random.default_rng(0)
+        return rng.normal(size=(len(atoms_list), self._DIM)).astype(np.float32)
+
+
+def _make_mace_config(tmp_path, tails=None) -> RunConfig:
+    return RunConfig(
+        fetch=FetchConfig(crystal_systems=["cubic", "hexagonal"], limit_per_system=10),
+        soap=SoapConfig(),
+        vae=VAEArchConfig(encoder_hidden_dim=[1], latent_dim=1),
+        train=TrainSettings(device="cpu"),
+        mace=MaceConfig(checkpoint_path="/fake/ckpt", r_max=5.0),
+        seed=0,
+        output_dir=str(tmp_path / "runs"),
+        model_kind="mace",
+        tails=tails,
+    )
+
+
+def test_run_single_mace_writes_expected_artifacts(tmp_path):
+    config = _make_mace_config(tmp_path)
+    spacegroup_offsets = {"cubic": 195, "hexagonal": 168}
+
+    with (
+        patch(
+            "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
+            side_effect=_fake_fetch_cgcnn_with_spacegroups(spacegroup_offsets),
+        ),
+        patch("dim_red.mace.model.MaceEncoder", _FakeMaceEncoder),
+    ):
+        run_dir = run_single(config)
+
+    assert "model-mace" in run_dir.name
+    assert (run_dir / "config.yaml").exists()
+    assert (run_dir / "run.log").exists()
+    assert (run_dir / "dataset.extxyz").exists()
+    assert (run_dir / "embeddings.npz").exists()
+    assert (run_dir / "embeddings_plot.png").exists()
+    assert (run_dir / "model_params.msgpack").exists()
+    # No training loop at all for a frozen body -- no loss to report.
+    assert not (run_dir / "loss_history.csv").exists()
+
+    embeddings = np.load(run_dir / "embeddings.npz")
+    n_total = 20  # 2 crystal systems x limit_per_system=10
+    assert embeddings["embeddings"].shape == (n_total, 3)  # _FakeMaceEncoder._DIM
+    # SOAP-shaped payload (feature_mean/feature_std always present, unlike
+    # cgcnn's graph-shaped payload which omits them entirely).
+    assert "feature_mean" in embeddings.files
+    assert "feature_std" in embeddings.files
+    assert "features" in embeddings.files
+    # No classifier heads on a frozen body -- never saved for this model_kind.
+    assert "family_probs" not in embeddings.files
+    assert "spacegroup_probs" not in embeddings.files
+
+
+def test_run_single_mace_auto_trains_classification_tail(tmp_path):
+    tails = AutoTailsConfig(
+        classification=ClassificationTailConfig(mode="family_only"),
+        train=TailTrainSettings(epochs=1, batch_size=4),
+    )
+    config = _make_mace_config(tmp_path, tails=tails)
+    spacegroup_offsets = {"cubic": 195, "hexagonal": 168}
+
+    with (
+        patch(
+            "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
+            side_effect=_fake_fetch_cgcnn_with_spacegroups(spacegroup_offsets),
+        ),
+        patch("dim_red.mace.model.MaceEncoder", _FakeMaceEncoder),
+    ):
+        run_dir = run_single(config)
+
+    classification_dir = run_dir / "tails" / "classification"
+    assert (classification_dir / "tail_predictions.npz").exists()
+    assert (classification_dir / "tail_params.msgpack").exists()
 
 
 def test_run_single_tails_none_leaves_behavior_unchanged(tmp_path):

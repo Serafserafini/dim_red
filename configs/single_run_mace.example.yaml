@@ -1,0 +1,78 @@
+# Example config for a single pyxtal -> frozen MACE -> classifier-tail run:
+# a frozen, PRETRAINED equivariant body (Batatia et al. 2022, via the
+# mace_jax JAX/Flax port -- https://github.com/ACEsuit/mace-jax) captures
+# 3-body/angular interactions via higher-order equivariant message passing,
+# unlike CGCNN's pairwise-only graph. Unlike every other model_kind here,
+# there is NO training phase for the body at all: "phase 1" is a single
+# frozen forward pass through an already-pretrained foundation-model
+# checkpoint (e.g. MACE-MP-0), producing embeddings.npz directly -- no
+# loss_history.csv, no aux_heads classifier heads on the body itself. A
+# classifier on top of these embeddings only ever comes from the "tails"
+# block below (dim_red.pipeline.tail_training), same architecture-agnostic
+# machinery model: supcon/cgcnn already use for their own tails.
+#
+# REQUIRES mace_jax installed (pip install git+https://github.com/ACEsuit/mace-jax)
+# and a converted checkpoint -- see src/dim_red/mace/CLAUDE.md for the
+# one-time conversion step (mace-jax-from-torch, needs torch/mace-torch
+# temporarily, NOT a runtime dependency of dim_red itself).
+#
+# Run with: python -m dim_red.pipeline.cli --config configs/single_run_mace.example.yaml
+# or:       dimred-run configs/single_run_mace.example.yaml
+
+seed: 42
+output_dir: runs
+model: mace # "vae" (default), "autoencoder", "supcon", "cgcnn", or "mace"
+data_source: pyxtal # pyxtal recommended: guarantees a known family/spacegroup
+# label for every generated structure, needed by the "tails" classifier below.
+
+pyxtal:
+  families: [cubic, hexagonal, orthorhombic]
+  structures_per_family: 40
+  distribution: uniform
+  n_species: 2
+  seed: 42
+
+# "soap"/"graph" blocks are unused for model: mace -- it reads "mace" below
+# instead. Omitted here.
+
+# Same shared vae: block every model_kind carries -- entirely IGNORED for
+# model: mace (the embedding width comes from the loaded checkpoint itself,
+# not a config choice). Still needs *some* value below purely because
+# encoder_hidden_dim/latent_dim are required fields with no default -- same
+# pre-existing dummy-placeholder wart model: cgcnn configs already carry.
+vae:
+  encoder_hidden_dim: [1] # ignored for model: mace (dummy placeholder value)
+  latent_dim: 1 # ignored (dummy placeholder value)
+
+# Frozen MACE feature-extractor settings.
+mace:
+  # Path to a MACE-JAX checkpoint converted from a pretrained Torch
+  # foundation model -- see src/dim_red/mace/CLAUDE.md. REQUIRED (RunConfig
+  # raises at parse time if left empty for model: mace).
+  checkpoint_path: /path/to/converted/mace-mp-0-small
+  r_max: 6.0 # cutoff radius (Angstroms) -- MUST match what the checkpoint
+    # was pretrained with (see the checkpoint's own architecture config).
+  pooling: mean # "mean" (default) or "sum" -- how per-atom features are
+    # pooled into one per-structure representation.
+
+# aux_heads/supcon/graph/batching are all unused for model: mace (a frozen
+# body has no training objective of its own) -- omitted here.
+
+train:
+  device: cpu # the only train: field mace actually reads (no training loop,
+    # but MaceEncoder's forward pass still runs on this device)
+
+# Classification on frozen MACE embeddings ONLY ever comes from here -- the
+# body has no classifier heads of its own. Uncomment to auto-train right
+# after this run's embeddings.npz is written (the same
+# dim_red.pipeline.tail_training.train_tail entry point dimred-train-tail
+# uses manually).
+# tails:
+#   classification:
+#     mode: family_and_spacegroup
+#   visualization:
+#     viz_dim: 2
+#   train:
+#     epochs: 20
+#     batch_size: 32
+#     optimizer: adam

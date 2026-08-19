@@ -914,3 +914,201 @@ def test_build_graph_dataset_for_run_dispatches_to_pyxtal(tmp_path):
         build_graph_dataset_for_run(config, cache_dir=tmp_path)
 
     assert mock_generate.call_count == 1
+
+
+# --- MACE dataset (model_kind == "mace") -------------------------------------
+#
+# Unlike the CGCNN graph tests above, dim_red.mace.model.MaceEncoder itself
+# requires mace_jax (not installed in every test environment) -- but
+# importing dim_red.mace.model does NOT require it (mace_jax is only
+# imported lazily inside MaceEncoder.__init__), so MaceEncoder can be mocked
+# out here the same way compute_soap is mocked for the SOAP tests above,
+# with no pytest.importorskip needed.
+
+from dim_red.pipeline.config import MaceConfig
+from dim_red.pipeline.dataset_cache import (
+    _mace_cache_key,
+    _pyxtal_mace_cache_key,
+    build_mace_dataset_for_run,
+    get_or_build_mace_dataset,
+    get_or_build_pyxtal_mace_dataset,
+)
+
+
+def _mock_mace_encoder(fake_embeddings):
+    """A stand-in for dim_red.mace.model.MaceEncoder: encode() returns
+    fake_embeddings regardless of its atoms_list argument, ignoring
+    constructor args entirely (no real checkpoint needed).
+    """
+    instance = type("FakeMaceEncoder", (), {})()
+    instance.encode = lambda atoms_list: fake_embeddings
+    return lambda **kwargs: instance
+
+
+def test_get_or_build_mace_dataset_cache_miss_then_hit(tmp_path):
+    fake_atoms = [_fake_atoms("Cu", "mp-1", 225), _fake_atoms("Fe", "mp-2", 229)]
+    fake_embeddings = np.array([[1.0, 2.0], [3.0, 4.0]])
+    mace_kwargs = MaceConfig(checkpoint_path="/fake/ckpt", r_max=5.0).mace_kwargs()
+
+    with (
+        patch(
+            "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
+            return_value=fake_atoms,
+        ) as mock_fetch,
+        patch(
+            "dim_red.mace.model.MaceEncoder",
+            side_effect=_mock_mace_encoder(fake_embeddings),
+        ) as mock_encoder,
+    ):
+        X1, labels1, ids1, sg1, structures_path1, mean1, std1 = (
+            get_or_build_mace_dataset(
+                crystal_systems=["cubic"],
+                mace_kwargs=mace_kwargs,
+                limit_per_system=2,
+                cache_dir=tmp_path,
+            )
+        )
+
+        assert mock_fetch.call_count == 1
+        assert mock_encoder.call_count == 1
+        assert X1.shape == (2, 2)
+        assert labels1 == ["Cubic", "Cubic"]
+        assert ids1 == ["mp-1", "mp-2"]
+        assert sg1 == [225, 229]
+        np.testing.assert_allclose(mean1, fake_embeddings.mean(axis=0))
+        np.testing.assert_allclose(X1, (fake_embeddings - mean1) / std1)
+        assert structures_path1.exists()
+
+        # Second call with identical parameters should hit the cache and not
+        # call fetch/MaceEncoder again.
+        X2, labels2, ids2, sg2, structures_path2, mean2, std2 = (
+            get_or_build_mace_dataset(
+                crystal_systems=["cubic"],
+                mace_kwargs=mace_kwargs,
+                limit_per_system=2,
+                cache_dir=tmp_path,
+            )
+        )
+        assert mock_fetch.call_count == 1
+        assert mock_encoder.call_count == 1
+        np.testing.assert_allclose(X1, X2)
+        assert structures_path2 == structures_path1
+
+
+def test_get_or_build_pyxtal_mace_dataset_cache_miss_then_hit(tmp_path):
+    pytest.importorskip("pyxtal")
+    fake_atoms = [
+        _fake_generated_atoms("Cu", "pyxtal-225-0", 225, "Cubic"),
+        _fake_generated_atoms("Fe", "pyxtal-225-1", 225, "Cubic"),
+    ]
+    fake_embeddings = np.array([[1.0, 2.0], [3.0, 4.0]])
+    pyxtal_config = PyxtalConfig(spacegroups=[225], structures_per_spacegroup=2)
+    mace_kwargs = MaceConfig(checkpoint_path="/fake/ckpt", r_max=5.0).mace_kwargs()
+
+    with (
+        patch(
+            "dim_red.generate.generate_structures", return_value=fake_atoms
+        ) as mock_generate,
+        patch(
+            "dim_red.mace.model.MaceEncoder",
+            side_effect=_mock_mace_encoder(fake_embeddings),
+        ) as mock_encoder,
+    ):
+        X1, labels1, ids1, sg1, structures_path1, mean1, std1 = (
+            get_or_build_pyxtal_mace_dataset(
+                pyxtal_config=pyxtal_config,
+                seed=0,
+                mace_kwargs=mace_kwargs,
+                cache_dir=tmp_path,
+            )
+        )
+        assert mock_generate.call_count == 1
+        assert mock_encoder.call_count == 1
+        assert labels1 == ["Cubic", "Cubic"]
+        assert structures_path1.exists()
+
+        X2, labels2, ids2, sg2, structures_path2, mean2, std2 = (
+            get_or_build_pyxtal_mace_dataset(
+                pyxtal_config=pyxtal_config,
+                seed=0,
+                mace_kwargs=mace_kwargs,
+                cache_dir=tmp_path,
+            )
+        )
+        assert mock_generate.call_count == 1
+        assert mock_encoder.call_count == 1
+        np.testing.assert_allclose(X1, X2)
+        assert structures_path2 == structures_path1
+
+
+def test_mace_cache_key_prefixed_never_collides_with_soap_or_cgcnn_key():
+    mace_kwargs = MaceConfig(checkpoint_path="/fake/ckpt").mace_kwargs()
+    key = _mace_cache_key(["cubic"], 2, mace_kwargs)
+    assert key.startswith("mace-")
+    assert not key.startswith("mace-pyxtal-")
+
+
+def test_pyxtal_mace_cache_key_prefixed():
+    pyxtal_config = PyxtalConfig(spacegroups=[225], structures_per_spacegroup=2)
+    mace_kwargs = MaceConfig(checkpoint_path="/fake/ckpt").mace_kwargs()
+    key = _pyxtal_mace_cache_key(pyxtal_config, 0, mace_kwargs)
+    assert key.startswith("mace-pyxtal-")
+
+
+def _mace_run_config(data_source="fetch", pyxtal_config=None):
+    return RunConfig(
+        fetch=(
+            FetchConfig(crystal_systems=["cubic"], limit_per_system=2)
+            if data_source == "fetch"
+            else None
+        ),
+        soap=SoapConfig(),
+        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
+        train=TrainSettings(),
+        mace=MaceConfig(checkpoint_path="/fake/ckpt", r_max=5.0),
+        seed=0,
+        model_kind="mace",
+        data_source=data_source,
+        pyxtal=pyxtal_config,
+    )
+
+
+def test_build_mace_dataset_for_run_dispatches_to_fetch(tmp_path):
+    fake_atoms = [_fake_atoms("Cu", "mp-1", 225)]
+    fake_embeddings = np.array([[1.0, 2.0]])
+    config = _mace_run_config(data_source="fetch")
+
+    with (
+        patch(
+            "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
+            return_value=fake_atoms,
+        ) as mock_fetch,
+        patch(
+            "dim_red.mace.model.MaceEncoder",
+            side_effect=_mock_mace_encoder(fake_embeddings),
+        ),
+    ):
+        build_mace_dataset_for_run(config, cache_dir=tmp_path)
+
+    assert mock_fetch.call_count == 1
+
+
+def test_build_mace_dataset_for_run_dispatches_to_pyxtal(tmp_path):
+    pytest.importorskip("pyxtal")
+    fake_atoms = [_fake_generated_atoms("Cu", "pyxtal-225-0", 225, "Cubic")]
+    fake_embeddings = np.array([[1.0, 2.0]])
+    pyxtal_config = PyxtalConfig(spacegroups=[225], structures_per_spacegroup=1)
+    config = _mace_run_config(data_source="pyxtal", pyxtal_config=pyxtal_config)
+
+    with (
+        patch(
+            "dim_red.generate.generate_structures", return_value=fake_atoms
+        ) as mock_generate,
+        patch(
+            "dim_red.mace.model.MaceEncoder",
+            side_effect=_mock_mace_encoder(fake_embeddings),
+        ),
+    ):
+        build_mace_dataset_for_run(config, cache_dir=tmp_path)
+
+    assert mock_generate.call_count == 1

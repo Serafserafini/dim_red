@@ -20,7 +20,7 @@ logger = logging.getLogger("dim_red.pipeline")
 _AUX_HEADS_MODES = ("none", "family_only", "family_and_spacegroup")
 _SUPCON_MODES = ("family_only", "spacegroup_only", "family_and_spacegroup")
 _SUPCON_DISTANCES = ("euclidean", "cosine")
-_MODEL_KINDS = ("vae", "autoencoder", "supcon", "cgcnn")
+_MODEL_KINDS = ("vae", "autoencoder", "supcon", "cgcnn", "mace")
 _DATA_SOURCES = ("fetch", "pyxtal")
 _OPTIMIZER_KINDS = ("adam", "velo")
 
@@ -161,6 +161,58 @@ class GraphConfig:
             raise ValueError(
                 "graph.atom_fea_len/n_conv/h_fea_len/n_h must all be positive integers"
             )
+
+
+@dataclass(frozen=True)
+class MaceConfig:
+    """Config for ``RunConfig.model_kind == "mace"``: a frozen, pretrained
+    MACE (equivariant message-passing, 3-body/angular interactions) feature
+    extractor -- used *instead of* ``soap``/``graph`` for that model kind.
+    Unlike ``GraphConfig`` (which sizes a body trained from scratch),
+    ``mace`` never trains a body: ``checkpoint_path`` points to an already
+    -pretrained, already-converted checkpoint, and its architecture (and
+    therefore its output width) is whatever that checkpoint says, not
+    something this config chooses. There is deliberately no ``latent_dim``
+    field here, unlike ``GraphConfig``'s reuse of ``vae.latent_dim`` -- the
+    embedding width is read directly off the loaded checkpoint at run time.
+
+    See ``dim_red.mace.model.MaceEncoder``/``dim_red.mace.model.load_frozen_checkpoint``.
+
+    Attributes:
+        checkpoint_path: Path to a MACE-JAX checkpoint converted from a
+            pretrained Torch foundation model (e.g. MACE-MP-0) via
+            ``mace_jax``'s own ``mace-jax-from-torch`` CLI, run once outside
+            this codebase -- see ``src/dim_red/mace/CLAUDE.md``. Required
+            (non-empty) whenever ``model_kind == "mace"``.
+        r_max: Cutoff radius (Angstroms) for neighbor search -- MUST match
+            the cutoff the checkpoint was pretrained with.
+        pooling: ``"mean"`` (default) or ``"sum"`` -- how per-atom features
+            are pooled into one per-structure representation.
+    """
+
+    checkpoint_path: str = ""
+    r_max: float = 6.0
+    pooling: str = "mean"
+
+    def __post_init__(self):
+        if self.r_max <= 0:
+            raise ValueError("mace.r_max must be > 0")
+        if self.pooling not in ("mean", "sum"):
+            raise ValueError(
+                f"mace.pooling must be 'mean' or 'sum', got {self.pooling!r}"
+            )
+
+    def mace_kwargs(self) -> Dict[str, Any]:
+        """Keyword arguments for ``dim_red.mace.model.MaceEncoder`` -- mirrors
+        ``GraphConfig.graph_kwargs()``'s/``SoapConfig.as_kwargs()``'s role,
+        and doubles as the dataset-cache-key hashed payload (see
+        ``dim_red.pipeline.dataset_cache._mace_cache_key``).
+        """
+        return {
+            "checkpoint_path": self.checkpoint_path,
+            "r_max": self.r_max,
+            "pooling": self.pooling,
+        }
 
 
 @dataclass(frozen=True)
@@ -580,14 +632,25 @@ class RunConfig:
             all, single-phase, like ``"vae"``/``"autoencoder"``'s
             ``aux_heads`` pattern applied to a graph-convolutional body
             instead of a flat-feature encoder, always requires
-            ``aux_heads.mode != "none"``; see ``dim_red.cgcnn``). ``"vae"``/
+            ``aux_heads.mode != "none"``; see ``dim_red.cgcnn``), or
+            ``"mace"`` (a frozen, pretrained equivariant body -- see
+            ``dim_red.mace``; captures 3-body/angular interactions via
+            higher-order equivariant message passing, unlike ``"cgcnn"``'s
+            pairwise-only graph. Has no training phase of its own at all:
+            embeddings come from a forward pass through an already-pretrained
+            foundation-model checkpoint, so ``aux_heads``/``train`` (beyond
+            ``device``) don't apply to it -- classification only happens via
+            a ``tails`` classification tail, see below). ``"vae"``/
             ``"autoencoder"``/``"supcon"`` read their encoder architecture
             from ``vae`` (``encoder_hidden_dim``, ``latent_dim`` --
             ``decoder_hidden_dim``/``mirror`` are ignored by ``"supcon"``,
             same treatment ``"autoencoder"`` gives ``beta``); ``"cgcnn"``
             reads its graph-construction + architecture hyperparameters from
-            ``graph`` instead (only ``vae.latent_dim`` is still read).
-            ``"vae"``/``"autoencoder"``/``"cgcnn"`` read their aux-head
+            ``graph`` instead (only ``vae.latent_dim`` is still read);
+            ``"mace"`` reads its checkpoint path/cutoff from ``mace`` instead
+            -- its embedding width is whatever the loaded checkpoint says,
+            not a config choice, so ``vae.latent_dim`` isn't read at all for
+            it. ``"vae"``/``"autoencoder"``/``"cgcnn"`` read their aux-head
             settings from ``aux_heads``; ``"supcon"`` reads its loss
             settings from ``supcon`` instead (``aux_heads`` is ignored for
             it), and its training-batch sampling strategy from ``batching``
@@ -613,11 +676,14 @@ class RunConfig:
             this run's body finishes phase-1 training -- the same entry
             point ``dimred-train-tail`` uses manually, just invoked
             automatically. ``None`` (default) disables it, current behavior
-            unchanged. Ignored for ``model_kind not in ("supcon", "cgcnn")``
-            (a vae/autoencoder body already has its own classification heads
-            and no separate tail-training workflow makes sense for it), same
-            treatment ``aux_heads``/``supcon``/``batching`` get for the model
-            kinds they don't apply to. See ``AutoTailsConfig``.
+            unchanged. Ignored for ``model_kind not in ("supcon", "cgcnn",
+            "mace")`` (a vae/autoencoder body already has its own
+            classification heads and no separate tail-training workflow
+            makes sense for it), same treatment ``aux_heads``/``supcon``/
+            ``batching`` get for the model kinds they don't apply to -- for
+            ``"mace"`` this ``tails`` block is the *only* way to get a
+            classifier out of a mace run at all, since the frozen body has
+            no heads of its own. See ``AutoTailsConfig``.
     """
 
     soap: SoapConfig
@@ -627,6 +693,7 @@ class RunConfig:
     supcon: SupConConfig = field(default_factory=SupConConfig)
     batching: BatchingConfig = field(default_factory=BatchingConfig)
     graph: GraphConfig = field(default_factory=GraphConfig)
+    mace: MaceConfig = field(default_factory=MaceConfig)
     seed: int = 42
     output_dir: str = "runs"
     name: Optional[str] = None
@@ -656,6 +723,13 @@ class RunConfig:
                 "(family classification is CGCNN's only training objective, "
                 "unlike vae/autoencoder which can train an unsupervised "
                 "reconstruction objective alone)"
+            )
+        if self.model_kind == "mace" and not self.mace.checkpoint_path:
+            raise ValueError(
+                "model_kind='mace' requires mace.checkpoint_path to be set "
+                "(a frozen body has no training objective at all -- there is "
+                "nothing to build its architecture/weights from besides an "
+                "already-pretrained, already-converted checkpoint)"
             )
 
 
@@ -759,6 +833,7 @@ def run_config_from_dict(d: Dict[str, Any]) -> RunConfig:
     aux_heads = _dataclass_from_dict(AuxHeadsConfig, d.get("aux_heads", {}))
     supcon = _dataclass_from_dict(SupConConfig, d.get("supcon", {}))
     graph = _dataclass_from_dict(GraphConfig, d.get("graph", {}))
+    mace = _dataclass_from_dict(MaceConfig, d.get("mace", {}))
     batching_dict = d.get("batching", {})
     batching = BatchingConfig(
         strategy=str(batching_dict.get("strategy", "random")),
@@ -812,6 +887,7 @@ def run_config_from_dict(d: Dict[str, Any]) -> RunConfig:
         supcon=supcon,
         batching=batching,
         graph=graph,
+        mace=mace,
         seed=int(d.get("seed", 42)),
         output_dir=str(d.get("output_dir", "runs")),
         name=d.get("name"),
@@ -845,6 +921,7 @@ def run_config_to_dict(config: RunConfig) -> Dict[str, Any]:
         "supcon": dataclasses.asdict(config.supcon),
         "batching": dataclasses.asdict(config.batching),
         "graph": dataclasses.asdict(config.graph),
+        "mace": dataclasses.asdict(config.mace),
     }
     if config.fetch is not None:
         result["fetch"] = dataclasses.asdict(config.fetch)
@@ -1058,12 +1135,14 @@ class TailTrainSettings:
 @dataclass(frozen=True)
 class AutoTailsConfig:
     """Config for ``RunConfig.tails``: automatically train one or both tails
-    on a completed ``model_kind == "supcon"`` or ``model_kind == "cgcnn"``
-    run's frozen body, right after phase-1 training finishes -- the same
+    on a completed ``model_kind == "supcon"``, ``model_kind == "cgcnn"``, or
+    ``model_kind == "mace"`` run's frozen body, right after phase-1 finishes
+    (for ``"mace"``, "phase 1" is just the frozen forward pass that produces
+    ``embeddings.npz`` -- there is no training involved) -- the same
     ``dim_red.pipeline.tail_training.train_tail`` entry point
     ``dimred-train-tail`` uses, just invoked automatically instead of as a
     separate manual command. Ignored for ``model_kind not in ("supcon",
-    "cgcnn")``, same treatment ``aux_heads``/``supcon``/``batching`` already get for the model
+    "cgcnn", "mace")``, same treatment ``aux_heads``/``supcon``/``batching`` already get for the model
     kinds they don't apply to.
 
     Attributes:
