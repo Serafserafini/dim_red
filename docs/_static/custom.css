@@ -1,0 +1,13 @@
+/* Small refinements on top of Furo's defaults. */
+
+.admonition.scope-note {
+  border-left-color: var(--color-brand-primary);
+}
+
+dl.field-list > dt {
+  font-family: var(--font-stack--monospace);
+}
+
+table.docutils td, table.docutils th {
+  padding: 0.4rem 0.8rem;
+}

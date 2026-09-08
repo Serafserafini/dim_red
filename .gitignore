@@ -62,3 +62,6 @@ graphify-out/
 
 # Personal notes / scratch docs
 presentation_notes.md
+
+# Sphinx build output (docs/ source is versioned, the generated site is not)
+docs/_build/

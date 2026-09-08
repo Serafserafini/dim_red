@@ -47,6 +47,7 @@ def embedding_quality_metrics(
 
     For each name with >= 2 distinct valid labels and enough valid samples
     for the requested folds:
+
       - ``f"{name}_silhouette"``: ``sklearn.metrics.silhouette_score``, in
         ``[-1, 1]``.
       - ``f"{name}_kmeans_ari"`` / ``f"{name}_kmeans_nmi"``: fit

@@ -1,0 +1,7 @@
+# Documentation-only dependencies (not part of dim_red's runtime deps).
+# Install into the dmred env with: pip install -r docs/requirements.txt
+sphinx>=8
+furo
+myst-parser
+sphinx-design
+sphinx-copybutton
