@@ -70,6 +70,31 @@ intersphinx_mapping = {
     "python": ("https://docs.python.org/3", None),
 }
 
+# The CI docs build (see .github/workflows/docs.yml) does not install dim_red's
+# heavy scientific-stack runtime dependencies (jax, dscribe, pymatgen, ...) --
+# none of that is needed just to read a docstring/signature, and installing it
+# would make every docs build slow and dependent on those wheels building
+# cleanly on the runner. autodoc only needs to *import* these modules, so they
+# are mocked instead. dim_red.pipeline.config itself (the bulk of what's
+# autodoc'd on this site) doesn't even need this -- it only imports yaml.
+autodoc_mock_imports = [
+    # NOT matplotlib/numpy/scikit-learn -- those install cheaply and reliably
+    # via pip, and matplotlib in particular breaks when mocked (mpl_toolkits
+    # submodules do real class-construction work against it at import time).
+    "ase",
+    "pymatgen",
+    "mp_api",
+    "dscribe",
+    "jax",
+    "jaxlib",
+    "flax",
+    "optax",
+    "umap",
+    "learned_optimization",
+    "pyxtal",
+    "mace_jax",
+]
+
 # -- HTML output ----------------------------------------------------------
 html_theme = "furo"
 html_title = "dim_red field guide"

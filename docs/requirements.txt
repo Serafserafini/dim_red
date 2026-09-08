@@ -5,3 +5,12 @@ furo
 myst-parser
 sphinx-design
 sphinx-copybutton
+
+# Real (non-mocked) imports needed by the autodoc'd modules -- cheap, wheel-only
+# packages. Everything heavier (jax, dscribe, pymatgen, ...) is listed in
+# conf.py's autodoc_mock_imports instead, so the docs build never needs the
+# full dmred scientific-stack environment (see .github/workflows/docs.yml).
+pyyaml
+numpy
+matplotlib
+scikit-learn
