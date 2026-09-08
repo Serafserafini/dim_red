@@ -8,6 +8,7 @@ import yaml
 
 from dim_red.pipeline.config import (
     ClassificationTailConfig,
+    HierarchicalTailConfig,
     TailTrainConfig,
     TailTrainSettings,
     VisualizationTailConfig,
@@ -42,6 +43,16 @@ def _visualization_dict(**overrides):
     return d
 
 
+def _hierarchical_dict(**overrides):
+    d = {
+        "run_dir": "runs/example",
+        "tail_kind": "hierarchical",
+        "hierarchical": {"head_hidden_dim": 16, "min_samples_per_expert": 10},
+    }
+    d.update(overrides)
+    return d
+
+
 # --- TailTrainConfig validation ----------------------------------------------
 
 
@@ -58,6 +69,11 @@ def test_tail_train_config_classification_requires_block():
 def test_tail_train_config_visualization_requires_block():
     with pytest.raises(ValueError, match="requires a 'visualization' config block"):
         TailTrainConfig(run_dir="runs/x", tail_kind="visualization")
+
+
+def test_tail_train_config_hierarchical_requires_block():
+    with pytest.raises(ValueError, match="requires a 'hierarchical' config block"):
+        TailTrainConfig(run_dir="runs/x", tail_kind="hierarchical")
 
 
 def test_tail_train_config_defaults_output_subdir_to_none():
@@ -128,6 +144,27 @@ def test_visualization_tail_config_defaults():
     assert config.lambda_norm == 0.0
     assert config.hidden_dim is None
     assert config.batching.strategy == "random"
+
+
+# --- HierarchicalTailConfig ----------------------------------------------------
+
+
+def test_hierarchical_tail_config_defaults():
+    config = HierarchicalTailConfig()
+    assert config.head_hidden_dim == 16
+    assert config.min_samples_per_expert == 10
+
+
+def test_hierarchical_tail_config_rejects_non_positive_head_hidden_dim():
+    with pytest.raises(ValueError, match="head_hidden_dim must be a positive integer"):
+        HierarchicalTailConfig(head_hidden_dim=0)
+
+
+def test_hierarchical_tail_config_rejects_non_positive_min_samples_per_expert():
+    with pytest.raises(
+        ValueError, match="min_samples_per_expert must be a positive integer"
+    ):
+        HierarchicalTailConfig(min_samples_per_expert=0)
 
 
 # --- YAML parsing / round-trip ------------------------------------------------
@@ -201,6 +238,32 @@ def test_tail_train_config_to_dict_roundtrips_visualization(tmp_path):
     assert reloaded == config
     assert reloaded.visualization.viz_dim == 3
     assert reloaded.visualization.hidden_dim == [16, 8]
+
+
+def test_load_tail_train_config_hierarchical(tmp_path):
+    d = _hierarchical_dict()
+    d["hierarchical"]["min_samples_per_expert"] = 5
+    path = _write_yaml(tmp_path / "tail.yaml", d)
+    config = load_tail_train_config(path)
+
+    assert config.tail_kind == "hierarchical"
+    assert config.hierarchical.head_hidden_dim == 16
+    assert config.hierarchical.min_samples_per_expert == 5
+    assert config.classification is None
+    assert config.visualization is None
+
+
+def test_tail_train_config_to_dict_roundtrips_hierarchical(tmp_path):
+    d = _hierarchical_dict()
+    d["output_subdir"] = "my-hierarchical"
+    path = _write_yaml(tmp_path / "tail.yaml", d)
+    config = load_tail_train_config(path)
+
+    saved_path = _write_yaml(tmp_path / "saved.yaml", tail_train_config_to_dict(config))
+    reloaded = load_tail_train_config(saved_path)
+
+    assert reloaded == config
+    assert reloaded.output_subdir == "my-hierarchical"
 
 
 # --- TailTrainSettings.optimizer ---------------------------------------------

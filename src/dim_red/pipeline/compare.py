@@ -859,6 +859,28 @@ def classification_accuracies_from_npz(npz: Dict[str, np.ndarray]) -> Dict[str, 
     return accs
 
 
+def hierarchical_accuracies_from_npz(npz: Dict[str, np.ndarray]) -> Dict[str, float]:
+    """Family/spacegroup/spacegroup-oracle accuracy for a
+    ``dim_red.pipeline.tail_training`` hierarchical tail's
+    ``tail_predictions.npz``.
+
+    Same ``family``/``spacegroup`` keys as ``classification_accuracies_from_npz``
+    (computed the exact same way, since a hierarchical tail's payload shares
+    that same schema -- ``spacegroup`` here already reflects the honest,
+    end-to-end pipeline: stage 1's *predicted* family picked which per-family
+    expert produced ``spacegroup_probs``), plus ``spacegroup_oracle`` when
+    ``spacegroup_probs_oracle`` is present -- accuracy if stage 1's *true*
+    family had been used to pick the expert instead, isolating expert
+    quality from stage-1 routing quality. Returns an empty dict if none of
+    the expected keys are present.
+    """
+    accs = classification_accuracies_from_npz(npz)
+    if "spacegroup_probs_oracle" in npz and "spacegroups" in npz:
+        pred = npz["spacegroup_classes"][npz["spacegroup_probs_oracle"].argmax(axis=1)]
+        accs["spacegroup_oracle"] = float((pred == npz["spacegroups"]).mean())
+    return accs
+
+
 def plot_aux_accuracy_comparison(
     runs: List[RunData],
     save_path: Optional[Union[str, Path]] = None,

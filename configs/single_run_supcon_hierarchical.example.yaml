@@ -1,0 +1,53 @@
+# Quick try-it-out config for the hierarchical (family -> per-family
+# spacegroup expert) tail: a small pyxtal -> SOAP -> SupCon body run with
+# tails.hierarchical enabled, so `dimred-run` trains the body AND the
+# hierarchical tail in one shot. Uses data_source: pyxtal (no MP_API_KEY
+# needed) since pyxtal's family is a deterministic function of spacegroup,
+# making the hierarchy easiest to sanity-check.
+# Run with: dimred-run configs/single_run_supcon_hierarchical.example.yaml
+# (or: python -m dim_red.pipeline.cli --config configs/single_run_supcon_hierarchical.example.yaml)
+
+seed: 42
+output_dir: runs_hierarchical
+model: supcon
+data_source: pyxtal
+
+pyxtal:
+  families: [cubic, hexagonal, orthorhombic]
+  structures_per_family: 30
+  distribution: uniform
+  n_species: 2
+  seed: 42
+
+soap:
+  r_cut: 5.0
+  n_max: 4
+  l_max: 3
+  sigma: 0.5
+  species: null
+
+vae:
+  encoder_hidden_dim: [64, 32]
+  latent_dim: 8
+
+supcon:
+  mode: family_and_spacegroup
+  tau: 0.1
+  projection_dim: 32
+
+train:
+  epochs: 10
+  batch_size: 32
+  optimizer: adam
+  val_ratio: 0.2
+  device: cpu
+
+# The new bit: auto-train a hierarchical tail right after the body finishes.
+tails:
+  hierarchical:
+    head_hidden_dim: 16
+    min_samples_per_expert: 10
+  train:
+    epochs: 20
+    batch_size: 32
+    optimizer: adam

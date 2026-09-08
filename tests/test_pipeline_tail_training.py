@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import numpy as np
 import pytest
+import yaml
 from ase import Atoms
 
 pytest.importorskip("jax")
@@ -22,6 +23,7 @@ from dim_red.pipeline.config import (
     ClassificationTailConfig,
     FetchConfig,
     GraphConfig,
+    HierarchicalTailConfig,
     MaceConfig,
     RunConfig,
     SoapConfig,
@@ -266,6 +268,110 @@ def test_train_tail_visualization_balanced_batching(tmp_path):
     tail_dir = train_tail(config)
 
     assert (tail_dir / "tail_embeddings.npz").exists()
+
+
+def test_train_tail_hierarchical_writes_expected_artifacts(tmp_path):
+    run_dir = _train_supcon_run(tmp_path)
+    config = TailTrainConfig(
+        run_dir=str(run_dir),
+        tail_kind="hierarchical",
+        hierarchical=HierarchicalTailConfig(
+            head_hidden_dim=8, min_samples_per_expert=5
+        ),
+        train=TailTrainSettings(epochs=2, batch_size=4),
+    )
+
+    tail_dir = train_tail(config)
+
+    assert tail_dir.parent.name == "tails"
+    assert tail_dir.name == "hierarchical"
+    assert (tail_dir / "tail_config.yaml").exists()
+    assert (tail_dir / "tail_predictions.npz").exists()
+    assert (tail_dir / "family_expert_status.yaml").exists()
+    assert (tail_dir / "run.log").exists()
+
+    # Stage 1 (family).
+    assert (tail_dir / "family" / "tail_params.msgpack").exists()
+    assert (tail_dir / "family" / "loss_history.csv").exists()
+
+    # Both families ("Cubic"/"Hexagonal") have enough training rows (7/8,
+    # both >= min_samples_per_expert=5) and 2 distinct spacegroups each -->
+    # both get a dedicated expert, not a fallback.
+    with open(tail_dir / "family_expert_status.yaml") as f:
+        status = yaml.safe_load(f)["families"]
+    status_by_family = {entry["family"]: entry for entry in status}
+    assert set(status_by_family) == {"Cubic", "Hexagonal"}
+    for family, entry in status_by_family.items():
+        assert entry["expert"] is True
+        assert entry["n_local_spacegroup_classes"] == 2
+        expert_dir = tail_dir / "experts" / family
+        assert (expert_dir / "tail_params.msgpack").exists()
+        assert (expert_dir / "loss_history.csv").exists()
+        assert (expert_dir / "local_spacegroup_classes.yaml").exists()
+
+    predictions = np.load(tail_dir / "tail_predictions.npz")
+    n_total = 20  # 2 crystal systems x limit_per_system=10
+    assert predictions["family_probs"].shape == (n_total, 2)
+    assert predictions["spacegroup_probs"].shape[0] == n_total
+    assert (
+        predictions["spacegroup_probs_oracle"].shape
+        == predictions["spacegroup_probs"].shape
+    )
+    np.testing.assert_allclose(
+        predictions["family_probs"].sum(axis=1), np.ones(n_total), atol=1e-4
+    )
+    np.testing.assert_allclose(
+        predictions["spacegroup_probs"].sum(axis=1), np.ones(n_total), atol=1e-4
+    )
+    np.testing.assert_allclose(
+        predictions["spacegroup_probs_oracle"].sum(axis=1), np.ones(n_total), atol=1e-4
+    )
+    assert predictions["labels"].shape[0] == n_total
+    assert predictions["spacegroups"].shape[0] == n_total
+
+    # Same plot suite as "classification" (family + spacegroup, train + val).
+    for level in ("family", "spacegroup"):
+        for split in ("train", "val"):
+            for kind in ("confusion_matrix", "classification_report", "calibration"):
+                assert (tail_dir / f"{kind}_{level}_{split}.png").exists()
+
+    with open(tail_dir / "run.log") as f:
+        run_log = f.read()
+    assert "Training tail_kind=hierarchical" in run_log
+    assert "Tail artifacts saved to" in run_log
+
+
+def test_train_tail_hierarchical_falls_back_for_low_sample_families(tmp_path):
+    run_dir = _train_supcon_run(tmp_path)
+    config = TailTrainConfig(
+        run_dir=str(run_dir),
+        tail_kind="hierarchical",
+        # Both families have well under 100 training rows -- forces every
+        # family into the majority-value fallback, no expert trained.
+        hierarchical=HierarchicalTailConfig(
+            head_hidden_dim=8, min_samples_per_expert=100
+        ),
+        train=TailTrainSettings(epochs=1, batch_size=4),
+    )
+
+    tail_dir = train_tail(config)
+
+    with open(tail_dir / "family_expert_status.yaml") as f:
+        status = yaml.safe_load(f)["families"]
+    assert len(status) == 2
+    for entry in status:
+        assert entry["expert"] is False
+        assert isinstance(entry["fallback_spacegroup"], int)
+    assert not (tail_dir / "experts").exists()
+
+    predictions = np.load(tail_dir / "tail_predictions.npz")
+    # Every fallback prediction is a one-hot distribution over the fallback
+    # spacegroup -- still a valid probability distribution.
+    np.testing.assert_allclose(
+        predictions["spacegroup_probs"].sum(axis=1),
+        np.ones(predictions["spacegroup_probs"].shape[0]),
+        atol=1e-4,
+    )
 
 
 def test_train_tail_rejects_non_supcon_run(tmp_path):

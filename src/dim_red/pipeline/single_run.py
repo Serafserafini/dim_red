@@ -943,6 +943,18 @@ def run_single(
                     )
                 )
                 logger.info("Auto-trained visualization tail saved to %s", tail_dir)
+            if config.tails.hierarchical is not None:
+                logger.info("Auto-training hierarchical tail on this run")
+                tail_dir = train_tail(
+                    TailTrainConfig(
+                        run_dir=str(run_dir),
+                        tail_kind="hierarchical",
+                        hierarchical=config.tails.hierarchical,
+                        train=config.tails.train,
+                        seed=config.seed,
+                    )
+                )
+                logger.info("Auto-trained hierarchical tail saved to %s", tail_dir)
 
         logger.info("Run complete: artifacts saved to %s", run_dir)
     finally:

@@ -32,6 +32,7 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.patches import Patch
 
 from dim_red.analysis.metrics import embedding_quality_metrics
 from dim_red.pca import PCA
@@ -131,18 +132,25 @@ def run_classification_accuracies(run: RunData) -> Dict[str, float]:
     predictions (e.g. a supcon body, or any run without auxiliary heads),
     falls back to ``<run_dir>/tails/classification/tail_predictions.npz`` if
     present (a supcon or cgcnn classification tail -- same payload keys, see
-    ``dim_red.pipeline.compare.classification_accuracies_from_npz``). Only
-    checks that exact path, not a dedup-suffixed ``tails/classification-2``
-    from a repeated manual ``dimred-train-tail`` call. Returns ``{}`` if
-    neither source has classifier predictions.
+    ``dim_red.pipeline.compare.classification_accuracies_from_npz``), then to
+    ``<run_dir>/tails/hierarchical/tail_predictions.npz`` (a hierarchical
+    tail -- same ``family``/``spacegroup`` payload keys, see
+    ``dim_red.pipeline.compare.hierarchical_accuracies_from_npz`` for its
+    extra ``spacegroup_oracle`` number, not surfaced here). Only checks those
+    exact paths, not a dedup-suffixed ``tails/classification-2``/
+    ``tails/hierarchical-2`` from a repeated manual ``dimred-train-tail``
+    call. Returns ``{}`` if none of these sources has classifier predictions.
     """
     accs = classification_accuracies_from_npz(run.embeddings)
     if accs:
         return accs
-    tail_predictions = run.run_dir / "tails" / "classification" / "tail_predictions.npz"
-    if tail_predictions.exists():
-        with np.load(tail_predictions) as npz:
-            return classification_accuracies_from_npz(dict(npz.items()))
+    for tail_kind in ("classification", "hierarchical"):
+        tail_predictions = run.run_dir / "tails" / tail_kind / "tail_predictions.npz"
+        if tail_predictions.exists():
+            with np.load(tail_predictions) as npz:
+                accs = classification_accuracies_from_npz(dict(npz.items()))
+            if accs:
+                return accs
     return {}
 
 
@@ -347,6 +355,24 @@ def _model_kind_colors(model_kinds: Sequence[str]) -> Dict[str, Any]:
     return {kind: cmap(i % 10) for i, kind in enumerate(sorted(set(model_kinds)))}
 
 
+def _add_model_kind_legend(fig: Any, colors: Dict[str, Any]) -> None:
+    """Add one shared legend to ``fig`` mapping each ``model_kind`` to its
+    box color (``colors``, from ``_model_kind_colors``), sorted by name.
+    """
+    handles = [
+        Patch(facecolor=color, alpha=0.7, label=kind)
+        for kind, color in sorted(colors.items())
+    ]
+    fig.legend(
+        handles=handles,
+        loc="lower center",
+        ncol=min(len(handles), 6),
+        bbox_to_anchor=(0.5, -0.05),
+        fontsize=8,
+        title="model_kind",
+    )
+
+
 def _boxplot_by_model_kind(
     ax: Any,
     grouped: Dict[str, List[float]],
@@ -427,6 +453,7 @@ def plot_classification_accuracy_by_model_kind(
         ax.set_ylim(0, 1.05)
     fig.suptitle("Classification accuracy by model_kind")
     fig.tight_layout()
+    _add_model_kind_legend(fig, colors)
 
     if save_path:
         fig.savefig(save_path, dpi=200, bbox_inches="tight")
@@ -514,6 +541,7 @@ def plot_2d_quality_by_model_kind(
                 ax.axis("off")
     fig.suptitle("2D embedding quality by model_kind")
     fig.tight_layout()
+    _add_model_kind_legend(fig, colors)
 
     if save_path:
         fig.savefig(save_path, dpi=200, bbox_inches="tight")

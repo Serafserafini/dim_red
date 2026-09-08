@@ -56,3 +56,9 @@ experiments/
 
 # Slurm output files
 slurm-*.out
+
+# Graphify
+graphify-out/
+
+# Personal notes / scratch docs
+presentation_notes.md

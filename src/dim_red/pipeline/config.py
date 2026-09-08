@@ -671,8 +671,9 @@ class RunConfig:
             after the dataset is built, before SOAP. ``None`` (default)
             disables it, current behavior unchanged. Applies regardless of
             ``data_source``. See ``AugmentationConfig``.
-        tails: Optionally auto-train a classification and/or visualization
-            tail (``dim_red.pipeline.tail_training.train_tail``) right after
+        tails: Optionally auto-train a classification, visualization, and/or
+            hierarchical tail (``dim_red.pipeline.tail_training.train_tail``)
+            right after
             this run's body finishes phase-1 training -- the same entry
             point ``dimred-train-tail`` uses manually, just invoked
             automatically. ``None`` (default) disables it, current behavior
@@ -820,6 +821,18 @@ def _parse_visualization_tail_config(
     return dataclasses.replace(visualization, batching=batching)
 
 
+def _parse_hierarchical_tail_config(
+    d: Dict[str, Any]
+) -> Optional["HierarchicalTailConfig"]:
+    """Parse a ``hierarchical:`` block, shared by ``RunConfig.tails`` and
+    ``TailTrainConfig``."""
+    return (
+        _dataclass_from_dict(HierarchicalTailConfig, d["hierarchical"])
+        if "hierarchical" in d
+        else None
+    )
+
+
 def load_yaml(path: Union[str, Path]) -> Dict[str, Any]:
     with open(path, "r") as f:
         return yaml.safe_load(f)
@@ -854,6 +867,7 @@ def run_config_from_dict(d: Dict[str, Any]) -> RunConfig:
         AutoTailsConfig(
             classification=_parse_classification_tail_config(tails_dict),
             visualization=_parse_visualization_tail_config(tails_dict),
+            hierarchical=_parse_hierarchical_tail_config(tails_dict),
             train=_parse_train_settings(TailTrainSettings, tails_dict.get("train", {})),
         )
         if tails_dict is not None
@@ -937,6 +951,8 @@ def run_config_to_dict(config: RunConfig) -> Dict[str, Any]:
             )
         if config.tails.visualization is not None:
             tails_dict["visualization"] = dataclasses.asdict(config.tails.visualization)
+        if config.tails.hierarchical is not None:
+            tails_dict["hierarchical"] = dataclasses.asdict(config.tails.hierarchical)
         result["tails"] = tails_dict
     return result
 
@@ -1009,7 +1025,7 @@ def expand_sweep(sweep: SweepConfig) -> List[RunConfig]:
 # dataset from scratch, so it gets its own top-level YAML shape and loader
 # rather than being nested under RunConfig.
 
-_TAIL_KINDS = ("classification", "visualization")
+_TAIL_KINDS = ("classification", "visualization", "hierarchical")
 _CLASSIFICATION_TAIL_MODES = ("family_only", "family_and_spacegroup")
 
 
@@ -1105,6 +1121,43 @@ class VisualizationTailConfig:
 
 
 @dataclass(frozen=True)
+class HierarchicalTailConfig:
+    """Config for ``TailTrainConfig.tail_kind == "hierarchical"``: a
+    genuinely two-stage classifier, as opposed to
+    ``ClassificationTailConfig``'s single family-masked spacegroup head.
+    Stage 1 is a ``dim_red.supcon.tails.ClassificationTail`` (family-only
+    mode) predicting family; stage 2 is one independent, separately-trained
+    ``ClassificationTail`` (also family-only mode -- its "family" slot is
+    reused to mean "spacegroup, local to this one family") *per family*,
+    trained only on that family's own rows and only over the spacegroups
+    actually observed within it. Routing at prediction time uses stage 1's
+    predicted family to pick which expert runs -- see
+    ``dim_red.pipeline.tail_training``.
+
+    Attributes:
+        head_hidden_dim: Hidden width of each head's single hidden layer --
+            shared by the family stage and every per-family expert (no
+            per-family tuning in this first pass).
+        min_samples_per_expert: A family with fewer than this many training
+            rows, or fewer than 2 distinct spacegroups observed within it,
+            gets no dedicated expert at all -- it falls back to always
+            predicting that family's single most frequent training-set
+            spacegroup instead (see ``family_expert_status.yaml``).
+    """
+
+    head_hidden_dim: int = 16
+    min_samples_per_expert: int = 10
+
+    def __post_init__(self):
+        if self.head_hidden_dim <= 0:
+            raise ValueError("hierarchical.head_hidden_dim must be a positive integer")
+        if self.min_samples_per_expert <= 0:
+            raise ValueError(
+                "hierarchical.min_samples_per_expert must be a positive integer"
+            )
+
+
+@dataclass(frozen=True)
 class TailTrainSettings:
     """Training-loop mechanics for phase 2, mirroring the relevant subset of
     ``RunConfig.train`` (``TrainSettings``) -- no ``beta``/``val_ratio``:
@@ -1152,12 +1205,17 @@ class AutoTailsConfig:
             default disables it). A run/sweep can set both to get a
             classification tail AND a visualization tail out of a single
             ``dimred-run``/``dimred-sweep`` invocation.
+        hierarchical: Auto-train a hierarchical (family stage + per-family
+            spacegroup experts) tail when set (``None`` default disables
+            it) -- can be combined with ``classification``/``visualization``
+            in the same run/sweep.
         train: Training-loop mechanics shared by whichever tail(s) are
             enabled -- same shape as ``TailTrainConfig.train``.
     """
 
     classification: Optional[ClassificationTailConfig] = None
     visualization: Optional[VisualizationTailConfig] = None
+    hierarchical: Optional[HierarchicalTailConfig] = None
     train: TailTrainSettings = field(default_factory=TailTrainSettings)
 
 
@@ -1168,9 +1226,10 @@ class TailTrainConfig:
     visualization) on top of it -- see ``dim_red.pipeline.tail_training``.
 
     Attributes:
-        tail_kind: ``"classification"`` or ``"visualization"`` -- which tail
-            to train. Exactly one of ``classification``/``visualization``
-            must be set, matching this.
+        tail_kind: ``"classification"``, ``"visualization"``, or
+            ``"hierarchical"`` -- which tail to train. Exactly one of
+            ``classification``/``visualization``/``hierarchical`` must be
+            set, matching this.
         run_dir: Path to a completed ``model: supcon`` run directory (must
             contain at least ``config.yaml``/``embeddings.npz`` --
             ``dim_red.pipeline.inference.load_run_embeddings``'s required
@@ -1188,6 +1247,7 @@ class TailTrainConfig:
             still ``None`` by the time training actually starts.
         classification: Required when ``tail_kind == "classification"``.
         visualization: Required when ``tail_kind == "visualization"``.
+        hierarchical: Required when ``tail_kind == "hierarchical"``.
         train: Training-loop mechanics.
         seed: Seed for the tail's own parameter initialization.
         output_subdir: Directory name under ``<run_dir>/tails/`` this tail's
@@ -1199,6 +1259,7 @@ class TailTrainConfig:
     run_dir: Optional[str] = None
     classification: Optional[ClassificationTailConfig] = None
     visualization: Optional[VisualizationTailConfig] = None
+    hierarchical: Optional[HierarchicalTailConfig] = None
     train: TailTrainSettings = field(default_factory=TailTrainSettings)
     seed: int = 42
     output_subdir: Optional[str] = None
@@ -1216,6 +1277,10 @@ class TailTrainConfig:
             raise ValueError(
                 "tail_kind='visualization' requires a 'visualization' config block."
             )
+        if self.tail_kind == "hierarchical" and self.hierarchical is None:
+            raise ValueError(
+                "tail_kind='hierarchical' requires a 'hierarchical' config block."
+            )
 
 
 def tail_train_config_from_dict(d: Dict[str, Any]) -> TailTrainConfig:
@@ -1225,6 +1290,7 @@ def tail_train_config_from_dict(d: Dict[str, Any]) -> TailTrainConfig:
     train = _parse_train_settings(TailTrainSettings, d.get("train", {}))
     classification = _parse_classification_tail_config(d)
     visualization = _parse_visualization_tail_config(d)
+    hierarchical = _parse_hierarchical_tail_config(d)
 
     run_dir = d.get("run_dir")
     return TailTrainConfig(
@@ -1232,6 +1298,7 @@ def tail_train_config_from_dict(d: Dict[str, Any]) -> TailTrainConfig:
         tail_kind=tail_kind,
         classification=classification,
         visualization=visualization,
+        hierarchical=hierarchical,
         train=train,
         seed=int(d.get("seed", 42)),
         output_subdir=d.get("output_subdir"),
@@ -1258,4 +1325,6 @@ def tail_train_config_to_dict(config: TailTrainConfig) -> Dict[str, Any]:
         result["classification"] = dataclasses.asdict(config.classification)
     if config.visualization is not None:
         result["visualization"] = dataclasses.asdict(config.visualization)
+    if config.hierarchical is not None:
+        result["hierarchical"] = dataclasses.asdict(config.hierarchical)
     return result

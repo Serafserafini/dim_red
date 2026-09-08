@@ -16,10 +16,12 @@ from dim_red.pipeline.compare import (
     LatentUmapParams,
     _abbreviate_hyperparam_key,
     available_loss_metrics,
+    classification_accuracies_from_npz,
     compute_embedding_baselines,
     discover_runs,
     final_metric_groups,
     generate_comparison_report,
+    hierarchical_accuracies_from_npz,
     latent_grid_axes,
     load_runs,
     plot_aux_accuracy_comparison,
@@ -721,3 +723,71 @@ def test_available_loss_metrics_intersects_across_runs_with_different_columns(tm
         "train_kl",
         "val_kl",
     ]
+
+
+# --- classification_accuracies_from_npz / hierarchical_accuracies_from_npz --
+
+
+def _classification_npz(n_family_correct=3, n_family=4, with_spacegroup=True):
+    family_classes = np.array(["Cubic", "Tetragonal"])
+    labels = np.array(
+        ["Cubic"] * n_family_correct + ["Tetragonal"] * (n_family - n_family_correct)
+    )
+    # family_probs favors the true class for the first n_family_correct rows,
+    # and is wrong (favors the other class) for the rest.
+    family_probs = np.zeros((n_family, 2))
+    for i, label in enumerate(labels):
+        correct_col = 0 if label == "Cubic" else 1
+        wrong_col = 1 - correct_col
+        if i < n_family_correct:
+            family_probs[i, correct_col] = 1.0
+        else:
+            family_probs[i, wrong_col] = 1.0
+    npz = dict(family_classes=family_classes, labels=labels, family_probs=family_probs)
+    if with_spacegroup:
+        spacegroup_classes = np.array([1, 2])
+        spacegroups = np.array([1] * n_family)
+        spacegroup_probs = np.tile(np.array([1.0, 0.0]), (n_family, 1))
+        npz.update(
+            spacegroup_classes=spacegroup_classes,
+            spacegroups=spacegroups,
+            spacegroup_probs=spacegroup_probs,
+        )
+    return npz
+
+
+def test_classification_accuracies_from_npz_empty_dict_returns_empty():
+    assert classification_accuracies_from_npz({}) == {}
+
+
+def test_classification_accuracies_from_npz_family_only():
+    npz = _classification_npz(with_spacegroup=False)
+    accs = classification_accuracies_from_npz(npz)
+    assert accs == {"family": 3 / 4}
+
+
+def test_classification_accuracies_from_npz_family_and_spacegroup():
+    npz = _classification_npz()
+    accs = classification_accuracies_from_npz(npz)
+    assert accs["family"] == 3 / 4
+    assert accs["spacegroup"] == 1.0
+
+
+def test_hierarchical_accuracies_from_npz_matches_classification_when_no_oracle():
+    npz = _classification_npz()
+    assert hierarchical_accuracies_from_npz(npz) == classification_accuracies_from_npz(
+        npz
+    )
+
+
+def test_hierarchical_accuracies_from_npz_reports_oracle_separately():
+    npz = _classification_npz()
+    # The oracle predictions are perfect, unlike the (family-routed)
+    # end-to-end spacegroup_probs -- exercises that the two accuracies are
+    # computed and reported independently.
+    n = npz["spacegroups"].shape[0]
+    npz["spacegroup_probs_oracle"] = np.tile(np.array([1.0, 0.0]), (n, 1))
+    accs = hierarchical_accuracies_from_npz(npz)
+    assert accs["family"] == 3 / 4
+    assert accs["spacegroup"] == 1.0
+    assert accs["spacegroup_oracle"] == 1.0

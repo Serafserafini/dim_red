@@ -45,7 +45,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+import jax
 import numpy as np
+import yaml
 from ase import Atoms
 from ase.io import read as read_atoms
 from flax import serialization
@@ -54,6 +56,7 @@ from dim_red.analysis.plotting import plot_applied_structures
 from dim_red.pipeline.compare import LatentUmapParams, make_umap
 from dim_red.pipeline.config import RunConfig, load_run_config
 from dim_red.soap import compute_soap
+from dim_red.supcon.tails import ClassificationTail
 from dim_red.utils import apply_standardization, fit_standardization
 
 logger = logging.getLogger("dim_red.pipeline")
@@ -589,3 +592,185 @@ def apply_model_to_structures(
     logger.info("Saved applied-structures latent-space plot to %s", plot_path)
 
     return output_dir
+
+
+def _sanitize_family_dirname(family: str) -> str:
+    """Turn a family label into the same filesystem-safe directory name
+    ``dim_red.pipeline.tail_training._train_hierarchical_tail`` used to name
+    ``tails/hierarchical/experts/<name>/`` -- duplicated here (not imported)
+    since ``tail_training`` itself imports ``load_run_embeddings`` from this
+    module, and importing back from ``tail_training`` would be circular.
+    """
+    safe = "".join(c if (c.isalnum() or c in "-_") else "_" for c in str(family))
+    return safe or "unknown"
+
+
+def load_classification_tail(
+    tail_params_path: Union[str, Path],
+    input_dim: int,
+    hidden_dim: int,
+    n_family_classes: Optional[int] = None,
+    n_spacegroup_classes: Optional[int] = None,
+    seed: int = 42,
+) -> ClassificationTail:
+    """Reconstruct a ``dim_red.supcon.tails.ClassificationTail`` and reload
+    its trained weights from a saved ``tail_params.msgpack`` -- the same
+    "rebuild architecture, then ``flax.serialization.from_bytes`` its
+    weights" pattern ``load_trained_run``'s ``_build_model`` uses for a
+    run's own ``model_params.msgpack``. The caller supplies the exact
+    architecture (``hidden_dim``/class counts) the tail was originally built
+    with -- ``tail_params.msgpack`` carries only its trained weights, not its
+    own shape.
+    """
+    tail = ClassificationTail(
+        input_dim=input_dim,
+        hidden_dim=hidden_dim,
+        n_family_classes=n_family_classes,
+        n_spacegroup_classes=n_spacegroup_classes,
+        seed=seed,
+    )
+    with open(tail_params_path, "rb") as f:
+        tail.params = serialization.from_bytes(tail.params, f.read())
+    return tail
+
+
+@dataclass
+class HierarchicalPrediction:
+    """Per-structure output of ``predict_hierarchical``, one entry per row
+    of the ``atoms_list`` it was called with, in the same order.
+
+    Attributes:
+        family_pred: Predicted family (stage 1's argmax class name).
+        family_probs: Stage 1's softmax probabilities, shape
+            ``(n, n_family_classes)``.
+        spacegroup_pred: Predicted spacegroup number -- stage 2's argmax
+            (mapped back through its expert's local vocabulary), or that
+            family's recorded fallback value when it has no dedicated
+            expert.
+        spacegroup_probs: Stage 2's softmax probabilities over its expert's
+            local vocabulary, or ``None`` for a row whose predicted family
+            fell back to a fixed majority value instead (there is no
+            distribution to report there -- see
+            ``dim_red.pipeline.tail_training._train_hierarchical_tail``'s
+            ``family_expert_status.yaml``).
+    """
+
+    family_pred: List[str]
+    family_probs: np.ndarray
+    spacegroup_pred: np.ndarray
+    spacegroup_probs: List[Optional[np.ndarray]]
+
+
+def predict_hierarchical(
+    run_dir: Union[str, Path],
+    atoms_list: List[Atoms],
+    hierarchical_subdir: str = "hierarchical",
+) -> HierarchicalPrediction:
+    """Apply a hierarchical tail (see
+    ``dim_red.pipeline.tail_training._train_hierarchical_tail``) to
+    brand-new structures: encode them through the run's frozen body
+    (``load_trained_run``/``encode_structures``), predict family with
+    stage 1, then route each structure to its *predicted* family's own
+    stage-2 expert (or that family's recorded majority-value fallback, if it
+    has none) to predict spacegroup -- the real, deployable two-stage
+    pipeline this tail was trained for, unlike ``tail_predictions.npz``
+    (computed only on the training run's own dataset).
+
+    Args:
+        run_dir: Path to a completed run directory that also has a trained
+            hierarchical tail under ``<run_dir>/tails/<hierarchical_subdir>/``.
+        atoms_list: New ASE ``Atoms`` to predict on -- same species
+            restriction as ``encode_structures``.
+        hierarchical_subdir: Which ``tails/`` subdirectory to load the
+            hierarchical tail from (``"hierarchical"`` by default, i.e. no
+            ``output_subdir`` override was used when it was trained).
+
+    Returns:
+        A ``HierarchicalPrediction``.
+
+    Raises:
+        FileNotFoundError: If no completed hierarchical tail is found at
+            that path.
+        ValueError: If ``atoms_list`` is empty.
+    """
+    run_dir = Path(run_dir)
+    tail_dir = run_dir / "tails" / hierarchical_subdir
+    family_dir = tail_dir / "family"
+    if not (family_dir / "tail_params.msgpack").exists():
+        raise FileNotFoundError(
+            f"{family_dir} has no tail_params.msgpack -- {tail_dir} doesn't "
+            "look like a completed hierarchical tail (see "
+            "dim_red.pipeline.tail_training.train_tail with "
+            "tail_kind='hierarchical')"
+        )
+
+    with np.load(tail_dir / "tail_predictions.npz") as npz:
+        family_classes = [str(c) for c in npz["family_classes"].tolist()]
+    with open(tail_dir / "family_expert_status.yaml") as f:
+        status_by_family = {
+            entry["family"]: entry for entry in yaml.safe_load(f)["families"]
+        }
+    with open(tail_dir / "tail_config.yaml") as f:
+        head_hidden_dim = int(yaml.safe_load(f)["hierarchical"]["head_hidden_dim"])
+
+    loaded = load_trained_run(run_dir)
+    r = encode_structures(loaded, atoms_list)
+    input_dim = r.shape[1]
+
+    family_tail = load_classification_tail(
+        family_dir / "tail_params.msgpack",
+        input_dim=input_dim,
+        hidden_dim=head_hidden_dim,
+        n_family_classes=len(family_classes),
+    )
+    family_probs = np.asarray(jax.nn.softmax(family_tail.classify_family(r), axis=-1))
+    family_pred_ids = family_probs.argmax(axis=1)
+    family_pred = [family_classes[i] for i in family_pred_ids]
+
+    n = len(atoms_list)
+    spacegroup_pred = np.zeros(n, dtype=np.int64)
+    spacegroup_probs: List[Optional[np.ndarray]] = [None] * n
+    expert_cache: Dict[str, Any] = {}
+
+    for family_name in set(family_pred):
+        rows = [i for i, f in enumerate(family_pred) if f == family_name]
+        status = status_by_family[family_name]
+        if not status["expert"]:
+            fallback_value = int(status["fallback_spacegroup"])
+            for i in rows:
+                spacegroup_pred[i] = fallback_value
+            continue
+
+        if family_name not in expert_cache:
+            expert_dir = tail_dir / "experts" / _sanitize_family_dirname(family_name)
+            with open(expert_dir / "local_spacegroup_classes.yaml") as f:
+                local_classes = yaml.safe_load(f)["local_spacegroup_classes"]
+            expert_tail = load_classification_tail(
+                expert_dir / "tail_params.msgpack",
+                input_dim=input_dim,
+                hidden_dim=head_hidden_dim,
+                n_family_classes=len(local_classes),
+            )
+            expert_cache[family_name] = (expert_tail, local_classes)
+        expert_tail, local_classes = expert_cache[family_name]
+
+        local_probs = np.asarray(
+            jax.nn.softmax(expert_tail.classify_family(r[rows]), axis=-1)
+        )
+        local_pred_ids = local_probs.argmax(axis=1)
+        for row_pos, i in enumerate(rows):
+            spacegroup_pred[i] = local_classes[local_pred_ids[row_pos]]
+            spacegroup_probs[i] = local_probs[row_pos]
+
+    logger.info(
+        "Predicted family+spacegroup for %d new structures via hierarchical "
+        "tail at %s",
+        n,
+        tail_dir,
+    )
+    return HierarchicalPrediction(
+        family_pred=family_pred,
+        family_probs=family_probs,
+        spacegroup_pred=spacegroup_pred,
+        spacegroup_probs=spacegroup_probs,
+    )
