@@ -1,0 +1,120 @@
+# Stage 1 (within-kind hyperparameter tuning), family-only variant of
+# configs/tuning_sweep_supcon.example.yaml -- spacegroup completely
+# ignored for this round (supcon.mode: family_only, no
+# lambda_spacegroup). All 7 pyxtal families (not the 4-family dev
+# subset), with augmentation to reach a larger effective dataset --
+# identical pyxtal/soap/augmentation fragment shared with
+# configs/tuning_sweep_{vae,autoencoder}_family_only.example.yaml so
+# slurm/warmup_shared_dataset.py's cache-key check passes.
+#
+# tails.classification is fixed on (not swept, mode: family_only) so every
+# run in this sweep gets a `family` accuracy in dimred-benchmark's table
+# via its tails/classification/tail_predictions.npz -- supcon has no
+# built-in classifier heads.
+#
+# Selection criterion: read the resulting dimred-benchmark table/plots
+# together with the other two family_only sweeps (vae, autoencoder) --
+# primary = family classification accuracy (from the auto-trained tail)
+# and family_2d_silhouette/family_2d_knn_accuracy (2D-visualization
+# proxy); secondary = val_loss (comparable within this sweep only, since
+# every run here shares the same contrastive objective). No automatic
+# winner selection.
+#
+# Run with: dimred-sweep configs/tuning_sweep_supcon_family_only.example.yaml --cache-dir runs/_shared_dataset_cache_family_only
+
+base:
+  seed: 42
+  output_dir: runs/tuning_supcon_family_only
+  model: supcon
+  data_source: pyxtal
+
+  pyxtal:
+    families: [triclinic, monoclinic, orthorhombic, tetragonal, trigonal, hexagonal, cubic]
+    structures_per_family: 500
+    distribution: uniform
+    n_species: 2
+    seed: 42
+
+  soap:
+    r_cut: 5.0
+    n_max: 4
+    l_max: 3
+    sigma: 0.5
+    element_agnostic: false
+    normalize_distances: false
+    species: null
+
+  augmentation:
+    n_augmented: 4
+    keep_original: true
+    jitter_probability: 0.5
+    jitter_std: 0.05
+    vacancy_probability: 0.5
+    vacancy_atom_probability: 1
+    max_vacancies: 1
+    supercell_radius: 4.0
+    seed: 42
+
+  vae:
+    encoder_hidden_dim: [128] # overridden by the grid below
+    latent_dim: 8
+    mirror: true
+
+  supcon:
+    mode: family_only
+    lambda_family: 1.0
+    tau: 0.1 # overridden by the grid below
+    distance: euclidean # overridden by the grid below
+    lambda_norm: 0.0
+    projection_dim: 128
+
+  # K/S only take effect for the runs where the grid below picks
+  # batching.strategy: balanced; harmlessly ignored for the "random" runs.
+  # S: null (not an explicit count) since spacegroup stratification isn't
+  # meaningful this round -- null means "every spacegroup present", the
+  # same no-op-for-our-purposes behavior regardless of what value is used.
+  batching:
+    strategy: random # overridden by the grid below
+    balanced_params: {P: null, K: 16, S: null}
+
+  tails:
+    classification:
+      mode: family_only
+      head_hidden_dim: 16
+    train:
+      epochs: 40
+      batch_size: 32
+      optimizer: adam
+      device: gpu
+      early_stopping:
+        enabled: true
+        patience: 10
+        min_delta: 0.0001
+        restore_best_weights: true
+
+  train:
+    epochs: 100
+    batch_size: 32
+    learning_rate: 0.001
+    optimizer: adam
+    val_ratio: 0.2
+    device: gpu
+    early_stopping:
+      enabled: true
+      patience: 10
+      min_delta: 0.0001
+      restore_best_weights: true
+
+# 2 encoder shapes x 2 tau values x 2 distances x 2 batching strategies =
+# 16 runs, all sharing one cached dataset build. lambda_norm stays fixed
+# at 0.0 (not gridded) -- it's mainly useful with distance: euclidean, and
+# gridding it jointly with distance would need a conditional grid the flat
+# Cartesian `grid:` mechanism can't express without wasting combinations;
+# left for a later round once euclidean vs cosine is decided.
+grid:
+  vae.encoder_hidden_dim:
+    - [64]
+    - [128, 64]
+  supcon.tau: [0.05, 0.1]
+  supcon.distance: [euclidean, cosine]
+  batching.strategy: [random, balanced]

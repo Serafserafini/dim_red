@@ -1,0 +1,84 @@
+# Stage 1 (within-kind hyperparameter tuning), family-only variant of
+# configs/tuning_sweep_autoencoder.example.yaml -- spacegroup completely
+# ignored for this round (aux_heads.mode: family_only, no
+# lambda_spacegroup). No train.beta -- unused for this model_kind (no KL
+# term). All 7 pyxtal families (not the 4-family dev subset), with
+# augmentation to reach a larger effective dataset -- identical
+# pyxtal/soap/augmentation fragment shared with
+# configs/tuning_sweep_{vae,supcon}_family_only.example.yaml so
+# slurm/warmup_shared_dataset.py's cache-key check passes.
+#
+# Selection criterion: read the resulting dimred-benchmark table/plots
+# together with the other two family_only sweeps (vae, supcon) -- primary
+# = family classification accuracy; secondary = family_2d_silhouette/
+# family_2d_knn_accuracy (2D-visualization proxy); tertiary sanity check =
+# val_recon (equal to val_loss for this model_kind) within this sweep
+# only. No automatic winner selection.
+#
+# Run with: dimred-sweep configs/tuning_sweep_autoencoder_family_only.example.yaml --cache-dir runs/_shared_dataset_cache_family_only
+
+base:
+  seed: 42
+  output_dir: runs/tuning_autoencoder_family_only
+  model: autoencoder
+  data_source: pyxtal
+
+  pyxtal:
+    families: [triclinic, monoclinic, orthorhombic, tetragonal, trigonal, hexagonal, cubic]
+    structures_per_family: 500
+    distribution: uniform
+    n_species: 2
+    seed: 42
+
+  soap:
+    r_cut: 5.0
+    n_max: 4
+    l_max: 3
+    sigma: 0.5
+    element_agnostic: false
+    normalize_distances: false
+    species: null
+
+  augmentation:
+    n_augmented: 4
+    keep_original: true
+    jitter_probability: 0.5
+    jitter_std: 0.05
+    vacancy_probability: 0.5
+    vacancy_atom_probability: 1
+    max_vacancies: 1
+    supercell_radius: 4.0
+    seed: 42
+
+  vae:
+    encoder_hidden_dim: [128] # overridden by the grid below
+    latent_dim: 8 # overridden by the grid below
+    mirror: true
+
+  aux_heads:
+    mode: family_only
+    lambda_family: 1.0 # overridden by the grid below
+    head_hidden_dim: 16
+
+  train:
+    epochs: 100
+    batch_size: 32
+    learning_rate: 0.001
+    optimizer: adam
+    val_ratio: 0.2
+    device: gpu
+    early_stopping:
+      enabled: true
+      patience: 10
+      min_delta: 0.0001
+      restore_best_weights: true
+
+# 3 encoder shapes x 2 latent_dim values x 2 lambda_family values = 12
+# runs, all sharing one cached dataset build.
+grid:
+  vae.encoder_hidden_dim:
+    - [64]
+    - [128, 64]
+    - [128, 64, 32]
+  vae.latent_dim: [4, 8]
+  aux_heads.lambda_family: [0.5, 2.0]
