@@ -1,16 +1,31 @@
 """
-Phase 2 pipeline entry point: freeze an already-trained ``model: supcon`` or
-``model: cgcnn`` run's body and train exactly one tail (classification,
-visualization, or hierarchical) on its saved representations -- see
-``dim_red.supcon.tail_training`` for the actual training loops (reused
-as-is regardless of which body produced the representations, since neither
-training loop ever touches the body itself), and ``dim_red.pipeline.inference``
-for ``load_run_embeddings``, the lightweight loader used here: this module
-only ever needs a run's ``config.yaml``/``embeddings.npz``, never the
-reconstructed body itself (no forward pass, no encoding), so it deliberately
-does *not* use ``load_trained_run`` (which would also reconstruct the model,
-resolve species, and compute/recompute standardization stats -- all wasted
-work for training a tail on already-saved representations).
+Phase 2 pipeline entry point: freeze an already-trained run's body and train
+exactly one tail (classification, visualization, or hierarchical) on its
+saved representations -- see ``dim_red.supcon.tail_training`` for the actual
+training loops (reused as-is regardless of which body produced the
+representations, since neither training loop ever touches the body itself),
+and ``dim_red.pipeline.inference`` for ``load_run_embeddings``, the
+lightweight loader used here: this module only ever needs a run's
+``config.yaml``/``embeddings.npz``, never the reconstructed body itself (no
+forward pass, no encoding), so it deliberately does *not* use
+``load_trained_run`` (which would also reconstruct the model, resolve
+species, and compute/recompute standardization stats -- all wasted work for
+training a tail on already-saved representations).
+
+Which ``model_kind``s a given ``tail_kind`` accepts is gated per-tail-kind by
+``_TAIL_MODEL_KINDS`` below, not by one blanket allowlist: ``"visualization"``
+works for *any* model_kind, including ``"vae"``/``"autoencoder"`` -- their
+``aux_heads`` classification heads have no equivalent low-dimensional
+*visualization* projection of their own, so a visualization tail there is a
+genuinely new capability, not a duplicate of anything they already produce.
+``"classification"``/``"hierarchical"`` still require ``"supcon"``/
+``"cgcnn"``/``"mace"``: a vae/autoencoder body already has its own
+classification heads via ``aux_heads``, so those two tail kinds would be
+pure duplication for it (same reasoning ``cgcnn``'s own classification tail
+support already documents -- redundant with its built-in heads, but harmless
+for ablation/comparison; that reasoning simply doesn't extend to
+vae/autoencoder, which have no separate tail-training workflow for anything
+*except* visualization).
 
 Reuses phase 1's exact train/val split (``embeddings.npz["split"]``) and
 representations (``embeddings.npz["embeddings"]``) -- no SOAP recompute ever
@@ -68,6 +83,15 @@ from dim_red.supcon.tails import (
 )
 
 logger = logging.getLogger("dim_red.pipeline")
+
+# Which model_kinds a given tail_kind may be trained against -- see the
+# module docstring above for the reasoning. Keyed by config.TailTrainConfig
+# .tail_kind's own three valid values.
+_TAIL_MODEL_KINDS: Dict[str, Tuple[str, ...]] = {
+    "classification": ("supcon", "cgcnn", "mace"),
+    "visualization": ("supcon", "cgcnn", "mace", "vae", "autoencoder"),
+    "hierarchical": ("supcon", "cgcnn", "mace"),
+}
 
 
 def _make_unique_run_dir(output_dir: Path, name: str) -> Path:
@@ -446,10 +470,14 @@ def _train_hierarchical_tail(
 
 
 def train_tail(config: TailTrainConfig) -> Path:
-    """Freeze a completed ``model: supcon`` run's body and train exactly one
-    tail (classification, visualization, or hierarchical) on its already-saved
+    """Freeze a completed run's body and train exactly one tail
+    (classification, visualization, or hierarchical) on its already-saved
     representations, saving the tail's own artifacts to
-    ``<run_dir>/tails/<output_subdir or tail_kind>/``.
+    ``<run_dir>/tails/<output_subdir or tail_kind>/``. Which ``model_kind``s
+    are accepted depends on ``config.tail_kind`` -- see
+    ``_TAIL_MODEL_KINDS``: ``"visualization"`` accepts any model_kind;
+    ``"classification"``/``"hierarchical"`` still require
+    ``"supcon"``/``"cgcnn"``/``"mace"``.
 
     Args:
         config: Which run/tail/hyperparameters to train -- see
@@ -475,8 +503,8 @@ def train_tail(config: TailTrainConfig) -> Path:
 
     Raises:
         ValueError: If ``config.run_dir`` is unset, or wasn't produced by a
-            ``model_kind == "supcon"``, ``model_kind == "cgcnn"``, or
-            ``model_kind == "mace"`` run.
+            run whose ``model_kind`` is allowed for ``config.tail_kind`` --
+            see ``_TAIL_MODEL_KINDS``.
     """
     if config.run_dir is None:
         raise ValueError(
@@ -486,13 +514,16 @@ def train_tail(config: TailTrainConfig) -> Path:
         )
     run_dir = Path(config.run_dir)
     loaded = load_run_embeddings(run_dir)
-    if loaded.config.model_kind not in ("supcon", "cgcnn", "mace"):
+    allowed_model_kinds = _TAIL_MODEL_KINDS[config.tail_kind]
+    if loaded.config.model_kind not in allowed_model_kinds:
         raise ValueError(
             f"{run_dir} is a model_kind={loaded.config.model_kind!r} run -- "
-            "tail training requires a completed model_kind='supcon', "
-            "model_kind='cgcnn', or model_kind='mace' run (a vae/autoencoder "
-            "body already has its own classification heads and no separate "
-            "tail-training workflow makes sense for it)"
+            f"tail_kind={config.tail_kind!r} requires a completed run whose "
+            f"model_kind is one of {allowed_model_kinds} (classification/"
+            "hierarchical tails are redundant with vae/autoencoder's own "
+            "built-in aux_heads classification, so those two tail kinds "
+            "aren't offered for them; a visualization tail has no such "
+            "built-in equivalent and works for any model_kind)"
         )
 
     output_subdir = config.output_subdir or config.tail_kind

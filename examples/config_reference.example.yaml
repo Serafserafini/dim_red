@@ -195,18 +195,21 @@ train:
     min_delta: 0.0
     restore_best_weights: true # keep the best-val_loss epoch's params, not necessarily the last
 
-# --- model: supcon / cgcnn only: auto-train tails ---------------------------
-# Automatically train a classification and/or visualization tail on this
-# run's frozen body right after phase-1 training finishes -- the same
-# dim_red.pipeline.tail_training.train_tail entry point dimred-train-tail
+# --- auto-train tails --------------------------------------------------------
+# Automatically train a classification, visualization, and/or hierarchical
+# tail on this run's frozen body right after phase-1 training finishes -- the
+# same dim_red.pipeline.tail_training.train_tail entry point dimred-train-tail
 # uses, invoked automatically instead of as a separate manual command.
-# Ignored for model not in ("supcon", "cgcnn") -- a vae/autoencoder body
-# already has its own classification heads and no separate tail-training
-# workflow makes sense for it. For cgcnn, a classification tail is redundant
-# with its own built-in heads above but harmless (useful for ablation); a
-# visualization tail is genuinely useful since vae.latent_dim need not be 2.
-# Omit this block entirely (default: null) to disable, current behavior
-# unchanged.
+# classification/hierarchical are ignored for model not in ("supcon",
+# "cgcnn", "mace") -- a vae/autoencoder body already has its own
+# classification heads (aux_heads above) and no separate tail-training
+# workflow makes sense for either of those two tail kinds. For cgcnn, a
+# classification tail is redundant with its own built-in heads above but
+# harmless (useful for ablation). visualization, however, is offered for
+# *every* model_kind, including vae/autoencoder -- genuinely useful since
+# vae.latent_dim need not be 2, and aux_heads has no visualization
+# equivalent of its own. Omit this block entirely (default: null) to
+# disable, current behavior unchanged.
 
 tails: null # example block, all fields at their default:
   # classification: null # set to auto-train a classification tail, e.g.:

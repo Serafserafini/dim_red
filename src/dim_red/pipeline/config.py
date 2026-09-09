@@ -677,14 +677,21 @@ class RunConfig:
             this run's body finishes phase-1 training -- the same entry
             point ``dimred-train-tail`` uses manually, just invoked
             automatically. ``None`` (default) disables it, current behavior
-            unchanged. Ignored for ``model_kind not in ("supcon", "cgcnn",
-            "mace")`` (a vae/autoencoder body already has its own
-            classification heads and no separate tail-training workflow
-            makes sense for it), same treatment ``aux_heads``/``supcon``/
+            unchanged. ``classification``/``hierarchical`` are ignored for
+            ``model_kind not in ("supcon", "cgcnn", "mace")`` (a
+            vae/autoencoder body already has its own classification heads
+            via ``aux_heads``, so those two tail kinds would be pure
+            duplication for it), same treatment ``aux_heads``/``supcon``/
             ``batching`` get for the model kinds they don't apply to -- for
             ``"mace"`` this ``tails`` block is the *only* way to get a
             classifier out of a mace run at all, since the frozen body has
-            no heads of its own. See ``AutoTailsConfig``.
+            no heads of its own. ``visualization``, however, applies to
+            *every* model_kind, including ``"vae"``/``"autoencoder"`` -- a
+            learned, class-separating low-dimensional projection has no
+            built-in equivalent there (``aux_heads`` only ever produces a
+            classifier, never a visualization), so it isn't redundant the
+            way a classification/hierarchical tail would be. See
+            ``AutoTailsConfig``, ``dim_red.pipeline.tail_training._TAIL_MODEL_KINDS``.
     """
 
     soap: SoapConfig
@@ -1187,28 +1194,37 @@ class TailTrainSettings:
 
 @dataclass(frozen=True)
 class AutoTailsConfig:
-    """Config for ``RunConfig.tails``: automatically train one or both tails
-    on a completed ``model_kind == "supcon"``, ``model_kind == "cgcnn"``, or
-    ``model_kind == "mace"`` run's frozen body, right after phase-1 finishes
-    (for ``"mace"``, "phase 1" is just the frozen forward pass that produces
-    ``embeddings.npz`` -- there is no training involved) -- the same
-    ``dim_red.pipeline.tail_training.train_tail`` entry point
+    """Config for ``RunConfig.tails``: automatically train one or more tails
+    on a completed run's frozen body, right after phase-1 finishes (for
+    ``model_kind == "mace"``, "phase 1" is just the frozen forward pass that
+    produces ``embeddings.npz`` -- there is no training involved) -- the
+    same ``dim_red.pipeline.tail_training.train_tail`` entry point
     ``dimred-train-tail`` uses, just invoked automatically instead of as a
-    separate manual command. Ignored for ``model_kind not in ("supcon",
-    "cgcnn", "mace")``, same treatment ``aux_heads``/``supcon``/``batching`` already get for the model
-    kinds they don't apply to.
+    separate manual command.
+
+    Which ``model_kind``s each tail applies to differs per tail kind (see
+    ``dim_red.pipeline.tail_training._TAIL_MODEL_KINDS``):
+    ``classification``/``hierarchical`` are ignored for ``model_kind not in
+    ("supcon", "cgcnn", "mace")`` (redundant with vae/autoencoder's own
+    ``aux_heads`` classification heads), same treatment
+    ``aux_heads``/``supcon``/``batching`` already get for the model kinds
+    they don't apply to; ``visualization`` applies to *every* model_kind
+    instead, since none of them have a built-in equivalent to a learned,
+    class-separating low-dimensional projection.
 
     Attributes:
         classification: Auto-train a classification tail when set (``None``
-            default disables it).
+            default disables it). Ignored for ``model_kind not in
+            ("supcon", "cgcnn", "mace")``.
         visualization: Auto-train a visualization tail when set (``None``
-            default disables it). A run/sweep can set both to get a
-            classification tail AND a visualization tail out of a single
-            ``dimred-run``/``dimred-sweep`` invocation.
+            default disables it) -- for *any* model_kind. A run/sweep can
+            set both to get a classification tail AND a visualization tail
+            out of a single ``dimred-run``/``dimred-sweep`` invocation.
         hierarchical: Auto-train a hierarchical (family stage + per-family
             spacegroup experts) tail when set (``None`` default disables
             it) -- can be combined with ``classification``/``visualization``
-            in the same run/sweep.
+            in the same run/sweep. Ignored for ``model_kind not in
+            ("supcon", "cgcnn", "mace")``.
         train: Training-loop mechanics shared by whichever tail(s) are
             enabled -- same shape as ``TailTrainConfig.train``.
     """
@@ -1222,16 +1238,21 @@ class AutoTailsConfig:
 @dataclass(frozen=True)
 class TailTrainConfig:
     """Fully resolved configuration for phase 2: freeze an already-trained
-    supcon run's body and train exactly one tail (classification or
-    visualization) on top of it -- see ``dim_red.pipeline.tail_training``.
+    run's body and train exactly one tail (classification, visualization, or
+    hierarchical) on top of it -- see ``dim_red.pipeline.tail_training``.
+    Which ``model_kind``s a given ``tail_kind`` accepts is documented on
+    ``dim_red.pipeline.tail_training._TAIL_MODEL_KINDS``: ``visualization``
+    works for any model_kind, ``classification``/``hierarchical`` require
+    ``model: supcon``/``cgcnn``/``mace``.
 
     Attributes:
         tail_kind: ``"classification"``, ``"visualization"``, or
             ``"hierarchical"`` -- which tail to train. Exactly one of
             ``classification``/``visualization``/``hierarchical`` must be
             set, matching this.
-        run_dir: Path to a completed ``model: supcon`` run directory (must
-            contain at least ``config.yaml``/``embeddings.npz`` --
+        run_dir: Path to a completed run directory whose ``model_kind`` is
+            allowed for ``tail_kind`` (must contain at least
+            ``config.yaml``/``embeddings.npz`` --
             ``dim_red.pipeline.inference.load_run_embeddings``'s required
             set; ``dataset.extxyz``/``model_params.msgpack`` aren't needed
             for tail training at all). ``None`` (default) leaves it unset

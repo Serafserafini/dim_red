@@ -35,9 +35,13 @@ reverse of what ``vae``/``autoencoder``/``cgcnn`` do; ``mace`` ignores
 ``config.aux_heads``/``config.supcon`` entirely (a frozen body has no
 training objective, so no loss settings apply). A completed
 ``supcon``/``cgcnn``/``mace`` run's frozen body can then have a
-classification or visualization tail trained on top of it separately -- see
-``dim_red.pipeline.tail_training`` (for ``mace``, this is the *only* way to
-get a classifier out of it, since the frozen body has no heads of its own).
+classification, visualization, or hierarchical tail trained on top of it
+separately -- see ``dim_red.pipeline.tail_training`` (for ``mace``, this is
+the *only* way to get a classifier out of it, since the frozen body has no
+heads of its own). A completed ``vae``/``autoencoder`` run can *also* have a
+visualization tail trained on top of it (but not classification/
+hierarchical, redundant with their own ``aux_heads``) -- see
+``dim_red.pipeline.tail_training._TAIL_MODEL_KINDS``.
 """
 
 from __future__ import annotations
@@ -918,8 +922,19 @@ def run_single(
         # added to this same "dim_red.pipeline" logger while ours is still
         # attached, so this run's run.log ends up containing a full trace of
         # any auto-triggered tail training too.
-        if (is_supcon or is_cgcnn or is_mace) and config.tails is not None:
-            if config.tails.classification is not None:
+        #
+        # Unlike classification/hierarchical (gated to is_supcon/is_cgcnn/
+        # is_mace -- see tail_training._TAIL_MODEL_KINDS, redundant with
+        # vae/autoencoder's own aux_heads classification), a visualization
+        # tail is offered for every model_kind: silently skipped (not an
+        # error) for the model kinds a given tail_kind doesn't apply to,
+        # same treatment aux_heads/supcon/batching already get.
+        can_classify_or_hierarchical_tail = is_supcon or is_cgcnn or is_mace
+        if config.tails is not None:
+            if (
+                config.tails.classification is not None
+                and can_classify_or_hierarchical_tail
+            ):
                 logger.info("Auto-training classification tail on this run")
                 tail_dir = train_tail(
                     TailTrainConfig(
@@ -943,7 +958,10 @@ def run_single(
                     )
                 )
                 logger.info("Auto-trained visualization tail saved to %s", tail_dir)
-            if config.tails.hierarchical is not None:
+            if (
+                config.tails.hierarchical is not None
+                and can_classify_or_hierarchical_tail
+            ):
                 logger.info("Auto-training hierarchical tail on this run")
                 tail_dir = train_tail(
                     TailTrainConfig(

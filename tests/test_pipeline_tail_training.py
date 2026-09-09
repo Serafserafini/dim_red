@@ -94,7 +94,7 @@ def _train_supcon_run(tmp_path, projection_dim=6, latent_dim=3):
     return run_dir
 
 
-def _train_a_vae_run(tmp_path):
+def _train_a_vae_run(tmp_path, model_kind="vae"):
     config = RunConfig(
         fetch=FetchConfig(crystal_systems=["cubic"], limit_per_system=8),
         soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
@@ -102,7 +102,7 @@ def _train_a_vae_run(tmp_path):
         train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
         seed=0,
         output_dir=str(tmp_path / "runs"),
-        model_kind="vae",
+        model_kind=model_kind,
     )
     fake_atoms = [_fake_atoms("Cu", f"mp-{i}", 1) for i in range(8)]
     with (
@@ -117,6 +117,10 @@ def _train_a_vae_run(tmp_path):
     ):
         run_dir = run_single(config)
     return run_dir
+
+
+def _train_an_autoencoder_run(tmp_path):
+    return _train_a_vae_run(tmp_path, model_kind="autoencoder")
 
 
 def test_train_tail_classification_writes_expected_artifacts(tmp_path):
@@ -374,18 +378,49 @@ def test_train_tail_hierarchical_falls_back_for_low_sample_families(tmp_path):
     )
 
 
-def test_train_tail_rejects_non_supcon_run(tmp_path):
+@pytest.mark.parametrize("tail_kind", ["classification", "hierarchical"])
+def test_train_tail_rejects_classification_and_hierarchical_for_vae_run(
+    tmp_path, tail_kind
+):
+    # classification/hierarchical are redundant with vae/autoencoder's own
+    # aux_heads classification, so they stay restricted to supcon/cgcnn/mace
+    # -- unlike visualization, see test_train_tail_visualization_accepts_*
+    # below.
     run_dir = _train_a_vae_run(tmp_path)
-    config = TailTrainConfig(
-        run_dir=str(run_dir),
-        tail_kind="classification",
-        classification=ClassificationTailConfig(mode="family_only"),
+    kwargs = (
+        {"classification": ClassificationTailConfig(mode="family_only")}
+        if tail_kind == "classification"
+        else {"hierarchical": HierarchicalTailConfig()}
     )
+    config = TailTrainConfig(run_dir=str(run_dir), tail_kind=tail_kind, **kwargs)
 
     with pytest.raises(
-        ValueError, match="requires a completed model_kind='supcon', model_kind='cgcnn'"
+        ValueError, match="requires a completed run whose model_kind is one of"
     ):
         train_tail(config)
+
+
+@pytest.mark.parametrize("run_builder", [_train_a_vae_run, _train_an_autoencoder_run])
+def test_train_tail_visualization_accepts_vae_and_autoencoder_runs(
+    tmp_path, run_builder
+):
+    # Unlike classification/hierarchical, a visualization tail has no
+    # built-in vae/autoencoder equivalent (aux_heads only ever produces a
+    # classifier), so it's offered for every model_kind.
+    run_dir = run_builder(tmp_path)
+    config = TailTrainConfig(
+        run_dir=str(run_dir),
+        tail_kind="visualization",
+        visualization=VisualizationTailConfig(viz_dim=2, mode="family_only"),
+        train=TailTrainSettings(epochs=1, batch_size=4),
+    )
+
+    tail_dir = train_tail(config)
+
+    assert (tail_dir / "tail_embeddings.npz").exists()
+    assert (tail_dir / "viz_plot_family.png").exists()
+    embeddings = np.load(tail_dir / "tail_embeddings.npz")
+    assert embeddings["embeddings"].shape == (8, 2)
 
 
 def test_train_tail_reruns_dedup_output_dir(tmp_path):

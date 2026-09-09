@@ -1094,10 +1094,16 @@ def test_run_single_supcon_auto_trains_classification_tail_only(tmp_path):
     assert not (run_dir / "tails" / "visualization").exists()
 
 
-def test_run_single_tails_ignored_for_non_supcon_model_kind(tmp_path):
+def test_run_single_classification_tail_ignored_but_visualization_trains_for_vae(
+    tmp_path,
+):
+    # classification is redundant with vae's own aux_heads classification, so
+    # it stays skipped for model_kind="vae" -- but visualization has no
+    # built-in vae equivalent, so it's no longer ignored (see
+    # tail_training._TAIL_MODEL_KINDS).
     tails = AutoTailsConfig(
         classification=ClassificationTailConfig(mode="family_only"),
-        visualization=VisualizationTailConfig(viz_dim=2),
+        visualization=VisualizationTailConfig(viz_dim=2, mode="family_only"),
         train=TailTrainSettings(epochs=1, batch_size=4),
     )
     config = RunConfig(
@@ -1114,7 +1120,8 @@ def test_run_single_tails_ignored_for_non_supcon_model_kind(tmp_path):
     with fetch_patch, soap_patch:
         run_dir = run_single(config)
 
-    assert not (run_dir / "tails").exists()
+    assert not (run_dir / "tails" / "classification").exists()
+    assert (run_dir / "tails" / "visualization" / "tail_embeddings.npz").exists()
 
 
 # --- model_kind == "cgcnn" ---------------------------------------------------

@@ -443,16 +443,19 @@ def train_tail_command(argv=None) -> None:
     ``configs/tail_train_visualization.example.yaml``.
     """
     parser = argparse.ArgumentParser(
-        description="Freeze an already-trained dim_red supcon run's body "
-        "and train a classification or visualization tail on top of it."
+        description="Freeze an already-trained dim_red run's body and train "
+        "a classification, visualization, or hierarchical tail on top of "
+        "it. A classification/hierarchical tail requires a supcon/cgcnn/"
+        "mace run; a visualization tail works for any model_kind."
     )
     parser.add_argument("config", type=str, help="Path to a tail-training YAML config.")
     parser.add_argument(
         "run_dir",
         type=str,
-        help="Path to the completed model_kind='supcon' run directory whose "
-        "frozen body to attach the tail to (overrides run_dir in the config, "
-        "if it sets one).",
+        help="Path to the completed run directory whose frozen body to "
+        "attach the tail to (overrides run_dir in the config, if it sets "
+        "one) -- model_kind must be supcon/cgcnn/mace for a classification "
+        "or hierarchical tail, any model_kind for a visualization tail.",
     )
     args = parser.parse_args(argv)
     _do_train_tail(args.config, args.run_dir)
@@ -537,18 +540,20 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Path to a tail-training YAML config; requires --train-tail-run. "
-            "Freezes an already-trained model_kind='supcon' run's body and "
-            "trains a classification or visualization tail on top of it, "
-            "instead of running anything else."
+            "Freezes an already-trained dim_red run's body and trains a "
+            "classification, visualization, or hierarchical tail on top of "
+            "it (classification/hierarchical require model_kind supcon/"
+            "cgcnn/mace; visualization works for any model_kind), instead "
+            "of running anything else."
         ),
     )
     parser.add_argument(
         "--train-tail-run",
         type=str,
         default=None,
-        help="With --train-tail: path to the completed model_kind='supcon' "
-        "run directory whose frozen body to attach the tail to (overrides "
-        "run_dir in the config, if it sets one).",
+        help="With --train-tail: path to the completed run directory whose "
+        "frozen body to attach the tail to (overrides run_dir in the "
+        "config, if it sets one).",
     )
     parser.add_argument(
         "--benchmark",

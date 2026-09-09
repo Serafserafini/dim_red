@@ -1,15 +1,20 @@
-# Example config for phase 2 of the SupCon body/tail workflow: freezes an
-# already-trained "model: supcon" run's body (see
-# configs/single_run_supcon.example.yaml) and trains a small visualization
-# tail on top of its already-saved representations (embeddings.npz), down
-# to 2 or 3 dimensions, using the *same* Supervised Contrastive loss as the
-# phase-1 projection tail -- so the low-dimensional projection still
-# respects family/spacegroup neighborhood structure, unlike a purely
-# unsupervised post-hoc projection (e.g. UMAP). No SOAP recompute, no body
-# forward pass -- freely rerunnable with a different tail config against the
-# same trained body.
-# The run directory (a completed "model: supcon" run -- needs config.yaml,
-# dataset.extxyz, model_params.msgpack and embeddings.npz) is passed on the
+# Example config for phase 2 of the tail-training workflow: freezes an
+# already-trained run's body -- "model: supcon" (see
+# configs/single_run_supcon.example.yaml), "model: cgcnn", "model: mace", OR
+# (unlike a classification/hierarchical tail) "model: vae"/"model:
+# autoencoder" too -- and trains a small visualization tail on top of its
+# already-saved representations (embeddings.npz), down to 2 or 3 dimensions,
+# using the *same* Supervised Contrastive loss as supcon's phase-1
+# projection tail -- so the low-dimensional projection still respects
+# family/spacegroup neighborhood structure, unlike a purely unsupervised
+# post-hoc projection (e.g. UMAP/PCA). A visualization tail is offered for
+# every model_kind because none of them have a built-in equivalent to it
+# (vae/autoencoder's aux_heads only ever produce a classifier, never a
+# visualization) -- see src/dim_red/pipeline/CLAUDE.md's
+# `_TAIL_MODEL_KINDS`. No SOAP recompute, no body forward pass -- freely
+# rerunnable with a different tail config against the same trained body.
+# The run directory (a completed run of one of the model_kinds above --
+# needs at least config.yaml and embeddings.npz) is passed on the
 # command line, not in this file, so the same tail config can be reused
 # across many runs without editing it each time:
 # Run with: python -m dim_red.pipeline.cli --train-tail configs/tail_train_visualization.example.yaml --train-tail-run runs/<date>-<n>/<run-name>
