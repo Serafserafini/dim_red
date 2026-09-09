@@ -1,0 +1,64 @@
+# Follow-up experiment (point 3 in experiments/family_only_sweep_notes.md, not
+# tracked by git): trains a real, learned 2D visualization tail on top of an
+# already-completed run's frozen body -- now meaningful for ANY model_kind
+# (see feature/tail_for_all: a visualization tail is no longer restricted to
+# supcon/cgcnn/mace), so this ONE shared config is reused, unedited, across
+# the best run of all three model kinds compared in this project
+# (autoencoder/vae/supcon) -- the run directory is a separate CLI argument
+# for exactly this reason.
+#
+# distance: cosine (not euclidean) is deliberate here, distinct from the
+# body-training supcon: block elsewhere in this project -- this tail's own
+# training reuses the same supcon_loss/norm_penalty machinery, so it is
+# equally susceptible to euclidean's unbounded-embedding-norm collapse (see
+# point 3/problem 3 in experiments/family_only_sweep_notes.md) unless
+# lambda_norm is raised; cosine sidesteps that entirely since its similarity
+# is already bounded by L2-normalization.
+#
+# Run against each of the three model kinds' best completed run in this
+# project's family-only comparison (see experiments/family_only_sweep_notes.md
+# for the exact accuracy each achieved):
+#   dimred-train-tail configs/tail_train_visualization_family_only.example.yaml runs/tuning_autoencoder_family_only/20260908-1/model-autoencoder_hd-128-64_pyxtal-cub-hex-mon-ort-tet-tri-tri_nsp2_aux-family_only_lf0.5
+#   dimred-train-tail configs/tail_train_visualization_family_only.example.yaml runs/tuning_vae_family_only/20260908-1/hd-128-64_pyxtal-cub-hex-mon-ort-tet-tri-tri_nsp2_aux-family_only_lf2
+#   dimred-train-tail configs/tail_train_visualization_family_only.example.yaml runs/tuning_supcon_family_only/20260908-1/model-supcon_hd-128-64_pyxtal-cub-hex-mon-ort-tet-tri-tri_nsp2_supcon-family_only_tau0.1_lf1-3
+#
+# Selection criterion: re-run dimred-benchmark on these same three run
+# directories afterwards (each now has tails/visualization/tail_embeddings.npz,
+# which dimred-benchmark's _resolve_2d_embedding prefers over its PCA
+# fallback) and compare the new family_2d_silhouette/family_2d_knn_accuracy
+# per model_kind against the current PCA-fallback numbers (vae clearly ahead,
+# supcon clearly behind -- see experiments/family_only_sweep_notes.md). No
+# automatic winner selection.
+
+tail_kind: visualization # "classification", "visualization", or "hierarchical"
+
+visualization:
+  viz_dim: 2 # plotted with dim_red.analysis.plotting.plot_reduced_space
+  mode: family_only # spacegroup ignored throughout this project's family-only round
+  lambda_family: 1.0
+  tau: 0.1
+  distance: cosine # see the module-level comment above for why (not euclidean)
+  lambda_norm: 0.0 # not needed with distance: cosine
+  hidden_dim: null # null -> a single hidden layer matching the body's own
+  # representation width, whatever it is for the target run (vae.latent_dim
+  # for vae/autoencoder/supcon).
+  batching:
+    strategy: random
+
+# Directory name under <run_dir>/tails/ this tail's artifacts are written
+# to. null (default) uses tail_kind itself ("visualization").
+output_subdir: null
+
+seed: 42 # seed for the tail's own parameter initialization
+
+train:
+  epochs: 40
+  batch_size: 32
+  learning_rate: 0.001
+  optimizer: adam
+  device: gpu
+  early_stopping:
+    enabled: true
+    patience: 10
+    min_delta: 0.0001
+    restore_best_weights: true

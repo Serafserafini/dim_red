@@ -1,0 +1,112 @@
+# Follow-up experiment (point 2 in experiments/family_only_sweep_notes.md, not
+# tracked by git): confirms/rebuts whether supcon.distance: euclidean's near-random
+# accuracy collapse (0.18-0.26, seen across all 8 euclidean runs in
+# configs/tuning_sweep_supcon_family_only.example.yaml) is fixable with
+# supcon.lambda_norm > 0. Root cause already confirmed by reading that sweep's
+# loss_history.csv: with lambda_norm=0.0, train_norm_penalty grows unbounded
+# (20 -> 2056 over 12 epochs) since negative-squared-euclidean-distance
+# similarity has no built-in scale normalization -- once pairwise distances
+# blow up, the SupCon loss's softmax becomes uninformative and the gradient
+# signal disappears.
+#
+# distance: euclidean and batching.strategy: random are both fixed (not
+# swept) -- euclidean is the whole point of this test (cosine already works,
+# 0.979-0.994, no need to retest it), and the original collapse didn't depend
+# on batching strategy. vae.encoder_hidden_dim is fixed at [128, 64], the one
+# architecture already known good elsewhere in this project.
+#
+# Shares the exact same pyxtal:/soap:/augmentation: fragment as
+# configs/tuning_sweep_{vae,autoencoder,supcon}_family_only.example.yaml, so
+# it hashes to the identical dataset cache key -- run with
+# --cache-dir runs/_shared_dataset_cache_family_only (already warm, no new
+# warmup job needed).
+#
+# Selection criterion: read together against (a) the 8 cosine runs already
+# obtained (0.979-0.994, the bar to clear) and (b) the 8 original euclidean
+# runs with lambda_norm=0 (0.18-0.26, collapsed) -- also check
+# train_norm_penalty's final value to see whether it's actually bounded now.
+# No automatic winner selection.
+#
+# Run with: dimred-sweep configs/tuning_sweep_supcon_euclidean_normfix.example.yaml --cache-dir runs/_shared_dataset_cache_family_only
+
+base:
+  seed: 42
+  output_dir: runs/tuning_supcon_euclidean_normfix
+  model: supcon
+  data_source: pyxtal
+
+  pyxtal:
+    families: [triclinic, monoclinic, orthorhombic, tetragonal, trigonal, hexagonal, cubic]
+    structures_per_family: 500
+    distribution: uniform
+    n_species: 2
+    seed: 42
+
+  soap:
+    r_cut: 5.0
+    n_max: 4
+    l_max: 3
+    sigma: 0.5
+    element_agnostic: false
+    normalize_distances: false
+    species: null
+
+  augmentation:
+    n_augmented: 4
+    keep_original: true
+    jitter_probability: 0.5
+    jitter_std: 0.05
+    vacancy_probability: 0.5
+    vacancy_atom_probability: 1
+    max_vacancies: 1
+    supercell_radius: 4.0
+    seed: 42
+
+  vae:
+    encoder_hidden_dim: [128, 64]
+    latent_dim: 8
+    mirror: true
+
+  supcon:
+    mode: family_only
+    lambda_family: 1.0
+    tau: 0.1 # overridden by the grid below
+    distance: euclidean # fixed -- the whole point of this experiment
+    lambda_norm: 0.0 # overridden by the grid below
+    projection_dim: 128
+
+  batching:
+    strategy: random # fixed -- the original collapse didn't depend on this
+
+  tails:
+    classification:
+      mode: family_only
+      head_hidden_dim: 16
+    train:
+      epochs: 40
+      batch_size: 32
+      optimizer: adam
+      device: gpu
+      early_stopping:
+        enabled: true
+        patience: 10
+        min_delta: 0.0001
+        restore_best_weights: true
+
+  train:
+    epochs: 100
+    batch_size: 32
+    learning_rate: 0.001
+    optimizer: adam
+    val_ratio: 0.2
+    device: gpu
+    early_stopping:
+      enabled: true
+      patience: 10
+      min_delta: 0.0001
+      restore_best_weights: true
+
+# 2 tau values x 3 lambda_norm values = 6 runs, all sharing one cached dataset build.
+grid:
+  supcon.tau: [0.05, 0.1]
+  supcon.lambda_norm: [0.001, 0.01, 0.1]
