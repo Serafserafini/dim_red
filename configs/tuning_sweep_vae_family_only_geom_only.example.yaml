@@ -1,0 +1,100 @@
+# Round 2 of configs/tuning_sweep_vae_family_only.example.yaml (see
+# experiments/family_only_sweep_notes.md, not tracked by git): identical in
+# every other respect, but soap.element_agnostic: true and pyxtal.n_species: 1
+# -- "purify the geometric signal" fix identified by comparing against an
+# old recovered sweep (experiments/old_runs/runs/20260812-1), which used
+# these same two settings and got much cleaner family clustering with plain
+# euclidean-distance supcon than this round_1's element_agnostic: false/
+# n_species: 2 setup ever did.
+#
+# Grid deliberately NARROWED from round 1's 8 runs to 2, to skip cells
+# already known to fail for reasons unrelated to soap.element_agnostic/
+# pyxtal.n_species (retesting them here would very likely just reproduce
+# the same failure and waste compute):
+#   - encoder_hidden_dim: [64] dropped entirely -- ALL 4 round-1 combinations
+#     using it diverged to NaN from epoch 1 (an architecture/numerical
+#     instability, not a SOAP-content issue -- see problem 1 in
+#     experiments/family_only_sweep_notes.md).
+#   - aux_heads.lambda_family: 0.5 dropped entirely (kept fixed at 2.0
+#     instead) -- combined with train.beta: 2.0 this was round 1's "dead"
+#     cell (family_ce stuck at ln(7) for the whole run, confirmed
+#     systematic -- not seed sensitivity -- across 3 extra seeds in
+#     configs/tuning_sweep_vae_beta2_lf0.5_seedcheck.example.yaml). Fixing
+#     lambda_family at 2.0 (the value that was good with BOTH beta values in
+#     round 1: 0.988 at beta=0.5, 0.968 at beta=2.0) sidesteps this cell
+#     entirely without needing a separate single-run config, since
+#     dimred-sweep's grid is a plain Cartesian product and can't skip just
+#     one cell of a 2x2 -- fixing one whole axis to its known-safe value is
+#     the clean way to do it. NOT verified whether soap.element_agnostic:
+#     true would have rescued the dead cell -- if that's ever worth
+#     checking, add aux_heads.lambda_family: [0.5, 2.0] back as its own run.
+#
+# soap.element_agnostic/pyxtal.n_species both change the SOAP featurization,
+# so this hashes to a NEW dataset cache key, distinct from round 1's shared
+# runs/_shared_dataset_cache_family_only -- run against its own
+# runs/_shared_dataset_cache_family_only_geom_only instead (see
+# slurm/warmup_shared_dataset_family_only_geom_only.sbatch).
+#
+# Run with: dimred-sweep configs/tuning_sweep_vae_family_only_geom_only.example.yaml --cache-dir runs/_shared_dataset_cache_family_only_geom_only
+
+base:
+  seed: 42
+  output_dir: runs/tuning_vae_family_only_geom_only
+  model: vae
+  data_source: pyxtal
+
+  pyxtal:
+    families: [triclinic, monoclinic, orthorhombic, tetragonal, trigonal, hexagonal, cubic]
+    structures_per_family: 500
+    distribution: uniform
+    n_species: 1 # was 2 in round 1
+    seed: 42
+
+  soap:
+    r_cut: 5.0
+    n_max: 4
+    l_max: 3
+    sigma: 0.5
+    element_agnostic: true # was false in round 1
+    normalize_distances: false
+    species: null
+
+  augmentation:
+    n_augmented: 4
+    keep_original: true
+    jitter_probability: 0.5
+    jitter_std: 0.05
+    vacancy_probability: 0.5
+    vacancy_atom_probability: 1
+    max_vacancies: 1
+    supercell_radius: 4.0
+    seed: 42
+
+  vae:
+    encoder_hidden_dim: [128, 64] # fixed -- [64] dropped, see header comment
+    latent_dim: 8
+    mirror: true
+
+  aux_heads:
+    mode: family_only
+    lambda_family: 2.0 # fixed -- 0.5 dropped, see header comment
+    head_hidden_dim: 16
+
+  train:
+    epochs: 100
+    batch_size: 32
+    learning_rate: 0.001
+    optimizer: adam
+    beta: 1.0 # overridden by the grid below
+    val_ratio: 0.2
+    device: gpu
+    early_stopping:
+      enabled: true
+      patience: 10
+      min_delta: 0.0001
+      restore_best_weights: true
+
+# 2 beta values, encoder/lambda_family both fixed at their known-good
+# values (see header comment) -- 2 runs.
+grid:
+  train.beta: [0.5, 2.0]

@@ -1,0 +1,80 @@
+# Round 2 of configs/tuning_sweep_autoencoder_family_only.example.yaml (see
+# experiments/family_only_sweep_notes.md, not tracked by git): identical in
+# every other respect, but soap.element_agnostic: true and pyxtal.n_species: 1
+# -- see configs/tuning_sweep_vae_family_only_geom_only.example.yaml's header
+# comment for the full rationale (comparison against the recovered
+# experiments/old_runs/runs/20260812-1 sweep).
+#
+# Shares the exact same pyxtal:/soap:/augmentation: fragment as
+# configs/tuning_sweep_{vae,supcon}_family_only_geom_only.example.yaml, so
+# it hashes to the identical (new) dataset cache key -- run against
+# runs/_shared_dataset_cache_family_only_geom_only (see
+# slurm/warmup_shared_dataset_family_only_geom_only.sbatch).
+#
+# Run with: dimred-sweep configs/tuning_sweep_autoencoder_family_only_geom_only.example.yaml --cache-dir runs/_shared_dataset_cache_family_only_geom_only
+
+base:
+  seed: 42
+  output_dir: runs/tuning_autoencoder_family_only_geom_only
+  model: autoencoder
+  data_source: pyxtal
+
+  pyxtal:
+    families: [triclinic, monoclinic, orthorhombic, tetragonal, trigonal, hexagonal, cubic]
+    structures_per_family: 500
+    distribution: uniform
+    n_species: 1 # was 2 in round 1
+    seed: 42
+
+  soap:
+    r_cut: 5.0
+    n_max: 4
+    l_max: 3
+    sigma: 0.5
+    element_agnostic: true # was false in round 1
+    normalize_distances: false
+    species: null
+
+  augmentation:
+    n_augmented: 4
+    keep_original: true
+    jitter_probability: 0.5
+    jitter_std: 0.05
+    vacancy_probability: 0.5
+    vacancy_atom_probability: 1
+    max_vacancies: 1
+    supercell_radius: 4.0
+    seed: 42
+
+  vae:
+    encoder_hidden_dim: [128] # overridden by the grid below
+    latent_dim: 8 # overridden by the grid below
+    mirror: true
+
+  aux_heads:
+    mode: family_only
+    lambda_family: 1.0 # overridden by the grid below
+    head_hidden_dim: 16
+
+  train:
+    epochs: 100
+    batch_size: 32
+    learning_rate: 0.001
+    optimizer: adam
+    val_ratio: 0.2
+    device: gpu
+    early_stopping:
+      enabled: true
+      patience: 10
+      min_delta: 0.0001
+      restore_best_weights: true
+
+# 3 encoder shapes x 2 latent_dim values x 2 lambda_family values = 12
+# runs, same grid as round 1.
+grid:
+  vae.encoder_hidden_dim:
+    - [64]
+    - [128, 64]
+    - [128, 64, 32]
+  vae.latent_dim: [4, 8]
+  aux_heads.lambda_family: [0.5, 2.0]
