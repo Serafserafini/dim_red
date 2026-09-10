@@ -1,0 +1,105 @@
+# Round 5 ("tau_sweep", queue item "c" continued -- second single-variable
+# exploration on the same reference config as
+# configs/tuning_sweep_supcon_family_only_encoder_depth.example.yaml, see
+# that file's header and experiments/family_only_encoder_depth_round4_notes.md
+# for why: encoder depth/width turned out NOT to move accuracy meaningfully
+# (0.987-0.993 across [64,32]/[128,64,32]/[256,128]/[256,128,64], all within
+# noise of round 1's winning [128, 64] at 0.9938). This round holds
+# vae.encoder_hidden_dim fixed at the round-1 winning [128, 64] and instead
+# sweeps supcon.tau -- round 1 only ever tried 0.05/0.1 (both close
+# together, both cosine); this widens the range considerably to see if tau
+# has a bigger effect than encoder capacity did.
+#
+# Everything else fixed at the round-1 winning combination: distance:
+# cosine, batching.strategy: random, same pyxtal/soap/augmentation fragment
+# (element_agnostic: false, n_species: 2, r_cut/n_max/l_max 5.0/4/3) as
+# configs/tuning_sweep_supcon_family_only.example.yaml, so this reuses
+# runs/_shared_dataset_cache_family_only with no new warmup needed.
+#
+# Run with: dimred-sweep configs/tuning_sweep_supcon_family_only_tau_sweep.example.yaml --cache-dir runs/_shared_dataset_cache_family_only
+
+base:
+  seed: 42
+  output_dir: runs/tuning_supcon_family_only_tau_sweep
+  model: supcon
+  data_source: pyxtal
+
+  pyxtal:
+    families: [triclinic, monoclinic, orthorhombic, tetragonal, trigonal, hexagonal, cubic]
+    structures_per_family: 500
+    distribution: uniform
+    n_species: 2
+    seed: 42
+
+  soap:
+    r_cut: 5.0
+    n_max: 4
+    l_max: 3
+    sigma: 0.5
+    element_agnostic: false
+    normalize_distances: false
+    species: null
+
+  augmentation:
+    n_augmented: 4
+    keep_original: true
+    jitter_probability: 0.5
+    jitter_std: 0.05
+    vacancy_probability: 0.5
+    vacancy_atom_probability: 1
+    max_vacancies: 1
+    supercell_radius: 4.0
+    seed: 42
+
+  vae:
+    encoder_hidden_dim: [128, 64] # fixed -- winning shape, not swept here
+    latent_dim: 8
+    mirror: true
+
+  supcon:
+    mode: family_only
+    lambda_family: 1.0
+    tau: 0.1 # overridden by the grid below
+    distance: cosine # fixed -- winning value from round 1, not swept here
+    lambda_norm: 0.0
+    projection_dim: 128
+
+  batching:
+    strategy: random # fixed -- winning value from round 1, not swept here
+    balanced_params: {P: null, K: 16, S: null}
+
+  tails:
+    classification:
+      mode: family_only
+      head_hidden_dim: 16
+    train:
+      epochs: 40
+      batch_size: 32
+      optimizer: adam
+      device: gpu
+      early_stopping:
+        enabled: true
+        patience: 10
+        min_delta: 0.0001
+        restore_best_weights: true
+
+  train:
+    epochs: 100
+    batch_size: 32
+    learning_rate: 0.001
+    optimizer: adam
+    val_ratio: 0.2
+    device: gpu
+    early_stopping:
+      enabled: true
+      patience: 10
+      min_delta: 0.0001
+      restore_best_weights: true
+
+# 4 tau values, single variable swept, everything else fixed at the
+# round-1 winning combination -- 4 runs total. 0.05/0.1 already known from
+# round 1 (up to 0.986/0.994 respectively); this adds a much wider low
+# value (0.02, sharper temperature) and two higher values (0.2, 0.5,
+# softer temperature) to see the shape of the response.
+grid:
+  supcon.tau: [0.02, 0.2, 0.3, 0.5]

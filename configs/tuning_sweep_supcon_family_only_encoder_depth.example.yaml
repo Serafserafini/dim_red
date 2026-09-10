@@ -1,0 +1,109 @@
+# Round 4 ("encoder_depth", queue item "c" in the autonomous loop plan --
+# see /home/seraftu/.claude/plans/eventual-seeking-glacier.md and
+# experiments/family_only_geom_rich_round3_notes.md's "Prossimo passo"
+# section): progressive, one-variable-at-a-time hyperparameter exploration
+# on the model_kind/config identified as best for the primary (accuracy)
+# goal across rounds 1-3 -- supcon, distance: cosine, tau: 0.1,
+# batching.strategy: random (the exact combination that reached the best
+# single-run accuracy found so far, 0.9938, in
+# runs/tuning_supcon_family_only/20260908-1/..._tau0.1_lf1-3).
+#
+# Everything from that winning round-1 run is held fixed here (same
+# pyxtal/soap/augmentation fragment -- element_agnostic: false, n_species:
+# 2, r_cut/n_max/l_max 5.0/4/3, SAME dataset cache key as
+# configs/tuning_sweep_supcon_family_only.example.yaml, so this reuses
+# runs/_shared_dataset_cache_family_only with no new warmup needed) except
+# ONE variable: vae.encoder_hidden_dim, widened/deepened beyond the two
+# shallow shapes round 1 tried ([64], [128, 64]) to shapes not yet tested
+# for supcon in this project (deeper: matches what
+# configs/tuning_sweep_autoencoder_family_only.example.yaml already tried
+# for autoencoder; wider: new for either kind).
+#
+# Run with: dimred-sweep configs/tuning_sweep_supcon_family_only_encoder_depth.example.yaml --cache-dir runs/_shared_dataset_cache_family_only
+
+base:
+  seed: 42
+  output_dir: runs/tuning_supcon_family_only_encoder_depth
+  model: supcon
+  data_source: pyxtal
+
+  pyxtal:
+    families: [triclinic, monoclinic, orthorhombic, tetragonal, trigonal, hexagonal, cubic]
+    structures_per_family: 500
+    distribution: uniform
+    n_species: 2
+    seed: 42
+
+  soap:
+    r_cut: 5.0
+    n_max: 4
+    l_max: 3
+    sigma: 0.5
+    element_agnostic: false
+    normalize_distances: false
+    species: null
+
+  augmentation:
+    n_augmented: 4
+    keep_original: true
+    jitter_probability: 0.5
+    jitter_std: 0.05
+    vacancy_probability: 0.5
+    vacancy_atom_probability: 1
+    max_vacancies: 1
+    supercell_radius: 4.0
+    seed: 42
+
+  vae:
+    encoder_hidden_dim: [128, 64] # overridden by the grid below
+    latent_dim: 8
+    mirror: true
+
+  supcon:
+    mode: family_only
+    lambda_family: 1.0
+    tau: 0.1 # fixed -- winning value from round 1, not swept here
+    distance: cosine # fixed -- winning value from round 1, not swept here
+    lambda_norm: 0.0
+    projection_dim: 128
+
+  batching:
+    strategy: random # fixed -- winning value from round 1, not swept here
+    balanced_params: {P: null, K: 16, S: null}
+
+  tails:
+    classification:
+      mode: family_only
+      head_hidden_dim: 16
+    train:
+      epochs: 40
+      batch_size: 32
+      optimizer: adam
+      device: gpu
+      early_stopping:
+        enabled: true
+        patience: 10
+        min_delta: 0.0001
+        restore_best_weights: true
+
+  train:
+    epochs: 100
+    batch_size: 32
+    learning_rate: 0.001
+    optimizer: adam
+    val_ratio: 0.2
+    device: gpu
+    early_stopping:
+      enabled: true
+      patience: 10
+      min_delta: 0.0001
+      restore_best_weights: true
+
+# 4 encoder shapes, single variable swept, everything else fixed at the
+# round-1 winning combination -- 4 runs total.
+grid:
+  vae.encoder_hidden_dim:
+    - [64, 32]
+    - [128, 64, 32]
+    - [256, 128]
+    - [256, 128, 64]
