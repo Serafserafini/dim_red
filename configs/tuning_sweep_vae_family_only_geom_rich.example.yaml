@@ -1,0 +1,93 @@
+# Round 3 of configs/tuning_sweep_vae_family_only_geom_only.example.yaml
+# (see experiments/family_only_geom_only_round2_notes.md, not tracked by
+# git): round 2 kept soap.element_agnostic: true/pyxtal.n_species: 1 but
+# left soap.r_cut/n_max/l_max unchanged from round 1 (5.0/4/3) -- measuring
+# embeddings.npz's feature_mean.shape showed this collapsed the SOAP
+# descriptor from round 1's 12960 dimensions down to just 40 (element_agnostic
+# reduces every dataset to a single species-pair combination, and n_species: 1
+# means round 1's ~300+ auto-detected species-pair combinations shrink to 1),
+# and accuracy/2D quality collapsed right along with it (round 2's vae:
+# 0.97-0.99 -> 0.51-0.64).
+#
+# The recovered old sweep (experiments/old_runs/runs/20260812-1) also used
+# element_agnostic: true/n_species: 1 but compensated with a much richer SOAP
+# basis: r_cut: 6.0/n_max: 8/l_max: 6 (measured feature dimension 252, not 40)
+# -- this round changes ONLY those three soap fields relative to round 2
+# (everything else -- dataset size, encoder, grid axes, epochs -- stays
+# identical) to isolate whether raising SOAP resolution alone is what's
+# needed to make element_agnostic/n_species=1 competitive again.
+#
+# Same grid restrictions as round 2 (not re-opened here, unrelated to SOAP
+# resolution): encoder_hidden_dim: [64] still dropped (round 1's NaN
+# divergence there was architecture-driven) and aux_heads.lambda_family
+# still fixed at 2.0 (round 1's beta=2.0/lambda_family=0.5 dead cell was a
+# loss-balance issue, not a SOAP-content issue).
+#
+# New soap settings -> new dataset cache key, distinct from both round 1's
+# runs/_shared_dataset_cache_family_only and round 2's
+# runs/_shared_dataset_cache_family_only_geom_only -- run against its own
+# runs/_shared_dataset_cache_family_only_geom_rich (see
+# slurm/warmup_shared_dataset_family_only_geom_rich.sbatch).
+#
+# Run with: dimred-sweep configs/tuning_sweep_vae_family_only_geom_rich.example.yaml --cache-dir runs/_shared_dataset_cache_family_only_geom_rich
+
+base:
+  seed: 42
+  output_dir: runs/tuning_vae_family_only_geom_rich
+  model: vae
+  data_source: pyxtal
+
+  pyxtal:
+    families: [triclinic, monoclinic, orthorhombic, tetragonal, trigonal, hexagonal, cubic]
+    structures_per_family: 500
+    distribution: uniform
+    n_species: 1
+    seed: 42
+
+  soap:
+    r_cut: 6.0 # was 5.0 in rounds 1/2 -- matches the old (good) sweep
+    n_max: 8 # was 4 in rounds 1/2 -- matches the old (good) sweep
+    l_max: 6 # was 3 in rounds 1/2 -- matches the old (good) sweep
+    sigma: 0.5
+    element_agnostic: true
+    normalize_distances: false
+    species: null
+
+  augmentation:
+    n_augmented: 4
+    keep_original: true
+    jitter_probability: 0.5
+    jitter_std: 0.05
+    vacancy_probability: 0.5
+    vacancy_atom_probability: 1
+    max_vacancies: 1
+    supercell_radius: 4.0
+    seed: 42
+
+  vae:
+    encoder_hidden_dim: [128, 64] # fixed -- [64] still dropped, see header comment
+    latent_dim: 8
+    mirror: true
+
+  aux_heads:
+    mode: family_only
+    lambda_family: 2.0 # fixed -- 0.5 still dropped, see header comment
+    head_hidden_dim: 16
+
+  train:
+    epochs: 100
+    batch_size: 32
+    learning_rate: 0.001
+    optimizer: adam
+    beta: 1.0 # overridden by the grid below
+    val_ratio: 0.2
+    device: gpu
+    early_stopping:
+      enabled: true
+      patience: 10
+      min_delta: 0.0001
+      restore_best_weights: true
+
+# 2 beta values -- same 2 runs as round 2, only the SOAP block changed.
+grid:
+  train.beta: [0.5, 2.0]
