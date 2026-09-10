@@ -1,0 +1,113 @@
+# Follow-up experiment to point 2/the "old sweep" comparison in
+# experiments/family_only_sweep_notes.md (not tracked by git): isolates
+# which of the two factors most plausibly responsible for the historical
+# 20260812-1 sweep's good euclidean-distance SupCon result (see that
+# sweep's config vs. configs/tuning_sweep_supcon_family_only.example.yaml)
+# actually matters -- rather than just testing "both together", a small 2x2
+# factorial over train.batch_size and soap.element_agnostic, at fixed
+# distance: euclidean/lambda_norm: 0.0/tau: 0.1 (already confirmed NOT to
+# collapse-fix via lambda_norm alone -- see point 2's negative result).
+#
+# The (batch_size: 32, element_agnostic: false) cell is deliberately NOT
+# re-run here -- it's exactly the existing
+# configs/tuning_sweep_supcon_family_only.example.yaml tau=0.1/euclidean run
+# (accuracy 0.181), already on record. Only the other 3 cells are new.
+#
+# soap.element_agnostic changes the SOAP featurization, so the
+# element_agnostic: true rows hash to a NEW dataset cache key (distinct from
+# the shared runs/_shared_dataset_cache_family_only entries) -- dimred-sweep
+# handles this transparently (a second cache-key entry appears in the same
+# --cache-dir, no separate warmup needed, just one extra SOAP computation
+# pass the first time a true row is built).
+#
+# Selection criterion: compare `family` accuracy and `final_train_norm_penalty`
+# across the 4 cells (2x2 + the 1 pre-existing baseline cell) to see whether
+# batch_size, element_agnostic, or their combination is what actually
+# rescues distance: euclidean -- or whether none of them alone is enough and
+# it takes both together. No automatic winner selection.
+#
+# Run with: dimred-sweep configs/tuning_sweep_supcon_euclidean_factors.example.yaml --cache-dir runs/_shared_dataset_cache_family_only
+
+base:
+  seed: 42
+  output_dir: runs/tuning_supcon_euclidean_factors
+  model: supcon
+  data_source: pyxtal
+
+  pyxtal:
+    families: [triclinic, monoclinic, orthorhombic, tetragonal, trigonal, hexagonal, cubic]
+    structures_per_family: 500
+    distribution: uniform
+    n_species: 2
+    seed: 42
+
+  soap:
+    r_cut: 5.0
+    n_max: 4
+    l_max: 3
+    sigma: 0.5
+    element_agnostic: false # overridden by the grid below
+    normalize_distances: false
+    species: null
+
+  augmentation:
+    n_augmented: 4
+    keep_original: true
+    jitter_probability: 0.5
+    jitter_std: 0.05
+    vacancy_probability: 0.5
+    vacancy_atom_probability: 1
+    max_vacancies: 1
+    supercell_radius: 4.0
+    seed: 42
+
+  vae:
+    encoder_hidden_dim: [128, 64]
+    latent_dim: 8
+    mirror: true
+
+  supcon:
+    mode: family_only
+    lambda_family: 1.0
+    tau: 0.1 # fixed -- already know this collapses at batch_size=32/element_agnostic=false
+    distance: euclidean # fixed -- the whole point of this experiment
+    lambda_norm: 0.0 # fixed -- point 2 already showed raising this alone doesn't help
+    projection_dim: 128
+
+  batching:
+    strategy: random
+
+  tails:
+    classification:
+      mode: family_only
+      head_hidden_dim: 16
+    train:
+      epochs: 40
+      batch_size: 32
+      optimizer: adam
+      device: gpu
+      early_stopping:
+        enabled: true
+        patience: 10
+        min_delta: 0.0001
+        restore_best_weights: true
+
+  train:
+    epochs: 100
+    batch_size: 32 # overridden by the grid below
+    learning_rate: 0.001
+    optimizer: adam
+    val_ratio: 0.2
+    device: gpu
+    early_stopping:
+      enabled: true
+      patience: 10
+      min_delta: 0.0001
+      restore_best_weights: true
+
+# 2 batch_size values x 2 element_agnostic values = 4 runs (the
+# batch_size=32/element_agnostic=false cell duplicates an already-known
+# result but costs little to include for a complete, self-contained table).
+grid:
+  train.batch_size: [32, 128]
+  soap.element_agnostic: [false, true]
