@@ -1,0 +1,52 @@
+# Follow-up experiment (queue item "b" in the autonomous loop plan,
+# /home/seraftu/.claude/plans/eventual-seeking-glacier.md, explicitly
+# requested by the user: "testa anche l'uso di una tail di visualizzazione
+# con supcon (sia euclidean, con diversi lambda norm, che cosine)"): trains
+# a euclidean-distance visualization tail with lambda_norm=0.1 on top of
+# the best supcon body found across all rounds so far (round 1,
+# tau=0.1/cosine/hd-128-64/random batching, family accuracy 0.9938 -- round
+# 3 "geom_rich" reached at most 0.9512 for supcon, see
+# experiments/family_only_geom_rich_round3_notes.md, so round 1's body
+# remains the reference). The cosine baseline tail on this exact body/run
+# was already trained in the earlier "point 3" experiment (see
+# configs/tail_train_visualization_family_only.example.yaml and
+# experiments/family_only_sweep_notes.md) -- not repeated here.
+#
+# lambda_norm regularizes the (otherwise unbounded) embedding norm under
+# euclidean distance -- see problem 3 in experiments/family_only_sweep_notes.md
+# for why euclidean without this collapses. Sweeping it here (5 configs, one
+# per value, each its own output_subdir) tests whether a well-calibrated
+# lambda_norm lets a euclidean tail match or beat cosine's 2D quality
+# instead of just reconfirming cosine wins by default.
+#
+# Run with:
+#   dimred-train-tail configs/tail_train_visualization_supcon_euclidean_ln01.example.yaml experiments/runs/tuning_supcon_family_only/20260908-1/model-supcon_hd-128-64_pyxtal-cub-hex-mon-ort-tet-tri-tri_nsp2_supcon-family_only_tau0.1_lf1-3
+
+tail_kind: visualization
+
+visualization:
+  viz_dim: 2
+  mode: family_only
+  lambda_family: 1.0
+  tau: 0.1
+  distance: euclidean
+  lambda_norm: 0.1
+  hidden_dim: null
+  batching:
+    strategy: random
+
+output_subdir: visualization_euclidean_ln01
+
+seed: 42
+
+train:
+  epochs: 40
+  batch_size: 32
+  learning_rate: 0.001
+  optimizer: adam
+  device: gpu
+  early_stopping:
+    enabled: true
+    patience: 10
+    min_delta: 0.0001
+    restore_best_weights: true
