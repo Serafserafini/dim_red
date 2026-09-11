@@ -1,0 +1,58 @@
+# Follow-up to the euclidean/lambda_norm visualization-tail sweep (see
+# experiments/family_only_geom_rich_round3_notes.md, "Esperimento (b)") and
+# to the old-run reproduction diagnosis (experiments/old_run_reproduction_notes.md):
+# that experiment showed euclidean tails beat cosine on global cluster
+# quality (kmeans_ari up to 0.36) but stayed far below the recovered old
+# run's silhouette (~0.73). The old run's advantage wasn't the architecture
+# (loss directly on the body vs. a separate tail is, if anything, the
+# theoretically worse choice for a body meant for downstream classification
+# -- see the conversation) -- it was mode: family_and_spacegroup (a richer
+# contrastive signal than family_only alone), a much longer training budget
+# (200 epochs, no early stopping) and a larger batch (128 vs 32).
+#
+# This config reproduces those three factors on a genuine visualization
+# TAIL (not the body itself), on top of the best supcon body found across
+# all rounds (round 1, tau=0.1/cosine/hd-128-64/batching=random, family
+# accuracy 0.9938) -- so if this closes the gap, we get old-run-quality
+# visualization WITHOUT sacrificing the body's accuracy.
+#
+# distance: euclidean (not cosine) -- euclidean was the clear winner for
+# global separation in the round-3 tail sweep. lambda_norm: 0.0, matching
+# the old run's own supcon config exactly (it also used euclidean with no
+# norm regularizer).
+#
+# Run with:
+#   dimred-train-tail configs/tail_train_visualization_supcon_family_and_spacegroup_rich.example.yaml experiments/runs/tuning_supcon_family_only_round1/20260908-1/model-supcon_hd-128-64_pyxtal-cub-hex-mon-ort-tet-tri-tri_nsp2_supcon-family_only_tau0.1_lf1-3
+
+tail_kind: visualization
+
+visualization:
+  viz_dim: 2
+  mode: family_and_spacegroup
+  lambda_family: 1.0
+  lambda_spacegroup: 1.0
+  tau: 0.1
+  distance: euclidean
+  lambda_norm: 0.0
+  hidden_dim: [32, 16] # more capacity than the default single hidden layer
+  # matching the body's own latent_dim (8) -- the tail needs to do more
+  # representational work here than in the family_only-only sweep.
+  batching:
+    strategy: random
+
+output_subdir: visualization_family_and_spacegroup_rich
+
+seed: 42
+
+train:
+  epochs: 200 # matching the old run's budget instead of the 40 used in
+  # the round-3 tail sweep
+  batch_size: 128 # matching the old run's batch size instead of 32
+  optimizer: adam
+  device: gpu
+  early_stopping:
+    enabled: true # safety net, unlike the old run -- but with a generous
+    # patience so it doesn't cut the longer training short prematurely
+    patience: 20
+    min_delta: 0.0001
+    restore_best_weights: true
