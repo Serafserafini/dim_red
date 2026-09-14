@@ -1,0 +1,82 @@
+# Round 7 ("training_budget", queue item requested by the user after round
+# 5: "portiamo avanti la strada 2 e 3" -- see
+# experiments/family_only_round5_notes.md's "Decisione" section) of
+# configs/tuning_sweep_vae_family_only_geom_rich.example.yaml (round 3):
+# holds pyxtal/soap identical to round 3 (structures_per_family: 500,
+# r_cut/n_max/l_max: 6.0/8/6, dim=252) -- SAME dataset, SAME dataset cache
+# key as round 3, no new warmup needed, run directly against
+# runs/_shared_dataset_cache_family_only_geom_rich -- and instead raises
+# train.batch_size from round 3's 32 to **128** and train.epochs from 100
+# to **200** (matching the recovered old sweep's training budget). Early
+# stopping stays ENABLED (unlike the old sweep, which had it off entirely)
+# as a safety net, but with a larger patience (20 instead of 10) so it
+# doesn't cut the longer run short prematurely -- the old sweep's
+# superior accuracy was hypothesized to also come from this larger
+# batch/longer training, not just richer SOAP or more data (round 6 tests
+# the data-scale half of that hypothesis in isolation; this round tests
+# the training-budget half, one variable at a time).
+#
+# Run with: dimred-sweep configs/tuning_sweep_vae_family_only_round7.example.yaml --cache-dir runs/_shared_dataset_cache_family_only_geom_rich
+
+base:
+  seed: 42
+  output_dir: runs/tuning_vae_family_only_round7
+  model: vae
+  data_source: pyxtal
+
+  pyxtal:
+    families: [triclinic, monoclinic, orthorhombic, tetragonal, trigonal, hexagonal, cubic]
+    structures_per_family: 500
+    distribution: uniform
+    n_species: 1
+    seed: 42
+
+  soap:
+    r_cut: 6.0
+    n_max: 8
+    l_max: 6
+    sigma: 0.5
+    element_agnostic: true
+    normalize_distances: false
+    species: null
+
+  augmentation:
+    n_augmented: 4
+    keep_original: true
+    jitter_probability: 0.5
+    jitter_std: 0.05
+    vacancy_probability: 0.5
+    vacancy_atom_probability: 1
+    max_vacancies: 1
+    supercell_radius: 4.0
+    seed: 42
+
+  vae:
+    encoder_hidden_dim: [128, 64] # fixed, same as round 3
+    latent_dim: 8
+    mirror: true
+
+  aux_heads:
+    mode: family_only
+    lambda_family: 2.0 # fixed, same as round 3
+    head_hidden_dim: 16
+
+  train:
+    epochs: 200 # was 100 in round 3 -- matches the old sweep's budget
+    batch_size: 128 # was 32 in round 3 -- matches the old sweep's budget
+    learning_rate: 0.001
+    optimizer: adam
+    beta: 1.0 # overridden by the grid below
+    val_ratio: 0.2
+    device: gpu
+    early_stopping:
+      enabled: true # unlike the old sweep (off entirely) -- kept as a
+      # safety net, but with a larger patience so it doesn't cut this
+      # longer run short prematurely
+      patience: 20
+      min_delta: 0.0001
+      restore_best_weights: true
+
+# 2 beta values -- same 2 runs as round 3, only the training budget changed.
+grid:
+  train.beta: [0.5, 2.0]

@@ -1,0 +1,82 @@
+# Round 6 ("dataset_scale", queue item requested by the user after round 5:
+# "portiamo avanti la strada 2 e 3" -- see experiments/family_only_round5_notes.md's
+# "Decisione" section) of configs/tuning_sweep_vae_family_only_geom_rich.example.yaml
+# (round 3): holds soap.r_cut/n_max/l_max at round 3's confirmed level
+# (6.0/8/6, dim=252 -- NOT round 5's 10/8/495, to isolate this variable
+# cleanly from the SOAP-richness axis already explored in rounds 3/5) and
+# instead doubles pyxtal.structures_per_family from round 3's 500 to
+# **1000** (matching the recovered old sweep's scale: 7000 raw structures x
+# 5 augmented copies = 35000, vs round 3's 17500) -- the recovered old
+# sweep's superior accuracy was hypothesized to also come from a larger
+# dataset, not just richer SOAP (see experiments/family_only_geom_only_round2_notes.md's
+# "Correzione dell'ipotesi precedente"). This round tests that hypothesis in
+# isolation, one variable at a time, everything else (encoder, batch_size,
+# epochs, grid restrictions) held at round 3's settings.
+#
+# New pyxtal.structures_per_family -> new dataset cache key, distinct from
+# every earlier round -- run against its own
+# runs/_shared_dataset_cache_family_only_round6 (see
+# slurm/warmup_shared_dataset_family_only_round6.sbatch).
+#
+# Run with: dimred-sweep configs/tuning_sweep_vae_family_only_round6.example.yaml --cache-dir runs/_shared_dataset_cache_family_only_round6
+
+base:
+  seed: 42
+  output_dir: runs/tuning_vae_family_only_round6
+  model: vae
+  data_source: pyxtal
+
+  pyxtal:
+    families: [triclinic, monoclinic, orthorhombic, tetragonal, trigonal, hexagonal, cubic]
+    structures_per_family: 1000 # was 500 in round 3 -- the single variable this round isolates
+    distribution: uniform
+    n_species: 1
+    seed: 42
+
+  soap:
+    r_cut: 6.0
+    n_max: 8 # fixed at round 3's confirmed level, NOT round 5's 10
+    l_max: 6 # fixed at round 3's confirmed level, NOT round 5's 8
+    sigma: 0.5
+    element_agnostic: true
+    normalize_distances: false
+    species: null
+
+  augmentation:
+    n_augmented: 4
+    keep_original: true
+    jitter_probability: 0.5
+    jitter_std: 0.05
+    vacancy_probability: 0.5
+    vacancy_atom_probability: 1
+    max_vacancies: 1
+    supercell_radius: 4.0
+    seed: 42
+
+  vae:
+    encoder_hidden_dim: [128, 64] # fixed, same as round 3
+    latent_dim: 8
+    mirror: true
+
+  aux_heads:
+    mode: family_only
+    lambda_family: 2.0 # fixed, same as round 3
+    head_hidden_dim: 16
+
+  train:
+    epochs: 100
+    batch_size: 32
+    learning_rate: 0.001
+    optimizer: adam
+    beta: 1.0 # overridden by the grid below
+    val_ratio: 0.2
+    device: gpu
+    early_stopping:
+      enabled: true
+      patience: 10
+      min_delta: 0.0001
+      restore_best_weights: true
+
+# 2 beta values -- same 2 runs as round 3, only the dataset scale changed.
+grid:
+  train.beta: [0.5, 2.0]
