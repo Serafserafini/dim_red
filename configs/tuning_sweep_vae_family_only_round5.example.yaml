@@ -1,0 +1,84 @@
+# Round 5 of configs/tuning_sweep_vae_family_only_round3.example.yaml (see
+# experiments/family_only_geom_rich_round3_notes.md, not tracked by git):
+# round 3 raised soap.r_cut/n_max/l_max to 6.0/8/6 (matching the recovered
+# old sweep) to compensate for the 12960->40-dimensional SOAP collapse
+# element_agnostic: true/n_species: 1 causes -- this recovered accuracy
+# partially (vae 0.90 vs round 1's 0.98) but not fully. This round pushes
+# n_max/l_max further still (8/6 -> 10/8, measured feature dimension
+# 8*9/2*7=252 -> 10*11/2*9=495) to test whether the accuracy-vs-SOAP-richness
+# trend observed across rounds 2/3 (dim 40 -> 0.51-0.64, dim 252 -> 0.89-0.91)
+# keeps climbing toward round 1's 0.97-0.99, or saturates here. r_cut stays
+# at 6.0 (unchanged) -- only n_max/l_max move, the single variable this
+# round isolates.
+#
+# Everything else identical to round 3: same grid restrictions (encoder
+# [64] still dropped, aux_heads.lambda_family fixed at 2.0), same dataset
+# scale/training budget (structures_per_family: 500, batch_size: 32,
+# epochs: 100 with early stopping).
+#
+# New soap settings -> new dataset cache key, distinct from every earlier
+# round -- run against its own runs/_shared_dataset_cache_family_only_round5
+# (see slurm/warmup_shared_dataset_family_only_round5.sbatch).
+#
+# Run with: dimred-sweep configs/tuning_sweep_vae_family_only_round5.example.yaml --cache-dir runs/_shared_dataset_cache_family_only_round5
+
+base:
+  seed: 42
+  output_dir: runs/tuning_vae_family_only_round5
+  model: vae
+  data_source: pyxtal
+
+  pyxtal:
+    families: [triclinic, monoclinic, orthorhombic, tetragonal, trigonal, hexagonal, cubic]
+    structures_per_family: 500
+    distribution: uniform
+    n_species: 1
+    seed: 42
+
+  soap:
+    r_cut: 6.0
+    n_max: 10 # was 8 in round 3 -- pushed further, see header comment
+    l_max: 8 # was 6 in round 3 -- pushed further, see header comment
+    sigma: 0.5
+    element_agnostic: true
+    normalize_distances: false
+    species: null
+
+  augmentation:
+    n_augmented: 4
+    keep_original: true
+    jitter_probability: 0.5
+    jitter_std: 0.05
+    vacancy_probability: 0.5
+    vacancy_atom_probability: 1
+    max_vacancies: 1
+    supercell_radius: 4.0
+    seed: 42
+
+  vae:
+    encoder_hidden_dim: [128, 64] # fixed -- [64] still dropped, see header comment
+    latent_dim: 8
+    mirror: true
+
+  aux_heads:
+    mode: family_only
+    lambda_family: 2.0 # fixed -- 0.5 still dropped, see header comment
+    head_hidden_dim: 16
+
+  train:
+    epochs: 100
+    batch_size: 32
+    learning_rate: 0.001
+    optimizer: adam
+    beta: 1.0 # overridden by the grid below
+    val_ratio: 0.2
+    device: gpu
+    early_stopping:
+      enabled: true
+      patience: 10
+      min_delta: 0.0001
+      restore_best_weights: true
+
+# 2 beta values -- same 2 runs as rounds 2/3, only the SOAP block changed.
+grid:
+  train.beta: [0.5, 2.0]
