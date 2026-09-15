@@ -1,0 +1,84 @@
+# Round 8 ("spacegroup_balanced") of configs/tuning_sweep_vae_family_only_round7.example.yaml
+# (round 7): keeps round 7's soap/train settings (element_agnostic: true,
+# n_species: 1 -- both ALREADY round 7's values, not new here) and instead
+# changes the ONE thing this round isolates: how raw structures are
+# distributed before augmentation. Round 3/5/6/7 all used
+# `structures_per_family: 500` with `distribution: uniform`, which splits
+# each family's 500 structures across *that family's own* space groups --
+# since space groups per family range from 2 (triclinic) to 68
+# (tetragonal), this gives wildly uneven per-space-group counts (~250 for
+# triclinic's 2 space groups vs ~7 for tetragonal's 68), even though
+# families themselves are balanced. This round switches to
+# `structures_per_spacegroup: 15` (uniform across *every* space group in
+# scope, ignoring family boundaries) -- chosen so 15 * 230 = 3450 raw
+# structures, comparable to round 7's 500 * 7 = 3500 (see
+# experiments/family_only_round8_notes.md for the resulting -- now
+# strongly family-IMBALANCED -- per-family raw counts, an explicit,
+# expected consequence of this design, not a bug).
+#
+# soap/train/augmentation blocks otherwise byte-identical to round 7 (same
+# dim=252 SOAP, same batch=128/epochs=200 training budget) -- this is a
+# NEW dataset cache (pyxtal fragment changed), unlike round 7, which
+# reused round 3's cache directly.
+#
+# Run with: dimred-sweep configs/tuning_sweep_vae_family_only_round8.example.yaml --cache-dir runs/_shared_dataset_cache_family_only_round8
+
+base:
+  seed: 42
+  output_dir: runs/tuning_vae_family_only_round8
+  model: vae
+  data_source: pyxtal
+
+  pyxtal:
+    families: [triclinic, monoclinic, orthorhombic, tetragonal, trigonal, hexagonal, cubic]
+    structures_per_spacegroup: 15
+    n_species: 1
+    seed: 42
+
+  soap:
+    r_cut: 6.0
+    n_max: 8
+    l_max: 6
+    sigma: 0.5
+    element_agnostic: true
+    normalize_distances: false
+    species: null
+
+  augmentation:
+    n_augmented: 4
+    keep_original: true
+    jitter_probability: 0.5
+    jitter_std: 0.05
+    vacancy_probability: 0.5
+    vacancy_atom_probability: 1
+    max_vacancies: 1
+    supercell_radius: 4.0
+    seed: 42
+
+  vae:
+    encoder_hidden_dim: [128, 64] # fixed, same as round 7
+    latent_dim: 8
+    mirror: true
+
+  aux_heads:
+    mode: family_only
+    lambda_family: 2.0 # fixed, same as round 7
+    head_hidden_dim: 16
+
+  train:
+    epochs: 200
+    batch_size: 128
+    learning_rate: 0.001
+    optimizer: adam
+    beta: 1.0 # overridden by the grid below
+    val_ratio: 0.2
+    device: gpu
+    early_stopping:
+      enabled: true
+      patience: 20
+      min_delta: 0.0001
+      restore_best_weights: true
+
+# 2 beta values -- same 2 runs as round 7, only the dataset sampling scheme changed.
+grid:
+  train.beta: [0.5, 2.0]
