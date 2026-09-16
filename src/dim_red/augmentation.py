@@ -39,8 +39,25 @@ class AugmentationConfig:
             the output, alongside its augmented copies.
         jitter_probability: Probability, per augmented copy, that positional
             jitter is applied to it at all.
-        jitter_std: Standard deviation (in Angstroms) of the Gaussian noise
-            added to atomic positions when jitter is applied.
+        jitter_std: Standard deviation of the Gaussian noise added to atomic
+            positions when jitter is applied -- in Angstroms by default, or
+            as a fraction of the structure's own nearest-neighbor distance
+            when ``jitter_std_relative`` is True (see that field).
+        jitter_std_relative: If True, ``jitter_std`` is interpreted as a
+            fraction of each structure's own natural length scale (its
+            minimum pairwise atomic distance, computed before jitter/vacancy
+            is applied -- the same statistic
+            ``dim_red.soap._normalize_atoms_distances`` uses) rather than an
+            absolute Angstrom value. ``False`` (default) keeps the original
+            absolute-Angstrom behavior. Matters because a single fixed
+            absolute ``jitter_std`` is a wildly different *relative*
+            perturbation across structures of different natural scale (e.g.
+            a compact structure with ~0.6 A spacing vs. a looser one with
+            ~4 A spacing) -- this makes the perturbation magnitude
+            consistent, in proportion to each structure's own bond lengths,
+            regardless of its absolute scale. A single-atom structure (no
+            pairwise distance to measure) falls back to treating
+            ``jitter_std`` as absolute for that one structure.
         vacancy_probability: Probability, per augmented copy, that vacancy
             removal is applied to it at all.
         vacancy_atom_probability: Probability that any individual atom is
@@ -66,6 +83,7 @@ class AugmentationConfig:
     keep_original: bool = True
     jitter_probability: float = 0.5
     jitter_std: float = 0.05
+    jitter_std_relative: bool = False
     vacancy_probability: float = 0.0
     vacancy_atom_probability: float = 0.05
     max_vacancies: Optional[int] = None
@@ -130,6 +148,25 @@ def make_supercell_for_radius(atoms: Atoms, radius: float) -> Atoms:
             repeats.append(max(1, int(np.ceil(ratio - 1e-9))))
 
     return atoms.repeat(tuple(repeats))
+
+
+def _natural_length_scale(atoms: Atoms) -> float:
+    """Returns ``atoms``'s minimum pairwise distance between distinct atoms
+    (Angstroms) -- the same statistic ``dim_red.soap._normalize_atoms_distances``
+    uses to define a structure's own natural length scale, reused here (not
+    imported, to avoid pulling ``dim_red.soap``'s ``dscribe`` dependency into
+    this module) for ``AugmentationConfig.jitter_std_relative``. Returns 1.0
+    for a structure with fewer than 2 atoms or with all atoms coincident (no
+    meaningful pairwise distance to measure) -- a neutral fallback under
+    which a relative ``jitter_std`` behaves as if it were absolute for that
+    one structure.
+    """
+    if len(atoms) <= 1:
+        return 1.0
+    distances = atoms.get_all_distances(mic=True)
+    np.fill_diagonal(distances, np.inf)
+    min_dist = np.min(distances)
+    return float(min_dist) if min_dist > 1e-6 else 1.0
 
 
 def jitter_positions(atoms: Atoms, std: float, rng: np.random.Generator) -> Atoms:
@@ -202,7 +239,10 @@ def _augment_once(
     applied: List[str] = []
 
     if apply_jitter:
-        augmented = jitter_positions(augmented, config.jitter_std, rng)
+        effective_jitter_std = config.jitter_std
+        if config.jitter_std_relative:
+            effective_jitter_std *= _natural_length_scale(atoms)
+        augmented = jitter_positions(augmented, effective_jitter_std, rng)
         applied.append("jitter")
 
     if apply_vacancy:

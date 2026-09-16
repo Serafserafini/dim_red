@@ -20,8 +20,8 @@ from dim_red.augmentation import (
 )
 
 
-def _make_atoms(n=6, material_id="mp-1"):
-    positions = [[float(i), 0.0, 0.0] for i in range(n)]
+def _make_atoms(n=6, material_id="mp-1", spacing=1.0):
+    positions = [[i * spacing, 0.0, 0.0] for i in range(n)]
     atoms = Atoms("H" * n, positions=positions)
     atoms.info["material_id"] = material_id
     return atoms
@@ -49,6 +49,60 @@ def test_jitter_positions_perturbs_by_expected_magnitude():
     assert not np.allclose(diffs, 0.0)
     # Std of a large sample of Gaussian noise should be close to the configured std.
     assert 0.05 < np.std(diffs) < 0.2
+
+
+def test_augment_structures_jitter_std_relative_scales_with_spacing():
+    # Two structures with the same shape but a 4x difference in
+    # nearest-neighbor spacing (natural length scale) -- with
+    # jitter_std_relative=True, the same jitter_std should produce noise
+    # proportional to each structure's own spacing, not a fixed absolute
+    # magnitude.
+    compact = _make_atoms(n=300, spacing=1.0, material_id="compact")
+    loose = _make_atoms(n=300, spacing=4.0, material_id="loose")
+    config = AugmentationConfig(
+        n_augmented=1,
+        keep_original=False,
+        jitter_probability=1.0,
+        jitter_std=0.1,
+        jitter_std_relative=True,
+        seed=7,
+    )
+
+    compact_result = augment_structures([compact], config)[0]
+    loose_result = augment_structures([loose], config)[0]
+
+    compact_noise_std = np.std(compact_result.get_positions() - compact.get_positions())
+    loose_noise_std = np.std(loose_result.get_positions() - loose.get_positions())
+
+    # Expected: ~0.1 * spacing for each (nearest-neighbor distance == spacing here).
+    assert 0.05 < compact_noise_std < 0.2
+    assert 0.2 < loose_noise_std < 0.8
+    # The ratio between the two should track the 4x spacing ratio, not be ~1x
+    # (which is what a fixed absolute jitter_std would give instead).
+    assert 2.0 < (loose_noise_std / compact_noise_std) < 8.0
+
+
+def test_augment_structures_jitter_std_relative_false_is_absolute_by_default():
+    # Default (jitter_std_relative=False): the same jitter_std produces the
+    # same absolute noise magnitude regardless of structure spacing.
+    compact = _make_atoms(n=300, spacing=1.0, material_id="compact")
+    loose = _make_atoms(n=300, spacing=4.0, material_id="loose")
+    config = AugmentationConfig(
+        n_augmented=1,
+        keep_original=False,
+        jitter_probability=1.0,
+        jitter_std=0.1,
+        seed=7,
+    )
+
+    compact_result = augment_structures([compact], config)[0]
+    loose_result = augment_structures([loose], config)[0]
+
+    compact_noise_std = np.std(compact_result.get_positions() - compact.get_positions())
+    loose_noise_std = np.std(loose_result.get_positions() - loose.get_positions())
+
+    assert 0.05 < compact_noise_std < 0.2
+    assert 0.05 < loose_noise_std < 0.2
 
 
 def test_remove_random_atoms_respects_max_vacancies():

@@ -440,6 +440,7 @@ def _resolve_augmentation(config: "RunConfig") -> Optional[AugmentationConfig]:
         keep_original=config.augmentation.keep_original,
         jitter_probability=config.augmentation.jitter_probability,
         jitter_std=config.augmentation.jitter_std,
+        jitter_std_relative=config.augmentation.jitter_std_relative,
         vacancy_probability=config.augmentation.vacancy_probability,
         vacancy_atom_probability=config.augmentation.vacancy_atom_probability,
         max_vacancies=config.augmentation.max_vacancies,

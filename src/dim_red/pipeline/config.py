@@ -307,8 +307,18 @@ class AugmentationConfig:
             alongside its augmented copies.
         jitter_probability: Probability, per augmented copy, that positional
             jitter (thermal noise) is applied to it at all.
-        jitter_std: Standard deviation (Angstroms) of the Gaussian noise
-            added to atomic positions when jitter is applied.
+        jitter_std: Standard deviation of the Gaussian noise added to atomic
+            positions when jitter is applied -- in Angstroms by default, or
+            as a fraction of each structure's own nearest-neighbor distance
+            when ``jitter_std_relative`` is True.
+        jitter_std_relative: If True, ``jitter_std`` is a fraction of each
+            structure's own natural length scale (minimum pairwise atomic
+            distance) instead of an absolute Angstrom value -- see
+            ``dim_red.augmentation.AugmentationConfig.jitter_std_relative``
+            for the full rationale (a fixed absolute jitter is a wildly
+            different relative perturbation across structures of different
+            natural scale). ``False`` (default) keeps the original
+            absolute-Angstrom behavior.
         vacancy_probability: Probability, per augmented copy, that vacancy
             removal is applied to it at all.
         vacancy_atom_probability: Probability that any individual atom is
@@ -332,6 +342,7 @@ class AugmentationConfig:
     keep_original: bool = True
     jitter_probability: float = 0.5
     jitter_std: float = 0.05
+    jitter_std_relative: bool = False
     vacancy_probability: float = 0.0
     vacancy_atom_probability: float = 0.05
     max_vacancies: Optional[int] = None
