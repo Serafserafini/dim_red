@@ -1,0 +1,83 @@
+# Round 11 ("relative_jitter") of configs/tuning_sweep_vae_family_only_round10.example.yaml:
+# isolates augmentation.jitter_std_relative: false -> true (new field, see
+# dim_red.augmentation.AugmentationConfig -- jitter_std is now interpreted
+# as a fraction of each structure's own nearest-neighbor distance instead
+# of an absolute Angstrom value). jitter_std itself stays at 0.05
+# (unchanged number, now meaning 5% of each structure's natural scale
+# instead of 0.05 A flat) -- keeping the number fixed and only flipping
+# the interpretation flag is what isolates this as a single variable.
+# Flagged as a related-but-distinct scale-consistency issue while
+# diagnosing round 9's normalize_distances collapse (see
+# experiments/round9_notes.md/round10_notes.md): a fixed absolute jitter
+# is a wildly different relative perturbation across structures of
+# different natural scale (measured range 0.58-4.2 A in this dataset).
+#
+# Depends on round 10's outcome (retuned r_cut=3.0/sigma=0.25 for
+# normalize_distances) -- NOT launched until round 10 confirms that fix
+# actually recovers accuracy; built on top of it here regardless so it's
+# ready to go. Everything else identical to round 10. NEW dataset cache
+# (augmentation payload changed), own warmup.
+#
+# Run with: dimred-sweep configs/tuning_sweep_vae_family_only_round11.example.yaml --cache-dir runs/_shared_dataset_cache_family_only_round11
+
+base:
+  seed: 42
+  output_dir: runs/tuning_vae_family_only_round11
+  model: vae
+  data_source: pyxtal
+
+  pyxtal:
+    families: [triclinic, monoclinic, orthorhombic, tetragonal, trigonal, hexagonal, cubic]
+    structures_per_family: 500
+    distribution: uniform
+    n_species: 1
+    seed: 42
+
+  soap:
+    r_cut: 3.0
+    n_max: 8
+    l_max: 6
+    sigma: 0.25
+    element_agnostic: true
+    normalize_distances: true
+    species: null
+
+  augmentation:
+    n_augmented: 4
+    keep_original: true
+    jitter_probability: 0.5
+    jitter_std: 0.05
+    jitter_std_relative: true # was false (implicit default) in round 7/9/10 -- the ONE variable this round isolates
+    vacancy_probability: 0.5
+    vacancy_atom_probability: 1
+    max_vacancies: 1
+    supercell_radius: 4.0
+    seed: 42
+
+  vae:
+    encoder_hidden_dim: [128, 64] # fixed, same as round 7/9/10
+    latent_dim: 8
+    mirror: true
+
+  aux_heads:
+    mode: family_only
+    lambda_family: 2.0 # fixed, same as round 7/9/10
+    head_hidden_dim: 16
+
+  train:
+    epochs: 200
+    batch_size: 128
+    learning_rate: 0.001
+    optimizer: adam
+    beta: 1.0 # overridden by the grid below
+    val_ratio: 0.2
+    device: gpu
+    early_stopping:
+      enabled: true
+      patience: 20
+      min_delta: 0.0001
+      restore_best_weights: true
+
+# 2 beta values -- same 2 runs as round 7/9/10, only jitter_std_relative changed.
+grid:
+  train.beta: [0.5, 2.0]
