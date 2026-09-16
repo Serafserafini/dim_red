@@ -1,0 +1,79 @@
+# Round 9 ("scale_invariance") of configs/tuning_sweep_vae_family_only_round7.example.yaml
+# (round 7, now the reference config for this element_agnostic investigation
+# line -- see the "Round 7 is the reference" project memory/
+# experiments/round1to7_final_comparison.md): isolates the ONE remaining
+# untested variable flagged before starting the spacegroup investigation --
+# soap.normalize_distances: false -> true. Without it, SOAP's r_cut/sigma
+# are absolute lengths (Angstroms), so two structures identical up to a
+# uniform scale factor (a trivial symmetry-preserving transformation --
+# never changes spacegroup/family) get DIFFERENT SOAP vectors; with it,
+# every structure is rescaled (positions AND cell) so its nearest-neighbor
+# distance is exactly 1.0 before SOAP is computed, removing this nuisance
+# variance entirely. Never turned on in any round of this project so far.
+# Everything else byte-identical to round 7 (dim=252 SOAP shape,
+# n_species=1, element_agnostic=true, structures_per_family=500,
+# batch=128/epochs=200) -- a NEW dataset cache (soap_kwargs is part of the
+# cache key), requires its own warmup.
+#
+# Run with: dimred-sweep configs/tuning_sweep_vae_family_only_round9.example.yaml --cache-dir runs/_shared_dataset_cache_family_only_round9
+
+base:
+  seed: 42
+  output_dir: runs/tuning_vae_family_only_round9
+  model: vae
+  data_source: pyxtal
+
+  pyxtal:
+    families: [triclinic, monoclinic, orthorhombic, tetragonal, trigonal, hexagonal, cubic]
+    structures_per_family: 500
+    distribution: uniform
+    n_species: 1
+    seed: 42
+
+  soap:
+    r_cut: 6.0
+    n_max: 8
+    l_max: 6
+    sigma: 0.5
+    element_agnostic: true
+    normalize_distances: true # was false in every prior round -- the ONE variable this round isolates
+    species: null
+
+  augmentation:
+    n_augmented: 4
+    keep_original: true
+    jitter_probability: 0.5
+    jitter_std: 0.05
+    vacancy_probability: 0.5
+    vacancy_atom_probability: 1
+    max_vacancies: 1
+    supercell_radius: 4.0
+    seed: 42
+
+  vae:
+    encoder_hidden_dim: [128, 64] # fixed, same as round 7
+    latent_dim: 8
+    mirror: true
+
+  aux_heads:
+    mode: family_only
+    lambda_family: 2.0 # fixed, same as round 7
+    head_hidden_dim: 16
+
+  train:
+    epochs: 200
+    batch_size: 128
+    learning_rate: 0.001
+    optimizer: adam
+    beta: 1.0 # overridden by the grid below
+    val_ratio: 0.2
+    device: gpu
+    early_stopping:
+      enabled: true
+      patience: 20
+      min_delta: 0.0001
+      restore_best_weights: true
+
+# 2 beta values -- same 2 runs as round 7, only normalize_distances changed.
+grid:
+  train.beta: [0.5, 2.0]
