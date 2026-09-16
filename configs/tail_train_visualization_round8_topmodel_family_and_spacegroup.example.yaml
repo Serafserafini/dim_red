@@ -1,0 +1,46 @@
+# Round 8 visualization-tail experiment, target 1/2 (see the family_only
+# sibling config for the target body's identity/rationale): same body,
+# mode: family_and_spacegroup instead. Feasible even though this body's
+# OWN training used batching.strategy=random (no spacegroup_classes saved
+# to its embeddings.npz for the body's own masking) -- verified in code
+# that pipeline.tail_training.train_tail builds ITS OWN family/spacegroup
+# vocabulary fresh from embeddings.npz's raw `labels`/`spacegroups` arrays
+# (always saved unconditionally, see pipeline.single_run), independent of
+# whatever mode the body itself trained with. Reproduces the exact
+# "richtail" recipe from configs/tail_train_visualization_supcon_family_and_spacegroup_rich.example.yaml
+# (distance: euclidean, lambda_norm: 0.0, hidden_dim: [32,16], batch=128,
+# epochs=200) that gave the best 2D quality found so far (silhouette 0.66,
+# kmeans_ari 0.92) on round 1's body -- here applied to the best
+# family_only-line body instead.
+#
+# Run with:
+#   dimred-train-tail configs/tail_train_visualization_round8_topmodel_family_and_spacegroup.example.yaml runs/tuning_supcon_family_only_round7/20260914-1/model-supcon_hd-128-64_pyxtal-cub-hex-mon-ort-tet-tri-tri_nsp1_supcon-family_only_tau0.05_lf1-3
+
+tail_kind: visualization
+
+visualization:
+  viz_dim: 2
+  mode: family_and_spacegroup
+  lambda_family: 1.0
+  lambda_spacegroup: 1.0
+  tau: 0.1
+  distance: euclidean
+  lambda_norm: 0.0
+  hidden_dim: [32, 16]
+  batching:
+    strategy: random
+
+output_subdir: visualization_round8_topmodel_family_and_spacegroup
+
+seed: 42
+
+train:
+  epochs: 200
+  batch_size: 128
+  optimizer: adam
+  device: gpu
+  early_stopping:
+    enabled: true
+    patience: 20
+    min_delta: 0.0001
+    restore_best_weights: true

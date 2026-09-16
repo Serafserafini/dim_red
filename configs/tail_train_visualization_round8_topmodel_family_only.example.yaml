@@ -1,0 +1,46 @@
+# Round 8 visualization-tail experiment, target 1/2: the best-accuracy
+# body across the ENTIRE family_only investigation excluding round 1
+# (which predates it and uses a different soap.element_agnostic/n_species
+# setting) -- round 7's supcon run tau=0.05/cosine/hd-128-64/batching=random,
+# family accuracy 0.9726 (see experiments/family_only_round7_notes.md).
+#
+# mode: family_only here -- distance: cosine (not euclidean) matching
+# configs/tail_train_visualization_family_only.example.yaml's rationale:
+# euclidean without a spacegroup term risks the unbounded-norm collapse
+# documented in the round-3 tail sweep (only avoided in the "richtail"
+# config -- see the family_and_spacegroup sibling of this file -- because
+# of the richer contrastive signal, not because of the training budget
+# alone). hidden_dim/epochs/batch_size still match that richer recipe
+# (more capacity + longer training), the part of the finding that isn't
+# mode-dependent.
+#
+# Run with:
+#   dimred-train-tail configs/tail_train_visualization_round8_topmodel_family_only.example.yaml runs/tuning_supcon_family_only_round7/20260914-1/model-supcon_hd-128-64_pyxtal-cub-hex-mon-ort-tet-tri-tri_nsp1_supcon-family_only_tau0.05_lf1-3
+
+tail_kind: visualization
+
+visualization:
+  viz_dim: 2
+  mode: family_only
+  lambda_family: 1.0
+  tau: 0.1
+  distance: cosine
+  lambda_norm: 0.0
+  hidden_dim: [32, 16]
+  batching:
+    strategy: random
+
+output_subdir: visualization_round8_topmodel_family_only
+
+seed: 42
+
+train:
+  epochs: 200
+  batch_size: 128
+  optimizer: adam
+  device: gpu
+  early_stopping:
+    enabled: true
+    patience: 20
+    min_delta: 0.0001
+    restore_best_weights: true
