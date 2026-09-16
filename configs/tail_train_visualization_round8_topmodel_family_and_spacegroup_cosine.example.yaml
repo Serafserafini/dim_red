@@ -1,0 +1,44 @@
+# Fills the one untested cell in the visualization-tail mode/distance grid
+# (see the conversation): every family_and_spacegroup config tried so far
+# (configs/tail_train_visualization_supcon_family_and_spacegroup_rich.example.yaml,
+# configs/tail_train_visualization_round8_{topmodel,supcon_balanced}_family_and_spacegroup
+# .example.yaml) used distance: euclidean + lambda_norm: 0.0; every cosine
+# config tried so far used mode: family_only. This one combines
+# family_and_spacegroup with cosine for the first time, on the SAME target
+# body as the euclidean richtail (round 7's overall-best supcon run,
+# excluding round 1, accuracy 0.9726) so the two are directly comparable.
+# lambda_norm stays 0.0 -- not needed with cosine (already
+# L2-normalization-bounded), same reasoning as
+# configs/tail_train_visualization_family_only.example.yaml.
+#
+# Run with:
+#   dimred-train-tail configs/tail_train_visualization_round8_topmodel_family_and_spacegroup_cosine.example.yaml runs/tuning_supcon_family_only_round7/20260914-1/model-supcon_hd-128-64_pyxtal-cub-hex-mon-ort-tet-tri-tri_nsp1_supcon-family_only_tau0.05_lf1-3
+
+tail_kind: visualization
+
+visualization:
+  viz_dim: 2
+  mode: family_and_spacegroup
+  lambda_family: 1.0
+  lambda_spacegroup: 1.0
+  tau: 0.1
+  distance: cosine
+  lambda_norm: 0.0
+  hidden_dim: [32, 16]
+  batching:
+    strategy: random
+
+output_subdir: visualization_round8_topmodel_family_and_spacegroup_cosine
+
+seed: 42
+
+train:
+  epochs: 200
+  batch_size: 128
+  optimizer: adam
+  device: gpu
+  early_stopping:
+    enabled: true
+    patience: 20
+    min_delta: 0.0001
+    restore_best_weights: true
