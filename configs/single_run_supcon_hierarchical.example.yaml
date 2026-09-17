@@ -43,6 +43,11 @@ train:
   device: cpu
 
 # The new bit: auto-train a hierarchical tail right after the body finishes.
+# hierarchical.expert_input defaults to "soap" (stage-2 experts recompute
+# and train on native SOAP instead of the body's own embedding, verified
+# to help substantially -- see HierarchicalTailConfig's docstring); fine
+# here since this run's own dataset.extxyz already exists by the time the
+# auto-attached tail trains.
 tails:
   hierarchical:
     head_hidden_dim: 16

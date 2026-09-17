@@ -1163,34 +1163,45 @@ class HierarchicalTailConfig:
             predicting that family's single most frequent training-set
             spacegroup instead (see ``family_expert_status.yaml``).
         expert_input: Which representation the stage-2 experts train on --
-            ``"body"`` (default, unchanged behavior) uses the same frozen
-            body embeddings as stage 1 (``embeddings.npz["embeddings"]``);
-            ``"soap"`` instead recomputes each structure's native
-            (pre-body) standardized SOAP descriptor and trains every
-            expert on that instead. Motivation: a body's ``latent_dim`` is
-            typically much narrower than the native SOAP dimensionality
-            (e.g. 8 vs 252) and was optimized for *family* discrimination
-            only (``supcon.mode: family_only``/no spacegroup term) -- it
-            may have compressed away exactly the finer geometric detail
-            (screw axes vs. plain rotations, glide vs. mirror planes) a
-            spacegroup expert needs, even though that detail is still
-            present in the native descriptor. Stage 1 (family) always uses
-            the body embeddings regardless of this setting, since it
-            already performs well and the point is only to test whether
-            *stage 2* benefits from bypassing the body's bottleneck.
-            ``"soap"`` requires the target run's ``dataset.extxyz`` to
-            still exist (recomputes SOAP from it, using the run's own
-            saved ``feature_mean``/``feature_std`` to standardize) and its
-            ``model_kind`` to be ``"supcon"`` -- not ``"cgcnn"`` (graph
-            features, no SOAP at all) or ``"mace"`` (a frozen foundation-
-            model embedding, not SOAP either), even though both of those
-            still carry a default-valued ``RunConfig.soap`` block that
-            their own pipeline just never reads.
+            ``"soap"`` (default since 2026-09-17 -- see below) recomputes
+            each structure's native (pre-body) standardized SOAP
+            descriptor and trains every expert on that; ``"body"`` instead
+            uses the same frozen body embeddings as stage 1
+            (``embeddings.npz["embeddings"]``). Motivation: a body's
+            ``latent_dim`` is typically much narrower than the native SOAP
+            dimensionality (e.g. 8 vs 252) and was optimized for *family*
+            discrimination only (``supcon.mode: family_only``/no
+            spacegroup term) -- it compresses away exactly the finer
+            geometric detail (screw axes vs. plain rotations, glide vs.
+            mirror planes) a spacegroup expert needs, even though that
+            detail is still present in the native descriptor. Verified
+            empirically on this project's family_only investigation
+            (round 13): switching stage 2 from body to native SOAP more
+            than doubled overall spacegroup accuracy (0.25 -> 0.57
+            oracle-routed), uniformly across every family -- this is a
+            **deliberate default-behavior change**, not a marginal tweak,
+            hence the flip; ``"body"`` remains available for that exact
+            ablation comparison, or when native SOAP truly isn't wanted.
+            Stage 1 (family) always uses the body embeddings regardless of
+            this setting -- it already performs well, and the point is
+            only about whether *stage 2* benefits from bypassing the
+            body's bottleneck. ``"soap"`` requires the target run's
+            ``dataset.extxyz`` to still exist (recomputes SOAP from it,
+            using the run's own saved ``feature_mean``/``feature_std`` to
+            standardize) and its ``model_kind`` to be ``"supcon"`` -- not
+            ``"cgcnn"`` (graph features, no SOAP at all) or ``"mace"`` (a
+            frozen foundation-model embedding, not SOAP either), even
+            though both of those still carry a default-valued
+            ``RunConfig.soap`` block their own pipeline never reads; a
+            hierarchical tail on a cgcnn/mace run must set
+            ``expert_input: body`` explicitly, or this raises a clear
+            ``ValueError`` naming the offending ``model_kind`` rather than
+            silently doing the wrong thing.
     """
 
     head_hidden_dim: int = 16
     min_samples_per_expert: int = 10
-    expert_input: str = "body"
+    expert_input: str = "soap"
 
     def __post_init__(self):
         if self.head_hidden_dim <= 0:

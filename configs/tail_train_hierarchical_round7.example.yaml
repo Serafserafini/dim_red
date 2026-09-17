@@ -24,6 +24,16 @@
 # 2500 points, ~37/class on average -- a much harder problem than
 # triclinic's 2 spacegroups over the same 2500 points).
 #
+# expert_input: body (explicit -- this is now the NON-default option,
+# since 2026-09-17): this file documents the ORIGINAL baseline attempt
+# (experts trained on the body's 8-dim embedding, same as stage 1) --
+# kept exactly as originally run, for reproducibility of that specific
+# result (overall spacegroup accuracy 0.2482/0.2535 oracle). See
+# configs/tail_train_hierarchical_round7_soap_experts.example.yaml for
+# the follow-up that more than doubled it (0.5606/0.5712) by letting
+# experts see native SOAP instead -- now the default for any NEW
+# hierarchical config in this project.
+#
 # Run with:
 #   dimred-train-tail configs/tail_train_hierarchical_round7.example.yaml runs/tuning_supcon_family_only_round7/20260914-1/model-supcon_hd-128-64_pyxtal-cub-hex-mon-ort-tet-tri-tri_nsp1_supcon-family_only_tau0.05_lf1-3
 
@@ -32,6 +42,7 @@ tail_kind: hierarchical
 hierarchical:
   head_hidden_dim: 16
   min_samples_per_expert: 10
+  expert_input: body
 
 output_subdir: hierarchical_round7
 

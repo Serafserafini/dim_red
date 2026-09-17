@@ -279,8 +279,12 @@ def test_train_tail_hierarchical_writes_expected_artifacts(tmp_path):
     config = TailTrainConfig(
         run_dir=str(run_dir),
         tail_kind="hierarchical",
+        # expert_input="body" (the non-default option since it flipped to
+        # "soap") -- this test exercises the general artifact-writing
+        # mechanics, not which representation experts train on; pinning it
+        # keeps this test independent of compute_soap/dataset.extxyz.
         hierarchical=HierarchicalTailConfig(
-            head_hidden_dim=8, min_samples_per_expert=5
+            head_hidden_dim=8, min_samples_per_expert=5, expert_input="body"
         ),
         train=TailTrainSettings(epochs=2, batch_size=4),
     )
@@ -352,8 +356,11 @@ def test_train_tail_hierarchical_falls_back_for_low_sample_families(tmp_path):
         tail_kind="hierarchical",
         # Both families have well under 100 training rows -- forces every
         # family into the majority-value fallback, no expert trained.
+        # expert_input="body" pinned for the same reason as the artifacts
+        # test above (irrelevant to fallback logic, keeps this independent
+        # of compute_soap).
         hierarchical=HierarchicalTailConfig(
-            head_hidden_dim=8, min_samples_per_expert=100
+            head_hidden_dim=8, min_samples_per_expert=100, expert_input="body"
         ),
         train=TailTrainSettings(epochs=1, batch_size=4),
     )
