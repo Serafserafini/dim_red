@@ -1,0 +1,83 @@
+# Round 12 ("scale_invariance_richer_cutoff") of
+# configs/tuning_sweep_vae_family_only_round10.example.yaml: tests
+# hypothesis 2 from the round 10 confusion-matrix analysis
+# (experiments/round10_notes.md) -- round 10's r_cut=3.0/sigma=0.25
+# (relative units) recovered from round 9's collapse but still lagged
+# round 7 by ~8-13 points per model_kind. Confusion-matrix analysis
+# (same-hyperparameter supcon run, round 7 vs round 10) showed the gap is
+# NOT "Cubic loses its scale shortcut" (Cubic recall actually improved,
+# 0.978->0.998) -- it's the OTHER SIX families that collapsed uniformly
+# (-12 to -31 points), even though they don't differ in scale among
+# themselves. Candidate explanation: r_cut=3.0 may simply be a less rich
+# effective neighborhood for resolving the subtler distinctions between
+# those six (geometrically closer) families than round 7's absolute 6.0 A
+# was, independent of the scale-invariance question itself.
+#
+# This round tests a richer relative cutoff: r_cut=5.0, sigma=0.417 (same
+# 12:1 ratio as round 10's 3.0/0.25) -- everything else identical to
+# round 10 (soap.normalize_distances: true, augmentation unchanged --
+# jitter_std_relative stays false/absolute, since round 11 already showed
+# relative jitter hurts). NEW dataset cache, own warmup.
+#
+# Run with: dimred-sweep configs/tuning_sweep_vae_family_only_round12.example.yaml --cache-dir runs/_shared_dataset_cache_family_only_round12
+
+base:
+  seed: 42
+  output_dir: runs/tuning_vae_family_only_round12
+  model: vae
+  data_source: pyxtal
+
+  pyxtal:
+    families: [triclinic, monoclinic, orthorhombic, tetragonal, trigonal, hexagonal, cubic]
+    structures_per_family: 500
+    distribution: uniform
+    n_species: 1
+    seed: 42
+
+  soap:
+    r_cut: 5.0 # was 3.0 in round 10 -- richer relative cutoff, same 12:1 ratio to sigma
+    n_max: 8
+    l_max: 6
+    sigma: 0.417 # was 0.25 in round 10
+    element_agnostic: true
+    normalize_distances: true
+    species: null
+
+  augmentation:
+    n_augmented: 4
+    keep_original: true
+    jitter_probability: 0.5
+    jitter_std: 0.05
+    vacancy_probability: 0.5
+    vacancy_atom_probability: 1
+    max_vacancies: 1
+    supercell_radius: 4.0
+    seed: 42
+
+  vae:
+    encoder_hidden_dim: [128, 64] # fixed, same as round 7/9/10
+    latent_dim: 8
+    mirror: true
+
+  aux_heads:
+    mode: family_only
+    lambda_family: 2.0 # fixed, same as round 7/9/10
+    head_hidden_dim: 16
+
+  train:
+    epochs: 200
+    batch_size: 128
+    learning_rate: 0.001
+    optimizer: adam
+    beta: 1.0 # overridden by the grid below
+    val_ratio: 0.2
+    device: gpu
+    early_stopping:
+      enabled: true
+      patience: 20
+      min_delta: 0.0001
+      restore_best_weights: true
+
+# 2 beta values -- same 2 runs as round 7/9/10, only r_cut/sigma changed.
+grid:
+  train.beta: [0.5, 2.0]
