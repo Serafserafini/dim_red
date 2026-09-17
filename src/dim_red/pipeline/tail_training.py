@@ -341,6 +341,11 @@ def _train_hierarchical_tail(
     if r_expert_all is None:
         r_expert_all = r_all
     expert_input_dim = r_expert_all.shape[1]
+    expert_hidden_dim = (
+        hierarchical.expert_head_hidden_dim
+        if hierarchical.expert_head_hidden_dim is not None
+        else hierarchical.head_hidden_dim
+    )
 
     family_classes, family_ids = _build_vocab_ids(labels_all.tolist())
     logger.info("%d family classes: %s", len(family_classes), family_classes)
@@ -350,10 +355,11 @@ def _train_hierarchical_tail(
     logger.info("%d spacegroup classes observed", n_spacegroup)
 
     logger.info(
-        "Training hierarchical tail: head_hidden_dim=%d min_samples_per_expert=%d "
-        "expert_input=%s (dim=%d) epochs=%d batch_size=%d device=%s optimizer=%s "
-        "early_stopping=%s",
+        "Training hierarchical tail: head_hidden_dim=%d expert_hidden_dim=%s "
+        "min_samples_per_expert=%d expert_input=%s (dim=%d) epochs=%d "
+        "batch_size=%d device=%s optimizer=%s early_stopping=%s",
         hierarchical.head_hidden_dim,
+        expert_hidden_dim,
         hierarchical.min_samples_per_expert,
         hierarchical.expert_input,
         expert_input_dim,
@@ -476,7 +482,7 @@ def _train_hierarchical_tail(
         expert_dir.mkdir(parents=True, exist_ok=True)
         expert_tail = ClassificationTail(
             input_dim=expert_input_dim,
-            hidden_dim=hierarchical.head_hidden_dim,
+            hidden_dim=expert_hidden_dim,
             n_family_classes=len(local_classes),
             seed=config.seed,
         )

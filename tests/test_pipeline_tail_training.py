@@ -16,6 +16,8 @@ from ase import Atoms
 
 pytest.importorskip("jax")
 
+from flax import serialization
+
 from dim_red.pipeline.config import (
     AuxHeadsConfig,
     BalancedBatchingParams,
@@ -413,6 +415,49 @@ def test_train_tail_hierarchical_expert_input_soap_uses_native_features(tmp_path
     # 3-dim latent embedding.
     assert "expert_input=soap (dim=5)" in run_log
     assert "Recomputed native SOAP features: shape=(20, 5)" in run_log
+
+
+def test_train_tail_hierarchical_expert_head_hidden_dim_gives_experts_a_deeper_mlp(
+    tmp_path,
+):
+    run_dir = _train_supcon_run(tmp_path)
+    config = TailTrainConfig(
+        run_dir=str(run_dir),
+        tail_kind="hierarchical",
+        hierarchical=HierarchicalTailConfig(
+            head_hidden_dim=8,
+            min_samples_per_expert=5,
+            expert_input="soap",
+            expert_head_hidden_dim=[32, 16],
+        ),
+        train=TailTrainSettings(epochs=1, batch_size=4),
+    )
+
+    with patch(
+        "dim_red.pipeline.tail_training.compute_soap",
+        side_effect=_fake_compute_soap(seed=1, n_features=5),
+    ):
+        tail_dir = train_tail(config)
+
+    with open(tail_dir / "run.log") as f:
+        run_log = f.read()
+    assert "expert_hidden_dim=[32, 16]" in run_log
+
+    # An expert's own head has 3 Dense layers (32, 16, n_classes) -- the
+    # family stage (still head_hidden_dim=8, a single layer) has only 2.
+    with open(tail_dir / "experts" / "Cubic" / "tail_params.msgpack", "rb") as f:
+        expert_params = serialization.msgpack_restore(f.read())
+    expert_dense_layers = [
+        k for k in expert_params["family_head"] if k.startswith("Dense_")
+    ]
+    assert len(expert_dense_layers) == 3
+
+    with open(tail_dir / "family" / "tail_params.msgpack", "rb") as f:
+        family_params = serialization.msgpack_restore(f.read())
+    family_dense_layers = [
+        k for k in family_params["family_head"] if k.startswith("Dense_")
+    ]
+    assert len(family_dense_layers) == 2
 
 
 def test_train_tail_hierarchical_expert_input_soap_requires_dataset_extxyz(tmp_path):

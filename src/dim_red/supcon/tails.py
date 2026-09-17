@@ -32,7 +32,7 @@ that stage's optimizer" (see ``dim_red.supcon.tail_training``), no
 ``stop_gradient``/masked-optimizer machinery needed.
 """
 
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Union
 
 import flax.linen as nn
 import jax
@@ -200,16 +200,31 @@ def apply_family_mask(
 class ClassifierHead(nn.Module):
     """Small MLP classifying representations into discrete classes.
 
-    Verbatim duplicate of ``dim_red.vae.model.ClassifierHead``.
+    Behaviorally a superset of ``dim_red.vae.model.ClassifierHead`` (that
+    one stays a single-hidden-layer-only duplicate) -- ``hidden_dim`` here
+    also accepts a sequence, for a hierarchical tail's
+    ``expert_head_hidden_dim`` (see ``dim_red.pipeline.config
+    .HierarchicalTailConfig``), so a per-family spacegroup expert can be
+    given a deeper architecture than the default single hidden layer (e.g.
+    matching the frozen body's own encoder depth) instead of being stuck
+    with a single, possibly-undersized layer regardless of how rich its
+    input representation is.
     """
 
-    hidden_dim: int
+    hidden_dim: Union[int, Sequence[int]]
     n_classes: int
 
     @nn.compact
     def __call__(self, r: Array) -> Array:
         """Return class logits for a batch of representations ``r``."""
-        h = nn.relu(nn.Dense(self.hidden_dim)(r))
+        dims = (
+            (self.hidden_dim,)
+            if isinstance(self.hidden_dim, int)
+            else tuple(self.hidden_dim)
+        )
+        h = r
+        for dim in dims:
+            h = nn.relu(nn.Dense(dim)(h))
         return nn.Dense(self.n_classes)(h)
 
 
@@ -221,7 +236,7 @@ class ClassificationTailModule(nn.Module):
     heads.
     """
 
-    hidden_dim: int
+    hidden_dim: Union[int, Sequence[int]]
     n_family_classes: Optional[int] = None
     n_spacegroup_classes: Optional[int] = None
 
@@ -278,7 +293,7 @@ class ClassificationTail:
     def __init__(
         self,
         input_dim: int,
-        hidden_dim: int,
+        hidden_dim: Union[int, Sequence[int]],
         n_family_classes: Optional[int] = None,
         n_spacegroup_classes: Optional[int] = None,
         seed: int = 42,
@@ -287,7 +302,12 @@ class ClassificationTail:
 
         Args:
             input_dim: Width of the body's (frozen) representation ``r``.
-            hidden_dim: Hidden width of each head's single hidden layer.
+            hidden_dim: Hidden width of each head -- an int for a single
+                hidden layer (original/default shape), or a sequence for a
+                deeper MLP (one layer per entry, in order) -- e.g. to match
+                a hierarchical tail's ``expert_head_hidden_dim`` (see
+                ``dim_red.pipeline.config.HierarchicalTailConfig``) against
+                the frozen body's own encoder depth.
             n_family_classes: If set, adds a family-classification head.
             n_spacegroup_classes: If set, adds a spacegroup-classification
                 head, conditioned on family via :func:`apply_family_mask`
@@ -296,9 +316,10 @@ class ClassificationTail:
             seed: Random seed used for Flax parameter initialization.
 
         Raises:
-            ValueError: If any dimensional argument is non-positive, if
-                neither class count is set, or if ``n_spacegroup_classes``
-                is set without ``n_family_classes``.
+            ValueError: If any dimensional argument is non-positive (every
+                entry, when ``hidden_dim`` is a sequence -- which must also
+                be non-empty), if neither class count is set, or if
+                ``n_spacegroup_classes`` is set without ``n_family_classes``.
         """
         if n_family_classes is None and n_spacegroup_classes is None:
             raise ValueError(
@@ -309,7 +330,10 @@ class ClassificationTail:
                 "n_family_classes must be set when n_spacegroup_classes is set "
                 "(the spacegroup head is conditioned on family)"
             )
-        if input_dim <= 0 or hidden_dim <= 0:
+        hidden_dims = (
+            (hidden_dim,) if isinstance(hidden_dim, int) else tuple(hidden_dim)
+        )
+        if input_dim <= 0 or not hidden_dims or any(d <= 0 for d in hidden_dims):
             raise ValueError("All dimensional arguments must be positive integers")
 
         self.input_dim = input_dim

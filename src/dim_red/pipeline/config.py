@@ -1197,11 +1197,27 @@ class HierarchicalTailConfig:
             ``expert_input: body`` explicitly, or this raises a clear
             ``ValueError`` naming the offending ``model_kind`` rather than
             silently doing the wrong thing.
+        expert_head_hidden_dim: Hidden-layer widths for stage-2 experts
+            specifically -- ``None`` (default) falls back to
+            ``head_hidden_dim`` (a single hidden layer, same as stage 1);
+            a list gives every expert one hidden layer per entry instead
+            (e.g. ``[128, 64]`` to match a frozen body's own encoder
+            depth), independent of stage 1's own architecture (stage 1
+            always uses ``head_hidden_dim``, never this field -- it
+            already performs well, so there's no reason to also grow it
+            when just widening the experts). Motivation: like
+            ``expert_input``, this exists because the default single
+            hidden layer sized ``head_hidden_dim`` (16 by default) may be
+            an unnecessary bottleneck for a spacegroup expert once it's
+            already seeing the rich native SOAP input (``expert_input:
+            "soap"``) -- giving it comparable capacity to the body's own
+            encoder lets it actually use that richer input.
     """
 
     head_hidden_dim: int = 16
     min_samples_per_expert: int = 10
     expert_input: str = "soap"
+    expert_head_hidden_dim: Optional[List[int]] = None
 
     def __post_init__(self):
         if self.head_hidden_dim <= 0:
@@ -1214,6 +1230,14 @@ class HierarchicalTailConfig:
             raise ValueError(
                 f"hierarchical.expert_input must be one of {_EXPERT_INPUT_KINDS}, "
                 f"got {self.expert_input!r}"
+            )
+        if self.expert_head_hidden_dim is not None and (
+            not self.expert_head_hidden_dim
+            or any(d <= 0 for d in self.expert_head_hidden_dim)
+        ):
+            raise ValueError(
+                "hierarchical.expert_head_hidden_dim, if set, must be a "
+                "non-empty list of positive integers"
             )
 
 

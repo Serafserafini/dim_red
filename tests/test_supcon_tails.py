@@ -140,6 +140,30 @@ def test_classification_tail_rejects_non_positive_dims():
         ClassificationTail(input_dim=0, hidden_dim=8, n_family_classes=3, seed=0)
 
 
+def test_classification_tail_hidden_dim_accepts_a_sequence_for_a_deeper_mlp():
+    tail = ClassificationTail(
+        input_dim=4, hidden_dim=[16, 8], n_family_classes=3, seed=0
+    )
+    r = jnp.ones((5, 4), dtype=jnp.float32)
+    logits = tail.classify_family(r)
+    assert logits.shape == (5, 3)
+    # Two hidden layers (16, 8) means two Dense kernels inside the family
+    # head, not one.
+    kernels = tail.params["family_head"]
+    dense_layers = [k for k in kernels if k.startswith("Dense_")]
+    assert len(dense_layers) == 3  # Dense_0 (16), Dense_1 (8), Dense_2 (n_classes)
+
+
+def test_classification_tail_rejects_empty_hidden_dim_sequence():
+    with pytest.raises(ValueError, match="positive integers"):
+        ClassificationTail(input_dim=4, hidden_dim=[], n_family_classes=3, seed=0)
+
+
+def test_classification_tail_rejects_non_positive_entry_in_hidden_dim_sequence():
+    with pytest.raises(ValueError, match="positive integers"):
+        ClassificationTail(input_dim=4, hidden_dim=[16, 0], n_family_classes=3, seed=0)
+
+
 def test_classification_tail_with_params_matches_stored_params():
     tail = ClassificationTail(
         input_dim=4, hidden_dim=8, n_family_classes=3, n_spacegroup_classes=6, seed=0
