@@ -600,8 +600,16 @@ def _train_a_supcon_run_with_hierarchical_tail(tmp_path, min_samples_per_expert=
     tail_config = TailTrainConfig(
         run_dir=str(run_dir),
         tail_kind="hierarchical",
+        # expert_input="body" (the non-default option since it flipped to
+        # "soap") -- this helper is about predict_hierarchical's own
+        # routing/fallback logic, not about which representation experts
+        # train on (see test_pipeline_tail_training.py's dedicated
+        # expert_input tests for that); pinning it here keeps this test
+        # independent of a second, unpatched compute_soap call.
         hierarchical=HierarchicalTailConfig(
-            head_hidden_dim=8, min_samples_per_expert=min_samples_per_expert
+            head_hidden_dim=8,
+            min_samples_per_expert=min_samples_per_expert,
+            expert_input="body",
         ),
         train=TailTrainSettings(epochs=1, batch_size=4),
     )
@@ -635,6 +643,72 @@ def test_predict_hierarchical_predicts_family_and_spacegroup_for_new_structures(
         # Both families got a dedicated expert (min_samples_per_expert=5, see
         # test_train_tail_hierarchical_writes_expected_artifacts) -- every
         # row should have a real probability distribution, not a fallback.
+        assert probs is not None
+        np.testing.assert_allclose(probs.sum(), 1.0, atol=1e-4)
+
+
+def test_predict_hierarchical_recomputes_native_soap_for_soap_experts(tmp_path):
+    """expert_input="soap" (the default) means the saved experts expect
+    native SOAP, not the body's own embedding -- predict_hierarchical must
+    recompute that same representation for brand-new structures too, or
+    loading an expert's checkpoint against the wrong input_dim would raise
+    a shape-mismatch error.
+    """
+    config = RunConfig(
+        fetch=FetchConfig(crystal_systems=["cubic", "hexagonal"], limit_per_system=10),
+        soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
+        vae=VAEArchConfig(encoder_hidden_dim=[8], latent_dim=3),
+        train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
+        supcon=SupConConfig(mode="family_and_spacegroup", tau=0.1, projection_dim=6),
+        seed=0,
+        output_dir=str(tmp_path / "runs"),
+        model_kind="supcon",
+    )
+    spacegroup_offsets = {"cubic": 195, "hexagonal": 168}
+
+    def fake_fetch(crystal_system, api_key=None, limit=10):
+        offset = spacegroup_offsets[crystal_system]
+        return [
+            _fake_atoms_with_spacegroup(
+                "Cu", f"mp-{crystal_system}-{i}", offset + (i % 2)
+            )
+            for i in range(limit)
+        ]
+
+    def fake_soap(atoms, **kwargs):
+        n = len(atoms) if isinstance(atoms, list) else 1
+        return np.random.default_rng(0).normal(size=(n, N_FEATURES)).astype(np.float32)
+
+    with (
+        patch(
+            "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
+            side_effect=fake_fetch,
+        ),
+        patch("dim_red.pipeline.dataset_cache.compute_soap", side_effect=fake_soap),
+    ):
+        run_dir = run_single(config)
+
+    tail_config = TailTrainConfig(
+        run_dir=str(run_dir),
+        tail_kind="hierarchical",
+        hierarchical=HierarchicalTailConfig(
+            head_hidden_dim=8,
+            min_samples_per_expert=5,
+            expert_input="soap",
+            expert_head_hidden_dim=[16, 8],
+        ),
+        train=TailTrainSettings(epochs=1, batch_size=4),
+    )
+    with patch("dim_red.pipeline.tail_training.compute_soap", side_effect=fake_soap):
+        train_tail(tail_config)
+
+    new_atoms = [Atoms("Cu", positions=[[0.0, 0.0, 0.0]]) for _ in range(3)]
+    with patch("dim_red.pipeline.inference.compute_soap", side_effect=fake_soap):
+        prediction = predict_hierarchical(run_dir, new_atoms)
+
+    assert len(prediction.family_pred) == 3
+    assert prediction.spacegroup_pred.shape == (3,)
+    for probs in prediction.spacegroup_probs:
         assert probs is not None
         np.testing.assert_allclose(probs.sum(), 1.0, atol=1e-4)
 

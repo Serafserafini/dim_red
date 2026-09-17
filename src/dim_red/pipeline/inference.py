@@ -711,11 +711,43 @@ def predict_hierarchical(
             entry["family"]: entry for entry in yaml.safe_load(f)["families"]
         }
     with open(tail_dir / "tail_config.yaml") as f:
-        head_hidden_dim = int(yaml.safe_load(f)["hierarchical"]["head_hidden_dim"])
+        hierarchical_config = yaml.safe_load(f)["hierarchical"]
+    head_hidden_dim = int(hierarchical_config["head_hidden_dim"])
+    expert_input = hierarchical_config.get("expert_input", "body")
+    expert_hidden_dim = (
+        hierarchical_config.get("expert_head_hidden_dim") or head_hidden_dim
+    )
 
     loaded = load_trained_run(run_dir)
     r = encode_structures(loaded, atoms_list)
     input_dim = r.shape[1]
+
+    # Stage-2 experts may have been trained on native SOAP instead of the
+    # body's own embedding (hierarchical.expert_input: "soap", the default
+    # since 2026-09-17 -- see dim_red.pipeline.config
+    # .HierarchicalTailConfig) -- recompute that same representation for
+    # these brand-new structures too, or every expert here would silently
+    # get the wrong input (raising a shape-mismatch error when loading its
+    # saved params, since the recorded architecture no longer matches).
+    if expert_input == "soap":
+        soap = loaded.config.soap
+        raw_expert_features = compute_soap(
+            atoms_list,
+            species=loaded.species,
+            r_cut=soap.r_cut,
+            n_max=soap.n_max,
+            l_max=soap.l_max,
+            sigma=soap.sigma,
+            element_agnostic=soap.element_agnostic,
+            average="outer",
+            normalize_distances=soap.normalize_distances,
+        )
+        r_expert = apply_standardization(
+            raw_expert_features, loaded.feature_mean, loaded.feature_std
+        )
+    else:
+        r_expert = r
+    expert_input_dim = r_expert.shape[1]
 
     family_tail = load_classification_tail(
         family_dir / "tail_params.msgpack",
@@ -747,15 +779,15 @@ def predict_hierarchical(
                 local_classes = yaml.safe_load(f)["local_spacegroup_classes"]
             expert_tail = load_classification_tail(
                 expert_dir / "tail_params.msgpack",
-                input_dim=input_dim,
-                hidden_dim=head_hidden_dim,
+                input_dim=expert_input_dim,
+                hidden_dim=expert_hidden_dim,
                 n_family_classes=len(local_classes),
             )
             expert_cache[family_name] = (expert_tail, local_classes)
         expert_tail, local_classes = expert_cache[family_name]
 
         local_probs = np.asarray(
-            jax.nn.softmax(expert_tail.classify_family(r[rows]), axis=-1)
+            jax.nn.softmax(expert_tail.classify_family(r_expert[rows]), axis=-1)
         )
         local_pred_ids = local_probs.argmax(axis=1)
         for row_pos, i in enumerate(rows):
