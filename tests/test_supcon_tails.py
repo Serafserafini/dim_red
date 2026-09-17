@@ -7,6 +7,7 @@ import pytest
 
 pytest.importorskip("jax")
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -183,6 +184,44 @@ def test_classification_tail_params_independent_of_body_params():
     model = SupConEncoder(input_dim=3, encoder_hidden_dim=[8], latent_dim=4, seed=0)
     tail = ClassificationTail(input_dim=4, hidden_dim=8, n_family_classes=3, seed=1)
     assert model.params is not tail.params
+
+
+def test_classification_tail_family_hidden_returns_last_hidden_layer_width():
+    tail = ClassificationTail(
+        input_dim=4, hidden_dim=[32, 16], n_family_classes=6, seed=0
+    )
+    r = jnp.ones((5, 4), dtype=jnp.float32)
+    hidden = tail.family_hidden(r)
+    assert hidden.shape == (5, 16)  # last hidden layer width, not n_family_classes
+
+
+def test_classification_tail_family_hidden_matches_manual_forward_pass():
+    tail = ClassificationTail(
+        input_dim=4, hidden_dim=[32, 16], n_family_classes=6, seed=0
+    )
+    r = jnp.ones((5, 4), dtype=jnp.float32)
+    hidden = tail.family_hidden(r)
+    # Same params, computed by hand: two Dense+relu layers, stopping before
+    # the final classification Dense.
+    params = tail.params["family_head"]
+    h = jax.nn.relu(r @ params["Dense_0"]["kernel"] + params["Dense_0"]["bias"])
+    h = jax.nn.relu(h @ params["Dense_1"]["kernel"] + params["Dense_1"]["bias"])
+    np.testing.assert_allclose(np.asarray(hidden), np.asarray(h), atol=1e-5)
+
+
+def test_classification_tail_family_hidden_works_against_an_already_trained_checkpoint():
+    """A checkpoint saved before family_hidden existed still works with it --
+    return_hidden just stops one Dense layer earlier in the exact same
+    traced path, no new/renamed submodules.
+    """
+    tail = ClassificationTail(
+        input_dim=4, hidden_dim=[32, 16], n_family_classes=6, seed=0
+    )
+    saved_params = jax.tree_util.tree_map(lambda x: x, tail.params)  # simulate reload
+    hidden = tail.family_hidden_with_params(saved_params, jnp.ones((2, 4)))
+    logits = tail.classify_family_with_params(saved_params, jnp.ones((2, 4)))
+    assert hidden.shape == (2, 16)
+    assert logits.shape == (2, 6)
 
 
 # --- apply_family_mask (verbatim duplicate of dim_red.vae.model's) ---------

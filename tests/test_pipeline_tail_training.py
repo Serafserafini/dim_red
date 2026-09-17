@@ -26,6 +26,7 @@ from dim_red.pipeline.config import (
     FetchConfig,
     GraphConfig,
     HierarchicalTailConfig,
+    HierarchicalVisualizationConfig,
     MaceConfig,
     RunConfig,
     SoapConfig,
@@ -458,6 +459,112 @@ def test_train_tail_hierarchical_expert_head_hidden_dim_gives_experts_a_deeper_m
         k for k in family_params["family_head"] if k.startswith("Dense_")
     ]
     assert len(family_dense_layers) == 2
+
+
+def test_train_tail_hierarchical_visualization_trains_one_tail_per_expert(tmp_path):
+    run_dir = _train_supcon_run(tmp_path)
+    hierarchical_config = TailTrainConfig(
+        run_dir=str(run_dir),
+        tail_kind="hierarchical",
+        output_subdir="hierarchical_soap",
+        hierarchical=HierarchicalTailConfig(
+            head_hidden_dim=8,
+            min_samples_per_expert=5,
+            expert_input="soap",
+            expert_head_hidden_dim=[16, 8],
+        ),
+        train=TailTrainSettings(epochs=2, batch_size=4),
+    )
+    with patch(
+        "dim_red.pipeline.tail_training.compute_soap",
+        side_effect=_fake_compute_soap(seed=1, n_features=5),
+    ):
+        train_tail(hierarchical_config)
+
+    viz_config = TailTrainConfig(
+        run_dir=str(run_dir),
+        tail_kind="hierarchical_visualization",
+        hierarchical_visualization=HierarchicalVisualizationConfig(
+            hierarchical_output_subdir="hierarchical_soap",
+        ),
+        train=TailTrainSettings(epochs=2, batch_size=4),
+    )
+    with patch(
+        "dim_red.pipeline.tail_training.compute_soap",
+        side_effect=_fake_compute_soap(seed=1, n_features=5),
+    ):
+        viz_tail_dir = train_tail(viz_config)
+
+    assert viz_tail_dir.name == "hierarchical_visualization"
+    assert (viz_tail_dir / "tail_config.yaml").exists()
+    # Both families ("Cubic"/"Hexagonal") get a dedicated expert (see
+    # test_train_tail_hierarchical_writes_expected_artifacts), so both get
+    # a visualization tail.
+    for family in ("Cubic", "Hexagonal"):
+        family_dir = viz_tail_dir / family
+        assert (family_dir / "tail_params.msgpack").exists()
+        assert (family_dir / "loss_history.csv").exists()
+        assert (family_dir / "viz_plot_spacegroup.png").exists()
+        embeddings = np.load(family_dir / "tail_embeddings.npz", allow_pickle=True)
+        assert embeddings["embeddings"].shape == (
+            10,
+            2,
+        )  # limit_per_system=10, viz_dim=2
+        assert embeddings["spacegroups"].shape == (10,)
+
+    with open(viz_tail_dir / "run.log") as f:
+        run_log = f.read()
+    assert "Trained 2/2 per-family visualization tails" in run_log
+
+
+def test_train_tail_hierarchical_visualization_skips_families_without_an_expert(
+    tmp_path,
+):
+    run_dir = _train_supcon_run(tmp_path)
+    hierarchical_config = TailTrainConfig(
+        run_dir=str(run_dir),
+        tail_kind="hierarchical",
+        output_subdir="hierarchical_fallback",
+        # Forces every family into the majority-value fallback -- no expert
+        # trained for either family.
+        hierarchical=HierarchicalTailConfig(
+            head_hidden_dim=8, min_samples_per_expert=100, expert_input="body"
+        ),
+        train=TailTrainSettings(epochs=1, batch_size=4),
+    )
+    train_tail(hierarchical_config)
+
+    viz_config = TailTrainConfig(
+        run_dir=str(run_dir),
+        tail_kind="hierarchical_visualization",
+        hierarchical_visualization=HierarchicalVisualizationConfig(
+            hierarchical_output_subdir="hierarchical_fallback",
+        ),
+        train=TailTrainSettings(epochs=1, batch_size=4),
+    )
+    viz_tail_dir = train_tail(viz_config)
+
+    assert not (viz_tail_dir / "Cubic").exists()
+    assert not (viz_tail_dir / "Hexagonal").exists()
+    with open(viz_tail_dir / "run.log") as f:
+        run_log = f.read()
+    assert "Trained 0/2 per-family visualization tails" in run_log
+
+
+def test_train_tail_hierarchical_visualization_requires_the_referenced_tail_to_exist(
+    tmp_path,
+):
+    run_dir = _train_supcon_run(tmp_path)
+    viz_config = TailTrainConfig(
+        run_dir=str(run_dir),
+        tail_kind="hierarchical_visualization",
+        hierarchical_visualization=HierarchicalVisualizationConfig(
+            hierarchical_output_subdir="does_not_exist",
+        ),
+        train=TailTrainSettings(epochs=1, batch_size=4),
+    )
+    with pytest.raises(FileNotFoundError, match="does_not_exist"):
+        train_tail(viz_config)
 
 
 def test_train_tail_hierarchical_expert_input_soap_requires_dataset_extxyz(tmp_path):

@@ -215,8 +215,20 @@ class ClassifierHead(nn.Module):
     n_classes: int
 
     @nn.compact
-    def __call__(self, r: Array) -> Array:
-        """Return class logits for a batch of representations ``r``."""
+    def __call__(self, r: Array, return_hidden: bool = False) -> Array:
+        """Return class logits for a batch of representations ``r`` -- or,
+        if ``return_hidden`` is True, the last hidden layer's activation
+        instead (the head's own learned representation, one layer short of
+        its final classification logits). Both code paths create the exact
+        same submodules in the exact same order (the final ``Dense``
+        layer's params just go unused when ``return_hidden`` is True), so
+        this is safe to call either way against parameters from an
+        already-trained (``return_hidden=False``) checkpoint without any
+        retraining or resaving -- see
+        ``dim_red.pipeline.tail_training._compute_expert_hidden_features``,
+        which does exactly that for an already-trained hierarchical tail's
+        per-family expert.
+        """
         dims = (
             (self.hidden_dim,)
             if isinstance(self.hidden_dim, int)
@@ -225,6 +237,8 @@ class ClassifierHead(nn.Module):
         h = r
         for dim in dims:
             h = nn.relu(nn.Dense(dim)(h))
+        if return_hidden:
+            return h
         return nn.Dense(self.n_classes)(h)
 
 
@@ -273,6 +287,15 @@ class ClassificationTailModule(nn.Module):
                 "Spacegroup head is not configured (n_spacegroup_classes is None)"
             )
         return self.spacegroup_head(r)
+
+    def family_hidden(self, r: Array) -> Array:
+        """Return the family head's last hidden layer activation for ``r``
+        (its learned representation, one layer short of classification
+        logits) -- see ``ClassifierHead.__call__``'s ``return_hidden``.
+        """
+        if self.family_head is None:
+            raise ValueError("Family head is not configured (n_family_classes is None)")
+        return self.family_head(r, return_hidden=True)
 
     def init_all(self, r: Array) -> None:
         """Trace every configured head so ``.init()`` allocates their
@@ -376,3 +399,28 @@ class ClassificationTail:
     def classify_spacegroup(self, r: Array) -> Array:
         """Return raw (unmasked) spacegroup logits using the stored parameters."""
         return self.classify_spacegroup_with_params(self.params, r)
+
+    def family_hidden_with_params(self, params: Params, r: Array) -> Array:
+        """Return the family head's last hidden layer activation for
+        representation batch ``r``, using an explicit parameter tree --
+        the learned representation this classifier itself uses right
+        before its final classification logits (see
+        ``ClassificationTailModule.family_hidden``). For a hierarchical
+        tail's per-family expert (which reuses the "family" head slot to
+        mean "spacegroup, local to this family" -- see
+        ``dim_red.pipeline.tail_training._train_hierarchical_tail``), this
+        is the expert's own frozen representation, suitable as the input
+        to a further downstream tail (e.g. a per-family visualization
+        tail) rather than raw SOAP/body features.
+        """
+        return self.module.apply(
+            {"params": params},
+            jnp.asarray(r, dtype=jnp.float32),
+            method=self.module.family_hidden,
+        )
+
+    def family_hidden(self, r: Array) -> Array:
+        """Return the family head's last hidden layer activation using the
+        stored parameters -- see ``family_hidden_with_params``.
+        """
+        return self.family_hidden_with_params(self.params, r)

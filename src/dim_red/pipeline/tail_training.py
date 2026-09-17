@@ -80,7 +80,7 @@ from dim_red.pipeline.config import (
     TailTrainConfig,
     tail_train_config_to_dict,
 )
-from dim_red.pipeline.inference import load_run_embeddings
+from dim_red.pipeline.inference import load_classification_tail, load_run_embeddings
 from dim_red.soap import compute_soap
 from dim_red.supcon.tail_training import TailTrainConfig as SupConTailTrainConfig
 from dim_red.supcon.tail_training import (
@@ -98,11 +98,16 @@ logger = logging.getLogger("dim_red.pipeline")
 
 # Which model_kinds a given tail_kind may be trained against -- see the
 # module docstring above for the reasoning. Keyed by config.TailTrainConfig
-# .tail_kind's own three valid values.
+# .tail_kind's own four valid values. "hierarchical_visualization" is
+# restricted to "supcon" only (not just "supcon"/"cgcnn"/"mace" like
+# "hierarchical" itself): it always recomputes native SOAP when the
+# referenced hierarchical tail used expert_input="soap" (the default), and
+# only a SOAP-based (supcon) body has that descriptor to recompute at all.
 _TAIL_MODEL_KINDS: Dict[str, Tuple[str, ...]] = {
     "classification": ("supcon", "cgcnn", "mace"),
     "visualization": ("supcon", "cgcnn", "mace", "vae", "autoencoder"),
     "hierarchical": ("supcon", "cgcnn", "mace"),
+    "hierarchical_visualization": ("supcon",),
 }
 
 
@@ -570,6 +575,220 @@ def _train_hierarchical_tail(
     _classifier_eval_plots(tail_dir, eval_targets, {"train": train_idx, "val": val_idx})
 
 
+def _train_hierarchical_visualization(
+    config: TailTrainConfig,
+    tail_dir: Path,
+    run_dir: Path,
+    loaded,
+) -> None:
+    """Train one ``VisualizationTail`` *per family*, attached on top of an
+    already-trained hierarchical tail's own per-family spacegroup experts
+    (frozen, never retrained here) -- one level deeper than the usual
+    body -> tail freezing pattern: here it's expert -> tail. See
+    ``dim_red.pipeline.config.HierarchicalVisualizationConfig`` for the
+    full rationale/field docs.
+
+    Each expert's last hidden layer activation
+    (``ClassificationTail.family_hidden``) is the input, computed for
+    *every* point of that family (train + val -- the same full subset the
+    expert itself was trained/evaluated on), not raw SOAP/body features.
+    Families with no dedicated expert in the referenced hierarchical tail
+    are skipped -- there is no learned representation to attach to.
+    """
+    hv = config.hierarchical_visualization
+    source_tail_dir = run_dir / "tails" / hv.hierarchical_output_subdir
+    status_path = source_tail_dir / "family_expert_status.yaml"
+    if not status_path.exists():
+        raise FileNotFoundError(
+            f"{status_path} not found -- {source_tail_dir} doesn't look like "
+            "a completed tail_kind='hierarchical' tail (see "
+            "hierarchical_visualization.hierarchical_output_subdir)"
+        )
+    with open(status_path) as f:
+        status_by_family = {
+            entry["family"]: entry for entry in yaml.safe_load(f)["families"]
+        }
+    with open(source_tail_dir / "tail_config.yaml") as f:
+        source_hierarchical = yaml.safe_load(f)["hierarchical"]
+    source_expert_input = source_hierarchical.get("expert_input", "body")
+    source_expert_hidden_dim = (
+        source_hierarchical.get("expert_head_hidden_dim")
+        or source_hierarchical["head_hidden_dim"]
+    )
+    source_seed = source_hierarchical.get("seed", 42)
+
+    labels_all = loaded.embeddings["labels"]
+    spacegroups_all = loaded.embeddings["spacegroups"]
+    material_ids_all = loaded.embeddings["material_ids"]
+    split_all = loaded.embeddings["split"]
+    train_idx = split_all == "train"
+    val_idx = split_all == "val"
+
+    if source_expert_input == "soap":
+        logger.info(
+            "Recomputing native SOAP features from %s to match the "
+            "referenced hierarchical tail's own expert_input='soap'",
+            run_dir / "dataset.extxyz",
+        )
+        r_expert_source = _compute_native_soap_features(
+            run_dir, loaded.config, loaded.embeddings
+        )
+    else:
+        r_expert_source = loaded.embeddings["embeddings"]
+    expert_input_dim = r_expert_source.shape[1]
+
+    family_classes, family_ids = _build_vocab_ids(labels_all.tolist())
+    train_config = SupConTailTrainConfig(
+        epochs=config.train.epochs,
+        batch_size=config.train.batch_size,
+        learning_rate=config.train.learning_rate,
+        optimizer=config.train.optimizer,
+        seed=config.seed,
+        device=config.train.device,
+        early_stopping=config.train.early_stopping.enabled,
+        early_stopping_patience=config.train.early_stopping.patience,
+        early_stopping_min_delta=config.train.early_stopping.min_delta,
+        early_stopping_restore_best=config.train.early_stopping.restore_best_weights,
+    )
+    balanced_batching = hv.batching.strategy == "balanced"
+
+    plot_fn = plot_reduced_space if hv.viz_dim == 2 else plot_reduced_space_3d
+    trained_families = []
+    for k, family_name in enumerate(family_classes):
+        status = status_by_family.get(family_name)
+        if status is None or not status.get("expert", False):
+            logger.info(
+                "Family %r has no dedicated expert in %s -- skipping its "
+                "visualization tail",
+                family_name,
+                source_tail_dir,
+            )
+            continue
+
+        expert_dir = source_tail_dir / "experts" / _sanitize_family_dirname(family_name)
+        with open(expert_dir / "local_spacegroup_classes.yaml") as f:
+            local_classes = yaml.safe_load(f)["local_spacegroup_classes"]
+        expert_tail = load_classification_tail(
+            expert_dir / "tail_params.msgpack",
+            input_dim=expert_input_dim,
+            hidden_dim=source_expert_hidden_dim,
+            n_family_classes=len(local_classes),
+            seed=source_seed,
+        )
+
+        family_mask_all = family_ids == k
+        family_mask_train = train_idx & family_mask_all
+        family_mask_val = val_idx & family_mask_all
+        if not family_mask_val.any():
+            family_mask_val = family_mask_train
+
+        r_family = np.asarray(
+            expert_tail.family_hidden(r_expert_source[family_mask_all])
+        )
+        family_positions = np.flatnonzero(family_mask_all)
+        pos_lookup = {row: i for i, row in enumerate(family_positions)}
+        train_pos = np.array([pos_lookup[i] for i in np.flatnonzero(family_mask_train)])
+        val_pos = np.array([pos_lookup[i] for i in np.flatnonzero(family_mask_val)])
+
+        local_spacegroups_all = spacegroups_all[family_mask_all]
+        local_class_to_id = {c: i for i, c in enumerate(local_classes)}
+        local_sg_ids = np.array(
+            [local_class_to_id[sg] for sg in local_spacegroups_all.tolist()]
+        )
+
+        viz_hidden_dim = hv.hidden_dim or [r_family.shape[1]]
+        viz_tail = VisualizationTail(
+            input_dim=r_family.shape[1],
+            hidden_dim=viz_hidden_dim,
+            output_dim=hv.viz_dim,
+            seed=config.seed,
+        )
+        logger.info(
+            "Training visualization tail for family %r: expert_hidden=%d "
+            "n_local_spacegroups=%d viz_dim=%d tau=%.3f distance=%s "
+            "epochs=%d batch_size=%d batching=%s",
+            family_name,
+            r_family.shape[1],
+            len(local_classes),
+            hv.viz_dim,
+            hv.tau,
+            hv.distance,
+            config.train.epochs,
+            config.train.batch_size,
+            hv.batching.strategy,
+        )
+        history = train_visualization_tail(
+            viz_tail,
+            r_family[train_pos],
+            r_family[val_pos],
+            train_config,
+            train_spacegroup_ids=local_sg_ids[train_pos],
+            val_spacegroup_ids=local_sg_ids[val_pos],
+            lambda_family=0.0,
+            lambda_spacegroup=1.0,
+            lambda_norm=hv.lambda_norm,
+            batching_strategy=hv.batching.strategy,
+            # Balanced batching stratifies by "family" -- here there is no
+            # family dimension left (this is already one family's subset),
+            # so the local spacegroup ids are passed AS the "family" axis,
+            # with a dummy all-zero "spacegroup" axis (the documented
+            # pattern for when the finer sub-stratification isn't needed --
+            # see dim_red.supcon.sampling.iter_balanced_batches).
+            batching_family_ids=(
+                local_sg_ids[train_pos] if balanced_batching else None
+            ),
+            batching_spacegroup_ids=(
+                np.zeros_like(local_sg_ids[train_pos]) if balanced_batching else None
+            ),
+            batching_P=hv.batching.balanced_params.P,
+            batching_K=hv.batching.balanced_params.K,
+            batching_S=None,
+        )
+        actual_epochs = len(history["train_loss"])
+        logger.info(
+            "Family %r visualization tail: %d/%d epochs, final train_loss=%.4f "
+            "val_loss=%.4f",
+            family_name,
+            actual_epochs,
+            config.train.epochs,
+            history["train_loss"][-1],
+            history["val_loss"][-1],
+        )
+
+        family_dir = tail_dir / _sanitize_family_dirname(family_name)
+        family_dir.mkdir(parents=True, exist_ok=True)
+        _save_loss_history(family_dir / "loss_history.csv", history)
+        with open(family_dir / "tail_params.msgpack", "wb") as f:
+            f.write(serialization.to_bytes(viz_tail.params))
+
+        z_family = np.asarray(viz_tail.project(r_family))
+        family_split = np.where(family_mask_train[family_positions], "train", "val")
+        np.savez(
+            family_dir / "tail_embeddings.npz",
+            embeddings=z_family,
+            spacegroups=local_spacegroups_all,
+            material_ids=material_ids_all[family_positions],
+            split=family_split,
+        )
+        plot_path = family_dir / "viz_plot_spacegroup.png"
+        plot_fn(
+            z_family,
+            [str(sg) for sg in local_spacegroups_all.tolist()],
+            title=f"{family_name} experts visualization ({run_dir.name})",
+            save_path=str(plot_path),
+        )
+        logger.info("Saved family %r visualization plot to %s", family_name, plot_path)
+        trained_families.append(family_name)
+
+    logger.info(
+        "Trained %d/%d per-family visualization tails (skipped families with "
+        "no dedicated expert): %s",
+        len(trained_families),
+        len(family_classes),
+        trained_families,
+    )
+
+
 def train_tail(config: TailTrainConfig) -> Path:
     """Freeze a completed run's body and train exactly one tail
     (classification, visualization, or hierarchical) on its already-saved
@@ -683,6 +902,11 @@ def train_tail(config: TailTrainConfig) -> Path:
                 val_idx,
                 r_expert_all=r_expert_all,
             )
+            logger.info("Tail artifacts saved to %s", tail_dir)
+        elif config.tail_kind == "hierarchical_visualization":
+            with open(tail_dir / "tail_config.yaml", "w") as f:
+                yaml.safe_dump(tail_train_config_to_dict(config), f, sort_keys=False)
+            _train_hierarchical_visualization(config, tail_dir, run_dir, loaded)
             logger.info("Tail artifacts saved to %s", tail_dir)
         else:
             if config.tail_kind == "classification":

@@ -851,6 +851,30 @@ def _parse_hierarchical_tail_config(
     )
 
 
+def _parse_hierarchical_visualization_config(
+    d: Dict[str, Any]
+) -> Optional["HierarchicalVisualizationConfig"]:
+    """Parse a ``hierarchical_visualization:`` block (including its nested
+    ``batching:`` sub-block) -- ``TailTrainConfig``-only, unlike the other
+    tail-kind parsers above (this tail kind attaches to an already-trained
+    hierarchical tail, so ``RunConfig.tails`` never auto-trains it)."""
+    hv_dict = d.get("hierarchical_visualization")
+    if hv_dict is None:
+        return None
+    batching_dict = hv_dict.get("batching", {})
+    batching = BatchingConfig(
+        strategy=str(batching_dict.get("strategy", "random")),
+        balanced_params=_dataclass_from_dict(
+            BalancedBatchingParams, batching_dict.get("balanced_params", {})
+        ),
+    )
+    hv = _dataclass_from_dict(
+        HierarchicalVisualizationConfig,
+        {k: v for k, v in hv_dict.items() if k != "batching"},
+    )
+    return dataclasses.replace(hv, batching=batching)
+
+
 def load_yaml(path: Union[str, Path]) -> Dict[str, Any]:
     with open(path, "r") as f:
         return yaml.safe_load(f)
@@ -1043,7 +1067,12 @@ def expand_sweep(sweep: SweepConfig) -> List[RunConfig]:
 # dataset from scratch, so it gets its own top-level YAML shape and loader
 # rather than being nested under RunConfig.
 
-_TAIL_KINDS = ("classification", "visualization", "hierarchical")
+_TAIL_KINDS = (
+    "classification",
+    "visualization",
+    "hierarchical",
+    "hierarchical_visualization",
+)
 _CLASSIFICATION_TAIL_MODES = ("family_only", "family_and_spacegroup")
 _EXPERT_INPUT_KINDS = ("body", "soap")
 
@@ -1242,6 +1271,76 @@ class HierarchicalTailConfig:
 
 
 @dataclass(frozen=True)
+class HierarchicalVisualizationConfig:
+    """Config for ``TailTrainConfig.tail_kind == "hierarchical_visualization"``:
+    trains one ``dim_red.supcon.tails.VisualizationTail`` *per family*,
+    attached on top of an ALREADY-TRAINED hierarchical tail's own per-family
+    spacegroup experts (frozen, never retrained here) -- mirrors the
+    existing body -> tail freezing pattern one level deeper: expert -> tail.
+
+    Each expert's last hidden layer activation
+    (``ClassificationTail.family_hidden``, the expert's own learned
+    representation, not raw SOAP/body features) is the input; the
+    supervised-contrastive loss always contrasts on spacegroup only (family
+    is constant within a single family's subset, so a family term would be
+    meaningless here -- unlike ``VisualizationTailConfig.mode``, there is no
+    mode choice). Families with no dedicated expert in the referenced
+    hierarchical tail (fallback -- see that tail's own
+    ``family_expert_status.yaml``) are skipped: there is no learned
+    representation to attach to.
+
+    Attributes:
+        hierarchical_output_subdir: The ``output_subdir`` of an
+            already-trained ``tail_kind: "hierarchical"`` tail, under the
+            same ``run_dir/tails/`` this config's own run_dir points at.
+        viz_dim: 2 or 3.
+        tau: Temperature dividing similarities before the softmax.
+        distance: ``"euclidean"`` (default) or ``"cosine"``.
+        lambda_norm: Weight of the embedding-norm regularizer, applied to
+            this tail's own output. ``0.0`` (default) disables it.
+        hidden_dim: Widths of hidden layers in the visualization MLP.
+            ``None`` (default) resolves to a single hidden layer matching
+            the expert's own hidden width (not the raw SOAP/body width).
+        batching: Same ``BatchingConfig`` shape as
+            ``VisualizationTailConfig.batching`` -- "balanced" here
+            stratifies by spacegroup within the family (there is no family
+            dimension left to also stratify by).
+    """
+
+    hierarchical_output_subdir: str
+    viz_dim: int = 2
+    tau: float = 0.1
+    distance: str = "euclidean"
+    lambda_norm: float = 0.0
+    hidden_dim: Optional[List[int]] = None
+    batching: BatchingConfig = field(default_factory=BatchingConfig)
+
+    def __post_init__(self):
+        if not self.hierarchical_output_subdir:
+            raise ValueError(
+                "hierarchical_visualization.hierarchical_output_subdir must be set "
+                "(the output_subdir of an already-trained hierarchical tail)"
+            )
+        if self.viz_dim not in (2, 3):
+            raise ValueError(
+                f"hierarchical_visualization.viz_dim must be 2 or 3, got "
+                f"{self.viz_dim!r}"
+            )
+        if self.distance not in _SUPCON_DISTANCES:
+            raise ValueError(
+                f"hierarchical_visualization.distance must be one of "
+                f"{_SUPCON_DISTANCES}, got {self.distance!r}"
+            )
+        if self.hidden_dim is not None and (
+            not self.hidden_dim or any(d <= 0 for d in self.hidden_dim)
+        ):
+            raise ValueError(
+                "hierarchical_visualization.hidden_dim, if set, must be a "
+                "non-empty list of positive integers"
+            )
+
+
+@dataclass(frozen=True)
 class TailTrainSettings:
     """Training-loop mechanics for phase 2, mirroring the relevant subset of
     ``RunConfig.train`` (``TrainSettings``) -- no ``beta``/``val_ratio``:
@@ -1346,6 +1445,8 @@ class TailTrainConfig:
         classification: Required when ``tail_kind == "classification"``.
         visualization: Required when ``tail_kind == "visualization"``.
         hierarchical: Required when ``tail_kind == "hierarchical"``.
+        hierarchical_visualization: Required when ``tail_kind ==
+            "hierarchical_visualization"``.
         train: Training-loop mechanics.
         seed: Seed for the tail's own parameter initialization.
         output_subdir: Directory name under ``<run_dir>/tails/`` this tail's
@@ -1358,6 +1459,7 @@ class TailTrainConfig:
     classification: Optional[ClassificationTailConfig] = None
     visualization: Optional[VisualizationTailConfig] = None
     hierarchical: Optional[HierarchicalTailConfig] = None
+    hierarchical_visualization: Optional[HierarchicalVisualizationConfig] = None
     train: TailTrainSettings = field(default_factory=TailTrainSettings)
     seed: int = 42
     output_subdir: Optional[str] = None
@@ -1379,6 +1481,14 @@ class TailTrainConfig:
             raise ValueError(
                 "tail_kind='hierarchical' requires a 'hierarchical' config block."
             )
+        if (
+            self.tail_kind == "hierarchical_visualization"
+            and self.hierarchical_visualization is None
+        ):
+            raise ValueError(
+                "tail_kind='hierarchical_visualization' requires a "
+                "'hierarchical_visualization' config block."
+            )
 
 
 def tail_train_config_from_dict(d: Dict[str, Any]) -> TailTrainConfig:
@@ -1389,6 +1499,7 @@ def tail_train_config_from_dict(d: Dict[str, Any]) -> TailTrainConfig:
     classification = _parse_classification_tail_config(d)
     visualization = _parse_visualization_tail_config(d)
     hierarchical = _parse_hierarchical_tail_config(d)
+    hierarchical_visualization = _parse_hierarchical_visualization_config(d)
 
     run_dir = d.get("run_dir")
     return TailTrainConfig(
@@ -1397,6 +1508,7 @@ def tail_train_config_from_dict(d: Dict[str, Any]) -> TailTrainConfig:
         classification=classification,
         visualization=visualization,
         hierarchical=hierarchical,
+        hierarchical_visualization=hierarchical_visualization,
         train=train,
         seed=int(d.get("seed", 42)),
         output_subdir=d.get("output_subdir"),
@@ -1425,4 +1537,8 @@ def tail_train_config_to_dict(config: TailTrainConfig) -> Dict[str, Any]:
         result["visualization"] = dataclasses.asdict(config.visualization)
     if config.hierarchical is not None:
         result["hierarchical"] = dataclasses.asdict(config.hierarchical)
+    if config.hierarchical_visualization is not None:
+        result["hierarchical_visualization"] = dataclasses.asdict(
+            config.hierarchical_visualization
+        )
     return result
