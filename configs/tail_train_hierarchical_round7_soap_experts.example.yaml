@@ -1,0 +1,41 @@
+# Round 13 follow-up ("hierarchical_soap_experts"): same target body and
+# same stage-1/stage-2 architecture as
+# configs/tail_train_hierarchical_round7.example.yaml, but
+# hierarchical.expert_input: "soap" instead of the default "body" --
+# stage-2 spacegroup experts train on each structure's native (252-dim)
+# standardized SOAP descriptor, recomputed from dataset.extxyz, instead
+# of the frozen body's 8-dim embedding. Stage 1 (family) is unaffected --
+# still uses the body embedding, still 0.9726.
+#
+# Motivation (see the conversation / experiments/round13_notes.md): the
+# body's 8-dim latent_dim was optimized purely for family discrimination
+# (supcon.mode: family_only, no spacegroup term) -- it may have
+# compressed away exactly the finer geometric detail (screw axes vs plain
+# rotations, glide vs mirror planes) a spacegroup expert needs, even
+# though the native descriptor still has it.
+#
+# Run with:
+#   dimred-train-tail configs/tail_train_hierarchical_round7_soap_experts.example.yaml runs/tuning_supcon_family_only_round7/20260914-1/model-supcon_hd-128-64_pyxtal-cub-hex-mon-ort-tet-tri-tri_nsp1_supcon-family_only_tau0.05_lf1-3
+
+tail_kind: hierarchical
+
+hierarchical:
+  head_hidden_dim: 16
+  min_samples_per_expert: 10
+  expert_input: soap
+
+output_subdir: hierarchical_round7_soap_experts
+
+seed: 42
+
+train:
+  epochs: 40
+  batch_size: 32
+  learning_rate: 0.001
+  optimizer: adam
+  device: gpu
+  early_stopping:
+    enabled: true
+    patience: 10
+    min_delta: 0.0001
+    restore_best_weights: true
