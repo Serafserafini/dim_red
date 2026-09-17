@@ -1,0 +1,50 @@
+# Round 13 ("spacegroup_hierarchical"): first spacegroup classification
+# attempt, per the user's own design (a two-stage classifier -- family
+# first, then a dedicated per-family expert for spacegroup) -- which
+# matches dim_red's existing tail_kind: "hierarchical" machinery exactly
+# (dim_red.pipeline.tail_training._train_hierarchical_tail): stage 1 is a
+# family-only classifier; stage 2 is one independent expert per family,
+# trained only on that family's own rows and only over the spacegroups
+# actually observed within it.
+#
+# Target body: round 7's overall-best supcon run (the reference config
+# for this investigation, see the project_family_only_round7_reference
+# memory) -- tau=0.05/cosine/hd-128-64/batching=random, family accuracy
+# 0.9726. No need to retrain a body: pipeline.tail_training.train_tail
+# builds its own family/spacegroup vocabulary fresh from embeddings.npz's
+# raw `labels`/`spacegroups` arrays (always saved unconditionally,
+# regardless of the body's own training mode -- verified in code during
+# the round 8 visualization-tail work), so this hierarchical tail is
+# trainable directly on top of the existing frozen body.
+#
+# min_samples_per_expert: 10 (default) -- round 7's dataset is
+# family-balanced (2500 augmented points/family), so every family clears
+# this easily; the real difficulty is the spacegroup-count imbalance
+# WITHIN each family's expert (e.g. tetragonal has 68 spacegroups over
+# 2500 points, ~37/class on average -- a much harder problem than
+# triclinic's 2 spacegroups over the same 2500 points).
+#
+# Run with:
+#   dimred-train-tail configs/tail_train_hierarchical_round7.example.yaml runs/tuning_supcon_family_only_round7/20260914-1/model-supcon_hd-128-64_pyxtal-cub-hex-mon-ort-tet-tri-tri_nsp1_supcon-family_only_tau0.05_lf1-3
+
+tail_kind: hierarchical
+
+hierarchical:
+  head_hidden_dim: 16
+  min_samples_per_expert: 10
+
+output_subdir: hierarchical_round7
+
+seed: 42
+
+train:
+  epochs: 40
+  batch_size: 32
+  learning_rate: 0.001
+  optimizer: adam
+  device: gpu
+  early_stopping:
+    enabled: true
+    patience: 10
+    min_delta: 0.0001
+    restore_best_weights: true
