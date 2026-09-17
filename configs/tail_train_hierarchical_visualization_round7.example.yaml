@@ -1,0 +1,46 @@
+# Round 13 follow-up ("hierarchical_visualization"): one 2D visualization
+# tail per family, attached on top of the already-trained
+# hierarchical_round7_body_scale_experts hierarchical tail's own per-family
+# spacegroup experts (frozen) -- input is each expert's own last hidden
+# layer activation (64-dim, since that hierarchical tail used
+# expert_head_hidden_dim: [128, 64]), not raw SOAP/body features. See
+# dim_red.pipeline.config.HierarchicalVisualizationConfig for the full
+# rationale.
+#
+# Uses ALL of each family's points (train+val), exactly what that
+# family's expert itself was trained/evaluated on. Families with no
+# dedicated expert are skipped automatically (none in this case -- all 7
+# families got a real expert, see experiments/round13_notes.md).
+#
+# Same richer recipe already validated in this investigation (batch=128,
+# epochs=200, patience=20) rather than a lighter default, given how much
+# training budget has mattered elsewhere in this project.
+#
+# Run with:
+#   dimred-train-tail configs/tail_train_hierarchical_visualization_round7.example.yaml runs/tuning_supcon_family_only_round7/20260914-1/model-supcon_hd-128-64_pyxtal-cub-hex-mon-ort-tet-tri-tri_nsp1_supcon-family_only_tau0.05_lf1-3
+
+tail_kind: hierarchical_visualization
+
+hierarchical_visualization:
+  hierarchical_output_subdir: hierarchical_round7_body_scale_experts
+  viz_dim: 2
+  tau: 0.1
+  distance: euclidean
+  lambda_norm: 0.0
+  hidden_dim: null
+  batching:
+    strategy: random
+
+seed: 42
+
+train:
+  epochs: 200
+  batch_size: 128
+  learning_rate: 0.001
+  optimizer: adam
+  device: gpu
+  early_stopping:
+    enabled: true
+    patience: 20
+    min_delta: 0.0001
+    restore_best_weights: true
