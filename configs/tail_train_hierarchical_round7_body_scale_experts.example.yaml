@@ -1,0 +1,45 @@
+# Round 13 follow-up ("hierarchical_body_scale_experts"): same target body
+# as configs/tail_train_hierarchical_round7_soap_experts.example.yaml, but
+# now ALSO matches the body's own network capacity and training recipe for
+# the stage-2 experts specifically, per the user's request: same native
+# SOAP input as the body (expert_input: soap, default), the same encoder
+# depth/width as the body itself (expert_head_hidden_dim: [128, 64],
+# matching round 7's vae.encoder_hidden_dim), and the same training
+# recipe as the body's own phase-1 training (batch_size: 128, epochs: 200,
+# early_stopping.patience: 20 -- all identical to round 7's train: block),
+# instead of the tail's usual lightweight defaults (single hidden layer,
+# batch=32, epochs=40, patience=10).
+#
+# Stage 1 (family) is intentionally left unaffected (head_hidden_dim: 16,
+# unchanged) -- it already performs at 0.9726, this experiment is only
+# about whether the EXPERTS benefit from body-scale capacity/training,
+# not about growing the family stage too. Evaluate via the oracle
+# spacegroup accuracy (isolates expert quality from stage-1 routing,
+# which is unrelated to this variable).
+#
+# Run with:
+#   dimred-train-tail configs/tail_train_hierarchical_round7_body_scale_experts.example.yaml runs/tuning_supcon_family_only_round7/20260914-1/model-supcon_hd-128-64_pyxtal-cub-hex-mon-ort-tet-tri-tri_nsp1_supcon-family_only_tau0.05_lf1-3
+
+tail_kind: hierarchical
+
+hierarchical:
+  head_hidden_dim: 16
+  min_samples_per_expert: 10
+  expert_input: soap
+  expert_head_hidden_dim: [128, 64]
+
+output_subdir: hierarchical_round7_body_scale_experts
+
+seed: 42
+
+train:
+  epochs: 200
+  batch_size: 128
+  learning_rate: 0.001
+  optimizer: adam
+  device: gpu
+  early_stopping:
+    enabled: true
+    patience: 20
+    min_delta: 0.0001
+    restore_best_weights: true
