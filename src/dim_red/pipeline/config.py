@@ -1045,6 +1045,7 @@ def expand_sweep(sweep: SweepConfig) -> List[RunConfig]:
 
 _TAIL_KINDS = ("classification", "visualization", "hierarchical")
 _CLASSIFICATION_TAIL_MODES = ("family_only", "family_and_spacegroup")
+_EXPERT_INPUT_KINDS = ("body", "soap")
 
 
 @dataclass(frozen=True)
@@ -1161,10 +1162,35 @@ class HierarchicalTailConfig:
             gets no dedicated expert at all -- it falls back to always
             predicting that family's single most frequent training-set
             spacegroup instead (see ``family_expert_status.yaml``).
+        expert_input: Which representation the stage-2 experts train on --
+            ``"body"`` (default, unchanged behavior) uses the same frozen
+            body embeddings as stage 1 (``embeddings.npz["embeddings"]``);
+            ``"soap"`` instead recomputes each structure's native
+            (pre-body) standardized SOAP descriptor and trains every
+            expert on that instead. Motivation: a body's ``latent_dim`` is
+            typically much narrower than the native SOAP dimensionality
+            (e.g. 8 vs 252) and was optimized for *family* discrimination
+            only (``supcon.mode: family_only``/no spacegroup term) -- it
+            may have compressed away exactly the finer geometric detail
+            (screw axes vs. plain rotations, glide vs. mirror planes) a
+            spacegroup expert needs, even though that detail is still
+            present in the native descriptor. Stage 1 (family) always uses
+            the body embeddings regardless of this setting, since it
+            already performs well and the point is only to test whether
+            *stage 2* benefits from bypassing the body's bottleneck.
+            ``"soap"`` requires the target run's ``dataset.extxyz`` to
+            still exist (recomputes SOAP from it, using the run's own
+            saved ``feature_mean``/``feature_std`` to standardize) and its
+            ``model_kind`` to be ``"supcon"`` -- not ``"cgcnn"`` (graph
+            features, no SOAP at all) or ``"mace"`` (a frozen foundation-
+            model embedding, not SOAP either), even though both of those
+            still carry a default-valued ``RunConfig.soap`` block that
+            their own pipeline just never reads.
     """
 
     head_hidden_dim: int = 16
     min_samples_per_expert: int = 10
+    expert_input: str = "body"
 
     def __post_init__(self):
         if self.head_hidden_dim <= 0:
@@ -1172,6 +1198,11 @@ class HierarchicalTailConfig:
         if self.min_samples_per_expert <= 0:
             raise ValueError(
                 "hierarchical.min_samples_per_expert must be a positive integer"
+            )
+        if self.expert_input not in _EXPERT_INPUT_KINDS:
+            raise ValueError(
+                f"hierarchical.expert_input must be one of {_EXPERT_INPUT_KINDS}, "
+                f"got {self.expert_input!r}"
             )
 
 

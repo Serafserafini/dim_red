@@ -33,7 +33,12 @@ representations (``embeddings.npz["embeddings"]``) -- no SOAP recompute ever
 this module never calls it), no body forward pass at all, so this is freely
 rerunnable with different tail configs against the same trained body --
 including runs whose ``dataset.extxyz``/``model_params.msgpack`` are no
-longer present, since neither is required here.
+longer present, since neither is required here. The one exception is a
+hierarchical tail with ``hierarchical.expert_input: "soap"`` (see
+``_train_hierarchical_tail``/``_compute_native_soap_features``): that
+option does recompute SOAP from the run's ``dataset.extxyz`` (which must
+still exist for it), specifically so stage 2's experts can train on the
+native descriptor instead of the body's (possibly bottlenecked) embedding.
 
 ``tail_kind == "hierarchical"`` (see ``_train_hierarchical_tail``) is a
 genuinely two-stage classifier, as opposed to ``"classification"``'s single
@@ -60,6 +65,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import yaml
+from ase.io import read as read_atoms
 from flax import serialization
 
 from dim_red.analysis.plotting import (
@@ -69,8 +75,13 @@ from dim_red.analysis.plotting import (
     plot_reduced_space_3d,
     plot_reliability_diagram,
 )
-from dim_red.pipeline.config import TailTrainConfig, tail_train_config_to_dict
+from dim_red.pipeline.config import (
+    RunConfig,
+    TailTrainConfig,
+    tail_train_config_to_dict,
+)
 from dim_red.pipeline.inference import load_run_embeddings
+from dim_red.soap import compute_soap
 from dim_red.supcon.tail_training import TailTrainConfig as SupConTailTrainConfig
 from dim_red.supcon.tail_training import (
     train_classification_tail,
@@ -81,6 +92,7 @@ from dim_red.supcon.tails import (
     VisualizationTail,
     apply_family_mask,
 )
+from dim_red.utils import apply_standardization
 
 logger = logging.getLogger("dim_red.pipeline")
 
@@ -206,6 +218,72 @@ def _classifier_eval_plots(
         )
 
 
+def _compute_native_soap_features(
+    run_dir: Path,
+    run_config: RunConfig,
+    embeddings: Dict[str, np.ndarray],
+) -> np.ndarray:
+    """Recomputes the native (pre-body) standardized SOAP descriptor for
+    ``hierarchical.expert_input: "soap"`` -- reads ``dataset.extxyz`` back
+    (the exact structures/order the body was trained on), recomputes SOAP
+    with the run's own ``soap:`` hyperparameters, and standardizes with the
+    run's own saved ``feature_mean``/``feature_std`` (the same statistics
+    fit during phase 1 -- never refit here, so this lands in exactly the
+    representation the body itself was trained on, just without the body's
+    own compression).
+
+    Takes the whole ``embeddings`` dict (not pre-extracted
+    ``feature_mean``/``feature_std`` arrays) so the ``run_config.soap``
+    check below can run -- and raise its clearer error -- before touching
+    ``embeddings`` at all: a non-SOAP run (cgcnn/mace) doesn't even have
+    those two keys, so extracting them first would surface a confusing
+    ``KeyError`` instead.
+
+    Raises:
+        ValueError: If ``run_config.model_kind != "supcon"`` -- ``cgcnn``
+            builds its own graph features (no SOAP at all), and ``mace``'s
+            saved ``feature_mean``/``feature_std`` standardize its frozen
+            foundation-model embedding, not a SOAP descriptor -- recomputing
+            "SOAP" from ``run_config.soap`` for either would silently use
+            an unrelated, default-valued ``SoapConfig`` (every ``RunConfig``
+            carries one regardless of ``model_kind``, whether or not that
+            model_kind's own pipeline ever reads it), producing a
+            nonsensical result instead of a clean error.
+        FileNotFoundError: If ``run_dir / "dataset.extxyz"`` doesn't exist.
+    """
+    if run_config.model_kind != "supcon":
+        raise ValueError(
+            "hierarchical.expert_input='soap' requires a SOAP-based body "
+            f"(model_kind={run_config.model_kind!r} for {run_dir} -- only "
+            "'supcon' runs have a native SOAP descriptor to recompute; "
+            "cgcnn uses graph features and mace uses a frozen foundation-"
+            "model embedding, neither of which is SOAP)"
+        )
+    feature_mean = embeddings["feature_mean"]
+    feature_std = embeddings["feature_std"]
+    dataset_path = run_dir / "dataset.extxyz"
+    if not dataset_path.exists():
+        raise FileNotFoundError(
+            f"hierarchical.expert_input='soap' requires {dataset_path} to "
+            "still exist (it recomputes SOAP from it) -- this run's raw "
+            "structures appear to have been removed"
+        )
+    atoms_list = read_atoms(str(dataset_path), index=":")
+    soap = run_config.soap
+    raw_features = compute_soap(
+        atoms_list,
+        species=soap.species,
+        r_cut=soap.r_cut,
+        n_max=soap.n_max,
+        l_max=soap.l_max,
+        sigma=soap.sigma,
+        element_agnostic=soap.element_agnostic,
+        average="outer",
+        normalize_distances=soap.normalize_distances,
+    )
+    return apply_standardization(raw_features, feature_mean, feature_std)
+
+
 def _train_hierarchical_tail(
     config: TailTrainConfig,
     tail_dir: Path,
@@ -216,6 +294,7 @@ def _train_hierarchical_tail(
     split_all: np.ndarray,
     train_idx: np.ndarray,
     val_idx: np.ndarray,
+    r_expert_all: "np.ndarray | None" = None,
 ) -> None:
     """Train a genuinely two-stage classifier: one ``ClassificationTail``
     (family-only mode) predicting family, then one independent
@@ -248,9 +327,20 @@ def _train_hierarchical_tail(
     (probability 1.0). Every family's outcome (trained expert vs. fallback,
     training-row count, local vocabulary size) is recorded in
     ``family_expert_status.yaml``.
+
+    Args:
+        r_expert_all: Representation stage-2 experts train/predict on --
+            ``None`` (default) reuses ``r_all`` (the body embeddings,
+            current/original behavior); pass a separate array (e.g. native
+            SOAP features, see ``_compute_native_soap_features``) to train
+            experts on a different representation than stage 1's family
+            classifier, which always uses ``r_all`` regardless.
     """
     hierarchical = config.hierarchical
     input_dim = r_all.shape[1]
+    if r_expert_all is None:
+        r_expert_all = r_all
+    expert_input_dim = r_expert_all.shape[1]
 
     family_classes, family_ids = _build_vocab_ids(labels_all.tolist())
     logger.info("%d family classes: %s", len(family_classes), family_classes)
@@ -261,9 +351,12 @@ def _train_hierarchical_tail(
 
     logger.info(
         "Training hierarchical tail: head_hidden_dim=%d min_samples_per_expert=%d "
-        "epochs=%d batch_size=%d device=%s optimizer=%s early_stopping=%s",
+        "expert_input=%s (dim=%d) epochs=%d batch_size=%d device=%s optimizer=%s "
+        "early_stopping=%s",
         hierarchical.head_hidden_dim,
         hierarchical.min_samples_per_expert,
+        hierarchical.expert_input,
+        expert_input_dim,
         config.train.epochs,
         config.train.batch_size,
         config.train.device,
@@ -382,15 +475,15 @@ def _train_hierarchical_tail(
         expert_dir = tail_dir / "experts" / _sanitize_family_dirname(family_name)
         expert_dir.mkdir(parents=True, exist_ok=True)
         expert_tail = ClassificationTail(
-            input_dim=input_dim,
+            input_dim=expert_input_dim,
             hidden_dim=hierarchical.head_hidden_dim,
             n_family_classes=len(local_classes),
             seed=config.seed,
         )
         expert_history = train_classification_tail(
             expert_tail,
-            r_all[family_mask_train],
-            r_all[expert_val_mask],
+            r_expert_all[family_mask_train],
+            r_expert_all[expert_val_mask],
             train_config,
             train_family_ids=local_ids_full[family_mask_train],
             val_family_ids=local_ids_full[expert_val_mask],
@@ -428,13 +521,15 @@ def _train_hierarchical_tail(
         if predicted_mask.any():
             local_probs = np.asarray(
                 jax.nn.softmax(
-                    expert_tail.classify_family(r_all[predicted_mask]), axis=-1
+                    expert_tail.classify_family(r_expert_all[predicted_mask]), axis=-1
                 )
             )
             spacegroup_probs_all[np.ix_(predicted_mask, cols)] = local_probs
         if true_mask.any():
             local_probs_oracle = np.asarray(
-                jax.nn.softmax(expert_tail.classify_family(r_all[true_mask]), axis=-1)
+                jax.nn.softmax(
+                    expert_tail.classify_family(r_expert_all[true_mask]), axis=-1
+                )
             )
             spacegroup_probs_oracle_all[np.ix_(true_mask, cols)] = local_probs_oracle
 
@@ -555,6 +650,21 @@ def train_tail(config: TailTrainConfig) -> Path:
         if config.tail_kind == "hierarchical":
             with open(tail_dir / "tail_config.yaml", "w") as f:
                 yaml.safe_dump(tail_train_config_to_dict(config), f, sort_keys=False)
+            r_expert_all = None
+            if config.hierarchical.expert_input == "soap":
+                logger.info(
+                    "hierarchical.expert_input='soap' -- recomputing native "
+                    "SOAP features from %s for stage-2 experts",
+                    run_dir / "dataset.extxyz",
+                )
+                r_expert_all = _compute_native_soap_features(
+                    run_dir,
+                    loaded.config,
+                    loaded.embeddings,
+                )
+                logger.info(
+                    "Recomputed native SOAP features: shape=%s", r_expert_all.shape
+                )
             _train_hierarchical_tail(
                 config,
                 tail_dir,
@@ -565,6 +675,7 @@ def train_tail(config: TailTrainConfig) -> Path:
                 split_all,
                 train_idx,
                 val_idx,
+                r_expert_all=r_expert_all,
             )
             logger.info("Tail artifacts saved to %s", tail_dir)
         else:

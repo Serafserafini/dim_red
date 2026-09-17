@@ -378,6 +378,63 @@ def test_train_tail_hierarchical_falls_back_for_low_sample_families(tmp_path):
     )
 
 
+def test_train_tail_hierarchical_expert_input_soap_uses_native_features(tmp_path):
+    run_dir = _train_supcon_run(tmp_path)  # body latent_dim=3
+    config = TailTrainConfig(
+        run_dir=str(run_dir),
+        tail_kind="hierarchical",
+        hierarchical=HierarchicalTailConfig(
+            head_hidden_dim=8, min_samples_per_expert=5, expert_input="soap"
+        ),
+        train=TailTrainSettings(epochs=2, batch_size=4),
+    )
+
+    with patch(
+        "dim_red.pipeline.tail_training.compute_soap",
+        side_effect=_fake_compute_soap(seed=1, n_features=5),
+    ):
+        tail_dir = train_tail(config)
+
+    assert (tail_dir / "tail_predictions.npz").exists()
+    predictions = np.load(tail_dir / "tail_predictions.npz")
+    n_total = 20  # 2 crystal systems x limit_per_system=10
+    assert predictions["family_probs"].shape == (n_total, 2)
+
+    with open(tail_dir / "run.log") as f:
+        run_log = f.read()
+    # Experts train on the recomputed 5-dim native SOAP, not the body's own
+    # 3-dim latent embedding.
+    assert "expert_input=soap (dim=5)" in run_log
+    assert "Recomputed native SOAP features: shape=(20, 5)" in run_log
+
+
+def test_train_tail_hierarchical_expert_input_soap_requires_dataset_extxyz(tmp_path):
+    run_dir = _train_supcon_run(tmp_path)
+    (run_dir / "dataset.extxyz").unlink()
+    config = TailTrainConfig(
+        run_dir=str(run_dir),
+        tail_kind="hierarchical",
+        hierarchical=HierarchicalTailConfig(expert_input="soap"),
+        train=TailTrainSettings(epochs=1, batch_size=4),
+    )
+
+    with pytest.raises(FileNotFoundError, match="dataset.extxyz"):
+        train_tail(config)
+
+
+def test_train_tail_hierarchical_expert_input_soap_rejects_non_soap_body(tmp_path):
+    run_dir = _train_a_cgcnn_run(tmp_path)
+    config = TailTrainConfig(
+        run_dir=str(run_dir),
+        tail_kind="hierarchical",
+        hierarchical=HierarchicalTailConfig(expert_input="soap"),
+        train=TailTrainSettings(epochs=1, batch_size=4),
+    )
+
+    with pytest.raises(ValueError, match="expert_input='soap'"):
+        train_tail(config)
+
+
 @pytest.mark.parametrize("tail_kind", ["classification", "hierarchical"])
 def test_train_tail_rejects_classification_and_hierarchical_for_vae_run(
     tmp_path, tail_kind
