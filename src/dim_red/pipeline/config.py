@@ -1278,21 +1278,32 @@ class HierarchicalVisualizationConfig:
     spacegroup experts (frozen, never retrained here) -- mirrors the
     existing body -> tail freezing pattern one level deeper: expert -> tail.
 
-    Each expert's last hidden layer activation
-    (``ClassificationTail.family_hidden``, the expert's own learned
-    representation, not raw SOAP/body features) is the input; the
-    supervised-contrastive loss always contrasts on spacegroup only (family
-    is constant within a single family's subset, so a family term would be
-    meaningless here -- unlike ``VisualizationTailConfig.mode``, there is no
-    mode choice). Families with no dedicated expert in the referenced
-    hierarchical tail (fallback -- see that tail's own
-    ``family_expert_status.yaml``) are skipped: there is no learned
-    representation to attach to.
+    Two ways to feed each family's viz tail, via ``input_source``:
+    ``"expert"`` (default) chains it to the expert's own last hidden layer
+    activation (``ClassificationTail.family_hidden``) -- one level deeper
+    than the usual body -> tail pattern, see the module-level docstring
+    above; ``"body"`` instead attaches it directly to the frozen body's own
+    embedding, in parallel with the expert rather than chained to it --
+    the exact same relationship the family-level classifier and the
+    family-level visualization tail already have to the body (both read
+    the same body embedding, neither feeds the other). Either way, the
+    supervised-contrastive loss always contrasts on spacegroup only
+    (family is constant within a single family's subset, so a family term
+    would be meaningless here -- unlike ``VisualizationTailConfig.mode``,
+    there is no mode choice). Families with no dedicated expert in the
+    referenced hierarchical tail (fallback -- see that tail's own
+    ``family_expert_status.yaml``) are skipped either way -- kept as the
+    gate even for ``input_source: "body"`` (which doesn't otherwise need
+    the expert at all) so both options run on the exact same set of
+    families, for a fair comparison.
 
     Attributes:
         hierarchical_output_subdir: The ``output_subdir`` of an
             already-trained ``tail_kind: "hierarchical"`` tail, under the
-            same ``run_dir/tails/`` this config's own run_dir points at.
+            same ``run_dir/tails/`` this config's own run_dir points at --
+            still required even when ``input_source: "body"``, purely to
+            resolve which families have a dedicated expert (see above).
+        input_source: ``"expert"`` (default) or ``"body"`` -- see above.
         viz_dim: 2 or 3.
         tau: Temperature dividing similarities before the softmax.
         distance: ``"euclidean"`` (default) or ``"cosine"``.
@@ -1300,7 +1311,8 @@ class HierarchicalVisualizationConfig:
             this tail's own output. ``0.0`` (default) disables it.
         hidden_dim: Widths of hidden layers in the visualization MLP.
             ``None`` (default) resolves to a single hidden layer matching
-            the expert's own hidden width (not the raw SOAP/body width).
+            the input width (the expert's own hidden width, or the body's
+            embedding width, depending on ``input_source``).
         batching: Same ``BatchingConfig`` shape as
             ``VisualizationTailConfig.batching`` -- "balanced" here
             stratifies by spacegroup within the family (there is no family
@@ -1308,6 +1320,7 @@ class HierarchicalVisualizationConfig:
     """
 
     hierarchical_output_subdir: str
+    input_source: str = "expert"
     viz_dim: int = 2
     tau: float = 0.1
     distance: str = "euclidean"
@@ -1320,6 +1333,11 @@ class HierarchicalVisualizationConfig:
             raise ValueError(
                 "hierarchical_visualization.hierarchical_output_subdir must be set "
                 "(the output_subdir of an already-trained hierarchical tail)"
+            )
+        if self.input_source not in ("expert", "body"):
+            raise ValueError(
+                "hierarchical_visualization.input_source must be one of "
+                f"('expert', 'body'), got {self.input_source!r}"
             )
         if self.viz_dim not in (2, 3):
             raise ValueError(

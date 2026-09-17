@@ -1,0 +1,48 @@
+# Round 13 follow-up, "body" ablation of
+# tail_train_hierarchical_visualization_round7.example.yaml: one 2D
+# visualization tail per family, still gated on the same
+# hierarchical_round7_body_scale_experts hierarchical tail's own
+# family_expert_status.yaml (so both variants cover the exact same set of
+# families), but this time attached directly to the frozen body's own
+# embedding (input_source: body) -- in PARALLEL with the expert, not
+# chained to it, exactly the relationship the family-level classifier and
+# the family-level visualization tail already have. No expert is loaded,
+# no native SOAP recompute happens at all. See
+# dim_red.pipeline.config.HierarchicalVisualizationConfig for the full
+# rationale, and tail_train_hierarchical_visualization_round7.example.yaml
+# for the "expert" (chained) counterpart this compares against.
+#
+# Same richer recipe already validated in this investigation (batch=128,
+# epochs=200, patience=20) rather than a lighter default, given how much
+# training budget has mattered elsewhere in this project.
+#
+# Run with:
+#   dimred-train-tail configs/tail_train_hierarchical_visualization_round7_body_input.example.yaml runs/tuning_supcon_family_only_round7/20260914-1/model-supcon_hd-128-64_pyxtal-cub-hex-mon-ort-tet-tri-tri_nsp1_supcon-family_only_tau0.05_lf1-3
+
+tail_kind: hierarchical_visualization
+output_subdir: hierarchical_visualization_body_input
+
+hierarchical_visualization:
+  hierarchical_output_subdir: hierarchical_round7_body_scale_experts
+  input_source: body
+  viz_dim: 2
+  tau: 0.1
+  distance: euclidean
+  lambda_norm: 0.0
+  hidden_dim: null
+  batching:
+    strategy: random
+
+seed: 42
+
+train:
+  epochs: 200
+  batch_size: 128
+  learning_rate: 0.001
+  optimizer: adam
+  device: gpu
+  early_stopping:
+    enabled: true
+    patience: 20
+    min_delta: 0.0001
+    restore_best_weights: true

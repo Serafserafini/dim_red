@@ -588,12 +588,15 @@ def _train_hierarchical_visualization(
     ``dim_red.pipeline.config.HierarchicalVisualizationConfig`` for the
     full rationale/field docs.
 
-    Each expert's last hidden layer activation
-    (``ClassificationTail.family_hidden``) is the input, computed for
-    *every* point of that family (train + val -- the same full subset the
-    expert itself was trained/evaluated on), not raw SOAP/body features.
-    Families with no dedicated expert in the referenced hierarchical tail
-    are skipped -- there is no learned representation to attach to.
+    Either the referenced expert's last hidden layer activation
+    (``ClassificationTail.family_hidden``, ``input_source: "expert"``, the
+    default) or the frozen body's own embedding directly
+    (``input_source: "body"``, in parallel with the expert rather than
+    chained to it) is the input, computed for *every* point of that family
+    (train + val -- the same full subset the expert itself was
+    trained/evaluated on). Families with no dedicated expert in the
+    referenced hierarchical tail are skipped either way -- see
+    ``dim_red.pipeline.config.HierarchicalVisualizationConfig``.
     """
     hv = config.hierarchical_visualization
     source_tail_dir = run_dir / "tails" / hv.hierarchical_output_subdir
@@ -608,14 +611,6 @@ def _train_hierarchical_visualization(
         status_by_family = {
             entry["family"]: entry for entry in yaml.safe_load(f)["families"]
         }
-    with open(source_tail_dir / "tail_config.yaml") as f:
-        source_hierarchical = yaml.safe_load(f)["hierarchical"]
-    source_expert_input = source_hierarchical.get("expert_input", "body")
-    source_expert_hidden_dim = (
-        source_hierarchical.get("expert_head_hidden_dim")
-        or source_hierarchical["head_hidden_dim"]
-    )
-    source_seed = source_hierarchical.get("seed", 42)
 
     labels_all = loaded.embeddings["labels"]
     spacegroups_all = loaded.embeddings["spacegroups"]
@@ -624,16 +619,32 @@ def _train_hierarchical_visualization(
     train_idx = split_all == "train"
     val_idx = split_all == "val"
 
-    if source_expert_input == "soap":
-        logger.info(
-            "Recomputing native SOAP features from %s to match the "
-            "referenced hierarchical tail's own expert_input='soap'",
-            run_dir / "dataset.extxyz",
+    use_expert = hv.input_source == "expert"
+    if use_expert:
+        with open(source_tail_dir / "tail_config.yaml") as f:
+            source_hierarchical = yaml.safe_load(f)["hierarchical"]
+        source_expert_input = source_hierarchical.get("expert_input", "body")
+        source_expert_hidden_dim = (
+            source_hierarchical.get("expert_head_hidden_dim")
+            or source_hierarchical["head_hidden_dim"]
         )
-        r_expert_source = _compute_native_soap_features(
-            run_dir, loaded.config, loaded.embeddings
-        )
+        source_seed = source_hierarchical.get("seed", 42)
+        if source_expert_input == "soap":
+            logger.info(
+                "Recomputing native SOAP features from %s to match the "
+                "referenced hierarchical tail's own expert_input='soap'",
+                run_dir / "dataset.extxyz",
+            )
+            r_expert_source = _compute_native_soap_features(
+                run_dir, loaded.config, loaded.embeddings
+            )
+        else:
+            r_expert_source = loaded.embeddings["embeddings"]
     else:
+        # input_source: "body" -- in parallel with the expert (same
+        # relationship the family-level classifier/visualization tail
+        # already have), no need to reconstruct any expert or recompute
+        # native SOAP at all.
         r_expert_source = loaded.embeddings["embeddings"]
     expert_input_dim = r_expert_source.shape[1]
 
@@ -668,13 +679,6 @@ def _train_hierarchical_visualization(
         expert_dir = source_tail_dir / "experts" / _sanitize_family_dirname(family_name)
         with open(expert_dir / "local_spacegroup_classes.yaml") as f:
             local_classes = yaml.safe_load(f)["local_spacegroup_classes"]
-        expert_tail = load_classification_tail(
-            expert_dir / "tail_params.msgpack",
-            input_dim=expert_input_dim,
-            hidden_dim=source_expert_hidden_dim,
-            n_family_classes=len(local_classes),
-            seed=source_seed,
-        )
 
         family_mask_all = family_ids == k
         family_mask_train = train_idx & family_mask_all
@@ -682,9 +686,22 @@ def _train_hierarchical_visualization(
         if not family_mask_val.any():
             family_mask_val = family_mask_train
 
-        r_family = np.asarray(
-            expert_tail.family_hidden(r_expert_source[family_mask_all])
-        )
+        if use_expert:
+            expert_tail = load_classification_tail(
+                expert_dir / "tail_params.msgpack",
+                input_dim=expert_input_dim,
+                hidden_dim=source_expert_hidden_dim,
+                n_family_classes=len(local_classes),
+                seed=source_seed,
+            )
+            r_family = np.asarray(
+                expert_tail.family_hidden(r_expert_source[family_mask_all])
+            )
+        else:
+            # input_source: "body" -- attach directly to the frozen
+            # body's own embedding, in parallel with the expert, exactly
+            # like the family-level classifier/visualization tail pair.
+            r_family = np.asarray(r_expert_source[family_mask_all])
         family_positions = np.flatnonzero(family_mask_all)
         pos_lookup = {row: i for i, row in enumerate(family_positions)}
         train_pos = np.array([pos_lookup[i] for i in np.flatnonzero(family_mask_train)])
@@ -704,10 +721,11 @@ def _train_hierarchical_visualization(
             seed=config.seed,
         )
         logger.info(
-            "Training visualization tail for family %r: expert_hidden=%d "
-            "n_local_spacegroups=%d viz_dim=%d tau=%.3f distance=%s "
-            "epochs=%d batch_size=%d batching=%s",
+            "Training visualization tail for family %r: input_source=%s "
+            "input_dim=%d n_local_spacegroups=%d viz_dim=%d tau=%.3f "
+            "distance=%s epochs=%d batch_size=%d batching=%s",
             family_name,
+            hv.input_source,
             r_family.shape[1],
             len(local_classes),
             hv.viz_dim,
@@ -774,7 +792,7 @@ def _train_hierarchical_visualization(
         plot_fn(
             z_family,
             [str(sg) for sg in local_spacegroups_all.tolist()],
-            title=f"{family_name} experts visualization ({run_dir.name})",
+            title=f"{family_name} visualization ({hv.input_source} input, {run_dir.name})",
             save_path=str(plot_path),
         )
         logger.info("Saved family %r visualization plot to %s", family_name, plot_path)

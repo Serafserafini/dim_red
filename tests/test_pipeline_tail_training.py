@@ -517,6 +517,60 @@ def test_train_tail_hierarchical_visualization_trains_one_tail_per_expert(tmp_pa
     assert "Trained 2/2 per-family visualization tails" in run_log
 
 
+def test_train_tail_hierarchical_visualization_input_source_body_uses_body_embedding(
+    tmp_path,
+):
+    run_dir = _train_supcon_run(tmp_path, latent_dim=3)
+    hierarchical_config = TailTrainConfig(
+        run_dir=str(run_dir),
+        tail_kind="hierarchical",
+        output_subdir="hierarchical_soap",
+        hierarchical=HierarchicalTailConfig(
+            head_hidden_dim=8,
+            min_samples_per_expert=5,
+            expert_input="soap",
+            expert_head_hidden_dim=[16, 8],
+        ),
+        train=TailTrainSettings(epochs=2, batch_size=4),
+    )
+    with patch(
+        "dim_red.pipeline.tail_training.compute_soap",
+        side_effect=_fake_compute_soap(seed=1, n_features=5),
+    ):
+        train_tail(hierarchical_config)
+
+    viz_config = TailTrainConfig(
+        run_dir=str(run_dir),
+        tail_kind="hierarchical_visualization",
+        output_subdir="hierarchical_visualization_body",
+        hierarchical_visualization=HierarchicalVisualizationConfig(
+            hierarchical_output_subdir="hierarchical_soap",
+            input_source="body",
+        ),
+        train=TailTrainSettings(epochs=2, batch_size=4),
+    )
+    # No compute_soap patch needed at all -- "body" mode never recomputes
+    # native SOAP or touches dataset.extxyz/the expert's own tail_config.yaml.
+    viz_tail_dir = train_tail(viz_config)
+
+    for family in ("Cubic", "Hexagonal"):
+        family_dir = viz_tail_dir / family
+        assert (family_dir / "tail_params.msgpack").exists()
+        embeddings = np.load(family_dir / "tail_embeddings.npz", allow_pickle=True)
+        assert embeddings["embeddings"].shape == (10, 2)
+
+    # viz tail's own input is the body's 3-dim embedding, not the expert's
+    # 8-dim hidden layer ([16, 8] -> last hidden width 8).
+    with open(viz_tail_dir / "run.log") as f:
+        run_log = f.read()
+    assert "input_source=body input_dim=3" in run_log
+
+    with open(viz_tail_dir / "Cubic" / "tail_params.msgpack", "rb") as f:
+        viz_params = serialization.msgpack_restore(f.read())
+    first_dense = viz_params["Dense_0"]["kernel"]
+    assert first_dense.shape[0] == 3
+
+
 def test_train_tail_hierarchical_visualization_skips_families_without_an_expert(
     tmp_path,
 ):
