@@ -851,6 +851,19 @@ def _parse_hierarchical_tail_config(
     )
 
 
+def _parse_hierarchical_supcon_tail_config(
+    d: Dict[str, Any]
+) -> Optional["HierarchicalSupconTailConfig"]:
+    """Parse a ``hierarchical_supcon:`` block -- ``TailTrainConfig``-only
+    (unlike ``hierarchical``, this experimental tail_kind isn't offered
+    through ``RunConfig.tails``)."""
+    return (
+        _dataclass_from_dict(HierarchicalSupconTailConfig, d["hierarchical_supcon"])
+        if "hierarchical_supcon" in d
+        else None
+    )
+
+
 def _parse_hierarchical_visualization_config(
     d: Dict[str, Any]
 ) -> Optional["HierarchicalVisualizationConfig"]:
@@ -1072,6 +1085,7 @@ _TAIL_KINDS = (
     "visualization",
     "hierarchical",
     "hierarchical_visualization",
+    "hierarchical_supcon",
 )
 _CLASSIFICATION_TAIL_MODES = ("family_only", "family_and_spacegroup")
 _EXPERT_INPUT_KINDS = ("body", "soap")
@@ -1359,6 +1373,166 @@ class HierarchicalVisualizationConfig:
 
 
 @dataclass(frozen=True)
+class HierarchicalSupconTailConfig:
+    """Config for ``TailTrainConfig.tail_kind == "hierarchical_supcon"``: an
+    experimental variant of ``"hierarchical"`` where stage 2's per-family
+    spacegroup expert is itself restructured to mirror the family-level
+    SupCon body -> classifier -> visualizer pattern one level down, instead
+    of being a single classifier trained directly on native SOAP.
+
+    Stage 1 (family) is unchanged from ``"hierarchical"``: one
+    ``ClassificationTail`` on the frozen body's own embedding, hidden width
+    ``head_hidden_dim``.
+
+    Stage 2, per family:
+
+    1. A fresh ``dim_red.supcon.model.SupConEncoder`` + ``ProjectionTail``
+       (called "SupCon SG" in this project's notes/discussions) is trained
+       from scratch on that family's own native SOAP subset (train + val,
+       the same split used everywhere else in this pipeline) via
+       ``dim_red.supcon.training.train_supcon`` -- architecturally
+       identical to how the real family-level SupCon body is trained
+       (``sg_encoder_hidden_dim``/``sg_latent_dim`` default to the same
+       ``[128, 64]``/``8`` this project's family bodies use), but
+       contrasting on the *local spacegroup id* instead of family (passed
+       via ``train_spacegroup_ids``, with ``lambda_family=0``/
+       ``lambda_spacegroup=1`` -- the family term is left inactive since
+       family is constant within one family's own subset, so there's
+       nothing to contrast there; note this uses the spacegroup slot
+       directly rather than reusing the family slot, unlike
+       ``HierarchicalTailConfig``'s classifier-only expert, since
+       ``train_supcon`` already has two genuinely independent terms with
+       no head/masking machinery to route around).
+    2. That SG body is frozen; a ``ClassificationTail`` (single hidden
+       layer, width ``sg_classifier_hidden_dim``) is trained on its
+       ``sg_latent_dim``-dim embedding via cross-entropy, predicting the
+       local spacegroup id (its "family" head slot reused to mean that,
+       same convention ``HierarchicalTailConfig``'s expert already uses).
+    3. A ``VisualizationTail`` (hidden widths
+       ``sg_visualization_hidden_dim``, output 2D) is trained on the same
+       frozen SG embedding, contrasting on the local spacegroup id --
+       this tail_kind produces its own per-family visualization directly,
+       no separate ``hierarchical_visualization`` pass needed on top of it.
+
+    Families below ``min_samples_per_expert`` training rows (or with fewer
+    than 2 distinct spacegroups observed) get no SG expert at all -- same
+    fallback (always predict that family's single most frequent
+    training-set spacegroup) as ``HierarchicalTailConfig``, recorded the
+    same way in ``family_expert_status.yaml``.
+
+    Always requires ``model_kind == "supcon"`` (native SOAP must exist to
+    recompute -- see ``_compute_native_soap_features``); there is no
+    ``expert_input`` choice here, unlike ``HierarchicalTailConfig``, since
+    the whole point of this tail_kind is that stage 2 is itself a SupCon
+    body trained on native SOAP, not a classifier trained on some other
+    representation.
+
+    Attributes:
+        head_hidden_dim: Stage-1 family classifier's hidden width.
+        min_samples_per_expert: Same fallback threshold as
+            ``HierarchicalTailConfig``.
+        sg_encoder_hidden_dim: SupCon SG's own encoder hidden widths.
+        sg_latent_dim: SupCon SG's own output embedding width.
+        sg_tau: SupCon SG's contrastive temperature.
+        sg_distance: SupCon SG's similarity metric -- ``"euclidean"`` or
+            ``"cosine"``.
+        sg_lambda_norm: SupCon SG's embedding-norm regularizer weight
+            (applied to its projection tail's output, same as the real
+            body). ``0.0`` (default) disables it.
+        sg_projection_dim: SupCon SG's own projection tail output width --
+            the space its contrastive loss is actually computed in,
+            discarded after training (same as the real body's).
+        sg_projection_hidden_dim: SupCon SG's own projection tail hidden
+            widths. ``None`` (default) resolves to a single hidden layer
+            matching ``sg_latent_dim``.
+        sg_classifier_hidden_dim: Hidden width of the classifier trained on
+            top of the frozen SG embedding.
+        sg_visualization_hidden_dim: Hidden widths of the visualization
+            tail trained on top of the frozen SG embedding.
+        sg_visualization_tau: Visualization tail's contrastive temperature.
+        sg_visualization_distance: Visualization tail's similarity metric.
+        sg_visualization_lambda_norm: Visualization tail's embedding-norm
+            regularizer weight. ``0.0`` (default) disables it.
+    """
+
+    head_hidden_dim: int = 16
+    min_samples_per_expert: int = 10
+    sg_encoder_hidden_dim: List[int] = field(default_factory=lambda: [128, 64])
+    sg_latent_dim: int = 8
+    sg_tau: float = 0.05
+    sg_distance: str = "cosine"
+    sg_lambda_norm: float = 0.0
+    sg_projection_dim: int = 128
+    sg_projection_hidden_dim: Optional[List[int]] = None
+    sg_classifier_hidden_dim: int = 16
+    sg_visualization_hidden_dim: List[int] = field(default_factory=lambda: [32, 16])
+    sg_visualization_tau: float = 0.1
+    sg_visualization_distance: str = "cosine"
+    sg_visualization_lambda_norm: float = 0.0
+
+    def __post_init__(self):
+        if self.head_hidden_dim <= 0:
+            raise ValueError(
+                "hierarchical_supcon.head_hidden_dim must be a positive integer"
+            )
+        if self.min_samples_per_expert <= 0:
+            raise ValueError(
+                "hierarchical_supcon.min_samples_per_expert must be a positive integer"
+            )
+        if not self.sg_encoder_hidden_dim or any(
+            d <= 0 for d in self.sg_encoder_hidden_dim
+        ):
+            raise ValueError(
+                "hierarchical_supcon.sg_encoder_hidden_dim must be a non-empty "
+                "list of positive integers"
+            )
+        if self.sg_latent_dim <= 0:
+            raise ValueError(
+                "hierarchical_supcon.sg_latent_dim must be a positive integer"
+            )
+        if self.sg_distance not in _SUPCON_DISTANCES:
+            raise ValueError(
+                f"hierarchical_supcon.sg_distance must be one of "
+                f"{_SUPCON_DISTANCES}, got {self.sg_distance!r}"
+            )
+        if self.sg_lambda_norm < 0:
+            raise ValueError("hierarchical_supcon.sg_lambda_norm must be >= 0")
+        if self.sg_projection_dim <= 0:
+            raise ValueError(
+                "hierarchical_supcon.sg_projection_dim must be a positive integer"
+            )
+        if self.sg_projection_hidden_dim is not None and (
+            not self.sg_projection_hidden_dim
+            or any(d <= 0 for d in self.sg_projection_hidden_dim)
+        ):
+            raise ValueError(
+                "hierarchical_supcon.sg_projection_hidden_dim, if set, must be "
+                "a non-empty list of positive integers"
+            )
+        if self.sg_classifier_hidden_dim <= 0:
+            raise ValueError(
+                "hierarchical_supcon.sg_classifier_hidden_dim must be a "
+                "positive integer"
+            )
+        if not self.sg_visualization_hidden_dim or any(
+            d <= 0 for d in self.sg_visualization_hidden_dim
+        ):
+            raise ValueError(
+                "hierarchical_supcon.sg_visualization_hidden_dim must be a "
+                "non-empty list of positive integers"
+            )
+        if self.sg_visualization_distance not in _SUPCON_DISTANCES:
+            raise ValueError(
+                f"hierarchical_supcon.sg_visualization_distance must be one "
+                f"of {_SUPCON_DISTANCES}, got {self.sg_visualization_distance!r}"
+            )
+        if self.sg_visualization_lambda_norm < 0:
+            raise ValueError(
+                "hierarchical_supcon.sg_visualization_lambda_norm must be >= 0"
+            )
+
+
+@dataclass(frozen=True)
 class TailTrainSettings:
     """Training-loop mechanics for phase 2, mirroring the relevant subset of
     ``RunConfig.train`` (``TrainSettings``) -- no ``beta``/``val_ratio``:
@@ -1465,6 +1639,8 @@ class TailTrainConfig:
         hierarchical: Required when ``tail_kind == "hierarchical"``.
         hierarchical_visualization: Required when ``tail_kind ==
             "hierarchical_visualization"``.
+        hierarchical_supcon: Required when ``tail_kind ==
+            "hierarchical_supcon"``.
         train: Training-loop mechanics.
         seed: Seed for the tail's own parameter initialization.
         output_subdir: Directory name under ``<run_dir>/tails/`` this tail's
@@ -1478,6 +1654,7 @@ class TailTrainConfig:
     visualization: Optional[VisualizationTailConfig] = None
     hierarchical: Optional[HierarchicalTailConfig] = None
     hierarchical_visualization: Optional[HierarchicalVisualizationConfig] = None
+    hierarchical_supcon: Optional[HierarchicalSupconTailConfig] = None
     train: TailTrainSettings = field(default_factory=TailTrainSettings)
     seed: int = 42
     output_subdir: Optional[str] = None
@@ -1507,6 +1684,11 @@ class TailTrainConfig:
                 "tail_kind='hierarchical_visualization' requires a "
                 "'hierarchical_visualization' config block."
             )
+        if self.tail_kind == "hierarchical_supcon" and self.hierarchical_supcon is None:
+            raise ValueError(
+                "tail_kind='hierarchical_supcon' requires a "
+                "'hierarchical_supcon' config block."
+            )
 
 
 def tail_train_config_from_dict(d: Dict[str, Any]) -> TailTrainConfig:
@@ -1518,6 +1700,7 @@ def tail_train_config_from_dict(d: Dict[str, Any]) -> TailTrainConfig:
     visualization = _parse_visualization_tail_config(d)
     hierarchical = _parse_hierarchical_tail_config(d)
     hierarchical_visualization = _parse_hierarchical_visualization_config(d)
+    hierarchical_supcon = _parse_hierarchical_supcon_tail_config(d)
 
     run_dir = d.get("run_dir")
     return TailTrainConfig(
@@ -1527,6 +1710,7 @@ def tail_train_config_from_dict(d: Dict[str, Any]) -> TailTrainConfig:
         visualization=visualization,
         hierarchical=hierarchical,
         hierarchical_visualization=hierarchical_visualization,
+        hierarchical_supcon=hierarchical_supcon,
         train=train,
         seed=int(d.get("seed", 42)),
         output_subdir=d.get("output_subdir"),
@@ -1559,4 +1743,6 @@ def tail_train_config_to_dict(config: TailTrainConfig) -> Dict[str, Any]:
         result["hierarchical_visualization"] = dataclasses.asdict(
             config.hierarchical_visualization
         )
+    if config.hierarchical_supcon is not None:
+        result["hierarchical_supcon"] = dataclasses.asdict(config.hierarchical_supcon)
     return result
