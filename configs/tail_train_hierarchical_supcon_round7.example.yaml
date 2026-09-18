@@ -18,12 +18,18 @@
 # euclidean), but that wasn't a clean single-variable comparison. This
 # run isolates the architecture change alone. See
 # dim_red.pipeline.config.HierarchicalSupconTailConfig for the full
-# rationale.
+# rationale. Output folder (hierarchical_r13_supcon_sg) is the round 13
+# baseline for the round 14 dimension-variation sweep
+# (configs/tail_train_hierarchical_supcon_round7_{latent16,latent32,
+# encoder_256_128,classifier32,viz_64_32}.example.yaml); the earlier,
+# confounded (cosine-viz) first run is kept on disk as
+# hierarchical_r13_supcon_sg_cosine_superseded for reference only.
 #
 # Run with:
 #   dimred-train-tail configs/tail_train_hierarchical_supcon_round7.example.yaml runs/tuning_supcon_family_only_round7/20260914-1/model-supcon_hd-128-64_pyxtal-cub-hex-mon-ort-tet-tri-tri_nsp1_supcon-family_only_tau0.05_lf1-3
 
 tail_kind: hierarchical_supcon
+output_subdir: hierarchical_r13_supcon_sg
 
 hierarchical_supcon:
   head_hidden_dim: 16
