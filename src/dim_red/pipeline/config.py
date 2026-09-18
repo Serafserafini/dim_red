@@ -1450,7 +1450,18 @@ class HierarchicalSupconTailConfig:
         sg_visualization_hidden_dim: Hidden widths of the visualization
             tail trained on top of the frozen SG embedding.
         sg_visualization_tau: Visualization tail's contrastive temperature.
-        sg_visualization_distance: Visualization tail's similarity metric.
+        sg_visualization_distance: Visualization tail's similarity metric --
+            ``"euclidean"`` (default) or ``"cosine"``. Deliberately not
+            ``sg_distance``'s own default (``"cosine"``, matching the real
+            body's own recipe): an initial comparison against this
+            tail_kind's predecessor (a visualization tail chained to the
+            classifier-only expert's hidden layer, which used
+            ``distance: euclidean``) found the SG-based visualizer
+            noticeably better on nearly every family/metric, but that
+            comparison wasn't a clean single-variable ablation (it also
+            defaulted to ``"cosine"`` here) -- ``"euclidean"`` is the
+            default so the two are compared on equal footing rather than
+            leaving the confound in place.
         sg_visualization_lambda_norm: Visualization tail's embedding-norm
             regularizer weight. ``0.0`` (default) disables it.
     """
@@ -1467,7 +1478,7 @@ class HierarchicalSupconTailConfig:
     sg_classifier_hidden_dim: int = 16
     sg_visualization_hidden_dim: List[int] = field(default_factory=lambda: [32, 16])
     sg_visualization_tau: float = 0.1
-    sg_visualization_distance: str = "cosine"
+    sg_visualization_distance: str = "euclidean"
     sg_visualization_lambda_norm: float = 0.0
 
     def __post_init__(self):

@@ -5,14 +5,20 @@
 # a single classifier trained directly on native SOAP (as
 # tail_train_hierarchical_round7_body_scale_experts.example.yaml does).
 #
-# Every value below deliberately mirrors round7's own family-level recipe,
+# Most values below deliberately mirror round7's own family-level recipe,
 # so the family and per-family-spacegroup pipelines are the same schema
 # applied twice: SupCon encoder [128,64] -> latent 8, tau=0.05/cosine,
 # projection_dim=128 (hidden defaults to [latent_dim]); classifier hidden=16
 # (same as the family stage's head_hidden_dim); visualizer hidden=[32,16],
-# tau=0.1/cosine (same as the round8 topmodel family-level visualization
-# tail). See dim_red.pipeline.config.HierarchicalSupconTailConfig for the
-# full rationale.
+# tau=0.1 (same as the round8 topmodel family-level visualization tail).
+# One deliberate deviation: sg_visualization_distance is euclidean, not
+# cosine -- a first run left it at cosine (the class default at the time)
+# and the SG-based visualizer looked much better than its predecessor
+# (chained to the classifier's hidden layer, which used distance:
+# euclidean), but that wasn't a clean single-variable comparison. This
+# run isolates the architecture change alone. See
+# dim_red.pipeline.config.HierarchicalSupconTailConfig for the full
+# rationale.
 #
 # Run with:
 #   dimred-train-tail configs/tail_train_hierarchical_supcon_round7.example.yaml runs/tuning_supcon_family_only_round7/20260914-1/model-supcon_hd-128-64_pyxtal-cub-hex-mon-ort-tet-tri-tri_nsp1_supcon-family_only_tau0.05_lf1-3
@@ -32,7 +38,7 @@ hierarchical_supcon:
   sg_classifier_hidden_dim: 16
   sg_visualization_hidden_dim: [32, 16]
   sg_visualization_tau: 0.1
-  sg_visualization_distance: cosine
+  sg_visualization_distance: euclidean
   sg_visualization_lambda_norm: 0.0
 
 seed: 42
