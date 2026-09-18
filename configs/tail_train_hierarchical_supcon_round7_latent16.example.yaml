@@ -1,0 +1,45 @@
+# Round 14, experimental branch: single-variable variant of
+# tail_train_hierarchical_supcon_round7.example.yaml (round 13's SupCon SG
+# baseline) -- only sg_latent_dim changes, 8 -> 16. Direct test of the
+# round 13 hypothesis that compressing down to 36 classes (Cubic) through
+# an 8-dim bottleneck costs classification accuracy; doubling the
+# bottleneck checks whether accuracy recovers without losing round 13's
+# visualization-quality win. Everything else (encoder, tau/distance,
+# classifier/visualizer widths, training recipe) is unchanged from the
+# round 13 baseline. See experiments/round13_hierarchical_supcon_notes.md.
+#
+# Run with:
+#   dimred-train-tail configs/tail_train_hierarchical_supcon_round7_latent16.example.yaml runs/tuning_supcon_family_only_round7/20260914-1/model-supcon_hd-128-64_pyxtal-cub-hex-mon-ort-tet-tri-tri_nsp1_supcon-family_only_tau0.05_lf1-3
+
+tail_kind: hierarchical_supcon
+output_subdir: hierarchical_r14_supcon_sg_latent16
+
+hierarchical_supcon:
+  head_hidden_dim: 16
+  min_samples_per_expert: 10
+  sg_encoder_hidden_dim: [128, 64]
+  sg_latent_dim: 16
+  sg_tau: 0.05
+  sg_distance: cosine
+  sg_lambda_norm: 0.0
+  sg_projection_dim: 128
+  sg_projection_hidden_dim: null
+  sg_classifier_hidden_dim: 16
+  sg_visualization_hidden_dim: [32, 16]
+  sg_visualization_tau: 0.1
+  sg_visualization_distance: euclidean
+  sg_visualization_lambda_norm: 0.0
+
+seed: 42
+
+train:
+  epochs: 200
+  batch_size: 128
+  learning_rate: 0.001
+  optimizer: adam
+  device: gpu
+  early_stopping:
+    enabled: true
+    patience: 20
+    min_delta: 0.0001
+    restore_best_weights: true

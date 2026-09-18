@@ -24,7 +24,7 @@ hierarchical:
   min_samples_per_expert: 10
   expert_input: soap
 
-output_subdir: hierarchical_round7_soap_experts
+output_subdir: hierarchical_r13_soap_experts
 
 seed: 42
 

@@ -25,6 +25,7 @@ from dim_red.pipeline.config import (
     ClassificationTailConfig,
     FetchConfig,
     GraphConfig,
+    HierarchicalSupconTailConfig,
     HierarchicalTailConfig,
     HierarchicalVisualizationConfig,
     MaceConfig,
@@ -646,6 +647,133 @@ def test_train_tail_hierarchical_expert_input_soap_rejects_non_soap_body(tmp_pat
 
     with pytest.raises(ValueError, match="expert_input='soap'"):
         train_tail(config)
+
+
+def test_train_tail_hierarchical_supcon_writes_expected_artifacts(tmp_path):
+    run_dir = _train_supcon_run(tmp_path)
+    config = TailTrainConfig(
+        run_dir=str(run_dir),
+        tail_kind="hierarchical_supcon",
+        hierarchical_supcon=HierarchicalSupconTailConfig(
+            head_hidden_dim=8,
+            min_samples_per_expert=5,
+            sg_encoder_hidden_dim=[8, 4],
+            sg_latent_dim=3,
+            sg_classifier_hidden_dim=4,
+            sg_visualization_hidden_dim=[4, 2],
+        ),
+        train=TailTrainSettings(epochs=2, batch_size=4),
+    )
+
+    with patch(
+        "dim_red.pipeline.tail_training.compute_soap",
+        side_effect=_fake_compute_soap(seed=1, n_features=5),
+    ):
+        tail_dir = train_tail(config)
+
+    assert tail_dir.parent.name == "tails"
+    assert tail_dir.name == "hierarchical_supcon"
+    assert (tail_dir / "tail_config.yaml").exists()
+    assert (tail_dir / "tail_predictions.npz").exists()
+    assert (tail_dir / "family_expert_status.yaml").exists()
+    assert (tail_dir / "run.log").exists()
+
+    assert (tail_dir / "family" / "tail_params.msgpack").exists()
+    assert (tail_dir / "family" / "loss_history.csv").exists()
+
+    with open(tail_dir / "family_expert_status.yaml") as f:
+        status = yaml.safe_load(f)["families"]
+    status_by_family = {entry["family"]: entry for entry in status}
+    assert set(status_by_family) == {"Cubic", "Hexagonal"}
+    for family, entry in status_by_family.items():
+        assert entry["expert"] is True
+        assert entry["n_local_spacegroup_classes"] == 2
+        sg_dir = tail_dir / "sg_experts" / family
+        assert (sg_dir / "sg_body_params.msgpack").exists()
+        assert (sg_dir / "sg_projection_params.msgpack").exists()
+        assert (sg_dir / "sg_body_loss_history.csv").exists()
+        assert (sg_dir / "classifier_tail_params.msgpack").exists()
+        assert (sg_dir / "classifier_loss_history.csv").exists()
+        assert (sg_dir / "local_spacegroup_classes.yaml").exists()
+        assert (sg_dir / "visualization_tail_params.msgpack").exists()
+        assert (sg_dir / "visualization_loss_history.csv").exists()
+        assert (sg_dir / "visualization_plot_spacegroup.png").exists()
+
+        # The SG body's own params: encoder [8, 4] -> latent 3.
+        with open(sg_dir / "sg_body_params.msgpack", "rb") as f:
+            sg_body_params = serialization.msgpack_restore(f.read())
+        dense_layers = [k for k in sg_body_params if k.startswith("Dense_")]
+        assert len(dense_layers) == 3  # 8, 4, then latent_dim=3
+        assert sg_body_params["Dense_2"]["kernel"].shape[1] == 3
+
+        # The classifier/visualizer both read the SG body's 3-dim output.
+        with open(sg_dir / "classifier_tail_params.msgpack", "rb") as f:
+            classifier_params = serialization.msgpack_restore(f.read())
+        classifier_dense_layers = sorted(
+            k for k in classifier_params["family_head"] if k.startswith("Dense_")
+        )
+        assert (
+            classifier_params["family_head"][classifier_dense_layers[0]][
+                "kernel"
+            ].shape[0]
+            == 3
+        )
+
+        embeddings = np.load(sg_dir / "visualization_embeddings.npz", allow_pickle=True)
+        assert embeddings["embeddings"].shape == (10, 2)  # limit_per_system=10
+
+    predictions = np.load(tail_dir / "tail_predictions.npz")
+    n_total = 20  # 2 crystal systems x limit_per_system=10
+    assert predictions["family_probs"].shape == (n_total, 2)
+    assert predictions["spacegroup_probs"].shape[0] == n_total
+    assert (
+        predictions["spacegroup_probs_oracle"].shape
+        == predictions["spacegroup_probs"].shape
+    )
+    np.testing.assert_allclose(
+        predictions["family_probs"].sum(axis=1), np.ones(n_total), atol=1e-4
+    )
+    np.testing.assert_allclose(
+        predictions["spacegroup_probs"].sum(axis=1), np.ones(n_total), atol=1e-4
+    )
+    np.testing.assert_allclose(
+        predictions["spacegroup_probs_oracle"].sum(axis=1), np.ones(n_total), atol=1e-4
+    )
+
+
+def test_train_tail_hierarchical_supcon_falls_back_for_low_sample_families(tmp_path):
+    run_dir = _train_supcon_run(tmp_path)
+    config = TailTrainConfig(
+        run_dir=str(run_dir),
+        tail_kind="hierarchical_supcon",
+        # Both families have well under 100 training rows -- forces every
+        # family into the majority-value fallback, no SG expert trained.
+        hierarchical_supcon=HierarchicalSupconTailConfig(
+            head_hidden_dim=8, min_samples_per_expert=100
+        ),
+        train=TailTrainSettings(epochs=1, batch_size=4),
+    )
+
+    with patch(
+        "dim_red.pipeline.tail_training.compute_soap",
+        side_effect=_fake_compute_soap(seed=1, n_features=5),
+    ):
+        tail_dir = train_tail(config)
+
+    with open(tail_dir / "family_expert_status.yaml") as f:
+        status = yaml.safe_load(f)["families"]
+    assert len(status) == 2
+    for entry in status:
+        assert entry["expert"] is False
+        assert isinstance(entry["fallback_spacegroup"], int)
+    assert not (tail_dir / "sg_experts").exists()
+
+    predictions = np.load(tail_dir / "tail_predictions.npz")
+    np.testing.assert_allclose(
+        predictions["spacegroup_probs"].sum(axis=1),
+        np.ones(predictions["spacegroup_probs"].shape[0]),
+        atol=1e-4,
+    )
 
 
 @pytest.mark.parametrize("tail_kind", ["classification", "hierarchical"])

@@ -15,7 +15,10 @@
 # about whether the EXPERTS benefit from body-scale capacity/training,
 # not about growing the family stage too. Evaluate via the oracle
 # spacegroup accuracy (isolates expert quality from stage-1 routing,
-# which is unrelated to this variable).
+# which is unrelated to this variable). Result: oracle spacegroup
+# accuracy 0.9322 -- the best classification accuracy found across every
+# hierarchical/hierarchical_supcon variant tried in rounds 13-14, hence
+# the "_BEST" suffix on output_subdir below.
 #
 # Run with:
 #   dimred-train-tail configs/tail_train_hierarchical_round7_body_scale_experts.example.yaml runs/tuning_supcon_family_only_round7/20260914-1/model-supcon_hd-128-64_pyxtal-cub-hex-mon-ort-tet-tri-tri_nsp1_supcon-family_only_tau0.05_lf1-3
@@ -28,7 +31,7 @@ hierarchical:
   expert_input: soap
   expert_head_hidden_dim: [128, 64]
 
-output_subdir: hierarchical_round7_body_scale_experts
+output_subdir: hierarchical_r13_soap_experts_BEST
 
 seed: 42
 

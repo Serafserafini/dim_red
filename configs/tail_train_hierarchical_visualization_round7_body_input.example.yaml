@@ -1,7 +1,7 @@
 # Round 13 follow-up, "body" ablation of
 # tail_train_hierarchical_visualization_round7.example.yaml: one 2D
 # visualization tail per family, still gated on the same
-# hierarchical_round7_body_scale_experts hierarchical tail's own
+# hierarchical_r13_soap_experts_BEST hierarchical tail's own
 # family_expert_status.yaml (so both variants cover the exact same set of
 # families), but this time attached directly to the frozen body's own
 # embedding (input_source: body) -- in PARALLEL with the expert, not
@@ -20,10 +20,10 @@
 #   dimred-train-tail configs/tail_train_hierarchical_visualization_round7_body_input.example.yaml runs/tuning_supcon_family_only_round7/20260914-1/model-supcon_hd-128-64_pyxtal-cub-hex-mon-ort-tet-tri-tri_nsp1_supcon-family_only_tau0.05_lf1-3
 
 tail_kind: hierarchical_visualization
-output_subdir: hierarchical_visualization_body_input
+output_subdir: hierarchical_r13_viz_parallel
 
 hierarchical_visualization:
-  hierarchical_output_subdir: hierarchical_round7_body_scale_experts
+  hierarchical_output_subdir: hierarchical_r13_soap_experts_BEST
   input_source: body
   viz_dim: 2
   tau: 0.1

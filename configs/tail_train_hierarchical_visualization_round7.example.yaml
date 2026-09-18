@@ -1,6 +1,6 @@
 # Round 13 follow-up ("hierarchical_visualization"): one 2D visualization
 # tail per family, attached on top of the already-trained
-# hierarchical_round7_body_scale_experts hierarchical tail's own per-family
+# hierarchical_r13_soap_experts_BEST hierarchical tail's own per-family
 # spacegroup experts (frozen) -- input is each expert's own last hidden
 # layer activation (64-dim, since that hierarchical tail used
 # expert_head_hidden_dim: [128, 64]), not raw SOAP/body features. See
@@ -20,9 +20,10 @@
 #   dimred-train-tail configs/tail_train_hierarchical_visualization_round7.example.yaml runs/tuning_supcon_family_only_round7/20260914-1/model-supcon_hd-128-64_pyxtal-cub-hex-mon-ort-tet-tri-tri_nsp1_supcon-family_only_tau0.05_lf1-3
 
 tail_kind: hierarchical_visualization
+output_subdir: hierarchical_r13_viz_chained
 
 hierarchical_visualization:
-  hierarchical_output_subdir: hierarchical_round7_body_scale_experts
+  hierarchical_output_subdir: hierarchical_r13_soap_experts_BEST
   viz_dim: 2
   tau: 0.1
   distance: euclidean

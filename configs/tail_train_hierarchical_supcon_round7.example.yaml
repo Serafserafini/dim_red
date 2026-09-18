@@ -1,0 +1,62 @@
+# Round 13, experimental branch: tail_kind "hierarchical_supcon" -- stage 2's
+# per-family spacegroup expert is restructured as a SupCon body ("SupCon SG")
+# + classifier + visualizer, mirroring the family-level
+# SupCon body -> classifier -> visualizer pattern one level down, instead of
+# a single classifier trained directly on native SOAP (as
+# tail_train_hierarchical_round7_body_scale_experts.example.yaml does).
+#
+# Most values below deliberately mirror round7's own family-level recipe,
+# so the family and per-family-spacegroup pipelines are the same schema
+# applied twice: SupCon encoder [128,64] -> latent 8, tau=0.05/cosine,
+# projection_dim=128 (hidden defaults to [latent_dim]); classifier hidden=16
+# (same as the family stage's head_hidden_dim); visualizer hidden=[32,16],
+# tau=0.1 (same as the round8 topmodel family-level visualization tail).
+# One deliberate deviation: sg_visualization_distance is euclidean, not
+# cosine -- a first run left it at cosine (the class default at the time)
+# and the SG-based visualizer looked much better than its predecessor
+# (chained to the classifier's hidden layer, which used distance:
+# euclidean), but that wasn't a clean single-variable comparison. This
+# run isolates the architecture change alone. See
+# dim_red.pipeline.config.HierarchicalSupconTailConfig for the full
+# rationale. Output folder (hierarchical_r13_supcon_sg) is the round 13
+# baseline for the round 14 dimension-variation sweep
+# (configs/tail_train_hierarchical_supcon_round7_{latent16,latent32,
+# encoder_256_128,classifier32,viz_64_32}.example.yaml); the earlier,
+# confounded (cosine-viz) first run is kept on disk as
+# hierarchical_r13_supcon_sg_cosine_superseded for reference only.
+#
+# Run with:
+#   dimred-train-tail configs/tail_train_hierarchical_supcon_round7.example.yaml runs/tuning_supcon_family_only_round7/20260914-1/model-supcon_hd-128-64_pyxtal-cub-hex-mon-ort-tet-tri-tri_nsp1_supcon-family_only_tau0.05_lf1-3
+
+tail_kind: hierarchical_supcon
+output_subdir: hierarchical_r13_supcon_sg
+
+hierarchical_supcon:
+  head_hidden_dim: 16
+  min_samples_per_expert: 10
+  sg_encoder_hidden_dim: [128, 64]
+  sg_latent_dim: 8
+  sg_tau: 0.05
+  sg_distance: cosine
+  sg_lambda_norm: 0.0
+  sg_projection_dim: 128
+  sg_projection_hidden_dim: null
+  sg_classifier_hidden_dim: 16
+  sg_visualization_hidden_dim: [32, 16]
+  sg_visualization_tau: 0.1
+  sg_visualization_distance: euclidean
+  sg_visualization_lambda_norm: 0.0
+
+seed: 42
+
+train:
+  epochs: 200
+  batch_size: 128
+  learning_rate: 0.001
+  optimizer: adam
+  device: gpu
+  early_stopping:
+    enabled: true
+    patience: 20
+    min_delta: 0.0001
+    restore_best_weights: true
