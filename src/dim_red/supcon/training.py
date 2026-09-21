@@ -793,3 +793,410 @@ def train_supcon(
     model.params = params["body"]
     projection_tail.params = params["tail"]
     return history
+
+
+def _make_train_step_no_projection(
+    model: SupConEncoder,
+    tx,
+    tau: float,
+    distance: str,
+    lambda_family,
+    lambda_spacegroup,
+    lambda_norm,
+    has_family: bool,
+    has_spacegroup: bool,
+):
+    """Create a jitted training step bound to the body alone, optimizer and
+    loss weights -- the Khosla-sweep "no projection tail" variant of
+    ``_make_train_step``: ``supcon_loss``/``norm_penalty`` are computed
+    directly on the body's own representation ``r``, not a separate
+    projection tail's output ``z = Proj(r)``. ``params`` is just
+    ``model.params`` (no ``{"body": ..., "tail": ...}`` composition needed,
+    since there's no second pytree to differentiate jointly).
+    """
+
+    @jax.jit
+    def _train_step(params, batch_x, batch_family, batch_spacegroup, opt_state):
+        def loss_fn(local_params):
+            r = model.encode_with_params(local_params, batch_x)
+            total = jnp.asarray(0.0)
+            family_loss = jnp.asarray(0.0)
+            spacegroup_loss = jnp.asarray(0.0)
+            if has_family:
+                family_loss = supcon_loss(r, batch_family, tau, distance)
+                total = total + lambda_family * family_loss
+            if has_spacegroup:
+                spacegroup_loss = supcon_loss(r, batch_spacegroup, tau, distance)
+                total = total + lambda_spacegroup * spacegroup_loss
+            penalty = norm_penalty(r)
+            total = total + lambda_norm * penalty
+            return total, (family_loss, spacegroup_loss, penalty)
+
+        (loss, (family_loss, spacegroup_loss, penalty)), grads = jax.value_and_grad(
+            loss_fn, has_aux=True
+        )(params)
+        updates, new_opt_state = tx.update(
+            grads, opt_state, params, extra_args={"loss": loss}
+        )
+        new_params = optax.apply_updates(params, updates)
+        return new_params, new_opt_state, loss, family_loss, spacegroup_loss, penalty
+
+    return _train_step
+
+
+def _make_eval_step_no_projection(
+    model: SupConEncoder,
+    tau: float,
+    distance: str,
+    lambda_family,
+    lambda_spacegroup,
+    lambda_norm,
+    has_family: bool,
+    has_spacegroup: bool,
+):
+    """Create a jitted evaluation step for one batch -- mirrors
+    ``_make_train_step_no_projection``'s objective exactly."""
+
+    @jax.jit
+    def _eval_step(params, batch_x, batch_family, batch_spacegroup):
+        r = model.encode_with_params(params, batch_x)
+        total = jnp.asarray(0.0)
+        family_loss = jnp.asarray(0.0)
+        spacegroup_loss = jnp.asarray(0.0)
+        if has_family:
+            family_loss = supcon_loss(r, batch_family, tau, distance)
+            total = total + lambda_family * family_loss
+        if has_spacegroup:
+            spacegroup_loss = supcon_loss(r, batch_spacegroup, tau, distance)
+            total = total + lambda_spacegroup * spacegroup_loss
+        penalty = norm_penalty(r)
+        total = total + lambda_norm * penalty
+        return total, family_loss, spacegroup_loss, penalty
+
+    return _eval_step
+
+
+def train_supcon_no_projection(
+    model: SupConEncoder,
+    train_db: VAEDatabase,
+    val_db: VAEDatabase,
+    config: TrainConfig,
+    train_family_ids: Optional[np.ndarray] = None,
+    val_family_ids: Optional[np.ndarray] = None,
+    train_spacegroup_ids: Optional[np.ndarray] = None,
+    val_spacegroup_ids: Optional[np.ndarray] = None,
+    lambda_family: float = 1.0,
+    lambda_spacegroup: float = 1.0,
+    lambda_norm: float = 0.0,
+    batching_strategy: str = "random",
+    batching_family_ids: Optional[np.ndarray] = None,
+    batching_spacegroup_ids: Optional[np.ndarray] = None,
+    batching_P: Optional[int] = None,
+    batching_K: Optional[int] = None,
+    batching_S: Optional[int] = None,
+) -> Dict[str, List[float]]:
+    """Khosla-topology sweep, "no projection tail" variant (see
+    experiments/round15 notes): trains a bare ``SupConEncoder`` body with
+    the Supervised Contrastive loss computed directly on its own
+    representation ``r`` -- no ``ProjectionTail`` at all, unlike
+    ``train_supcon``. Tests whether the projection tail (a throwaway
+    128-dim buffer in this project's usual recipe) is actually pulling its
+    weight, versus just letting the encoder's own output absorb the
+    contrastive loss directly, at various encoder widths.
+
+    Mirrors ``train_supcon``'s exact shape/semantics (batching, optimizer,
+    early stopping, history-dict conventions) with two differences: no
+    ``projection_tail`` argument (there is nothing to jointly train besides
+    the body), and ``params`` is a plain ``model.params`` pytree instead of
+    ``{"body": ..., "tail": ...}``.
+
+    Args: see ``train_supcon`` -- identical argument names/semantics
+    (``lambda_norm``'s regularization target is now ``r`` itself, not a
+    projection's output).
+
+    Returns:
+        Same history-dict shape as ``train_supcon``
+        (``"train_loss"``/``"val_loss"``/``"train_norm_penalty"``/
+        ``"val_norm_penalty"``, plus ``"train_family_supcon"``/
+        ``"val_family_supcon"``/``"train_spacegroup_supcon"``/
+        ``"val_spacegroup_supcon"`` when the respective ids are given).
+
+    Raises:
+        ValueError: Same conditions as ``train_supcon``.
+    """
+    if config.epochs <= 0:
+        raise ValueError("epochs must be a positive integer")
+    if config.batch_size <= 0:
+        raise ValueError("batch_size must be a positive integer")
+    if config.learning_rate <= 0:
+        raise ValueError("learning_rate must be > 0")
+    if config.optimizer not in _OPTIMIZERS:
+        raise ValueError(
+            f"optimizer must be one of {_OPTIMIZERS}, got {config.optimizer!r}"
+        )
+    if config.tau <= 0:
+        raise ValueError("tau must be > 0")
+    if config.distance not in _DISTANCE_METRICS:
+        raise ValueError(
+            f"distance must be one of {_DISTANCE_METRICS}, got {config.distance!r}"
+        )
+    if lambda_family < 0:
+        raise ValueError("lambda_family must be >= 0")
+    if lambda_spacegroup < 0:
+        raise ValueError("lambda_spacegroup must be >= 0")
+    if lambda_norm < 0:
+        raise ValueError("lambda_norm must be >= 0")
+    if config.early_stopping_patience <= 0:
+        raise ValueError("early_stopping_patience must be a positive integer")
+    if config.early_stopping_min_delta < 0:
+        raise ValueError("early_stopping_min_delta must be >= 0")
+    if batching_strategy not in _BATCHING_STRATEGIES:
+        raise ValueError(
+            f"batching_strategy must be one of {_BATCHING_STRATEGIES}, got "
+            f"{batching_strategy!r}"
+        )
+
+    has_family = train_family_ids is not None
+    has_spacegroup = train_spacegroup_ids is not None
+    if not has_family and not has_spacegroup:
+        raise ValueError(
+            "At least one of train_family_ids/train_spacegroup_ids must be "
+            "given -- there is nothing to contrast on otherwise"
+        )
+    if has_family != (val_family_ids is not None):
+        raise ValueError("train_family_ids and val_family_ids must be given together")
+    if has_spacegroup != (val_spacegroup_ids is not None):
+        raise ValueError(
+            "train_spacegroup_ids and val_spacegroup_ids must be given together"
+        )
+
+    balanced_batching = batching_strategy == "balanced"
+    if balanced_batching:
+        if batching_family_ids is None:
+            raise ValueError(
+                "batching_strategy='balanced' requires batching_family_ids"
+            )
+        if batching_K is None or batching_K <= 0:
+            raise ValueError(
+                "batching_K must be a positive integer when "
+                "batching_strategy='balanced'"
+            )
+        if batching_spacegroup_ids is None:
+            raise ValueError(
+                "batching_strategy='balanced' requires batching_spacegroup_ids"
+            )
+
+    devices = jax.devices(config.device)
+    if not devices:
+        raise ValueError(f"No JAX devices found for backend '{config.device}'")
+    device = devices[0]
+
+    train_np = np.asarray(train_db.data, dtype=np.float32)
+    val_np = np.asarray(val_db.data, dtype=np.float32)
+
+    train_family_np = (
+        np.asarray(train_family_ids, dtype=np.int32)
+        if has_family
+        else np.zeros(train_np.shape[0], dtype=np.int32)
+    )
+    val_family_np = (
+        np.asarray(val_family_ids, dtype=np.int32)
+        if has_family
+        else np.zeros(val_np.shape[0], dtype=np.int32)
+    )
+    train_spacegroup_np = (
+        np.asarray(train_spacegroup_ids, dtype=np.int32)
+        if has_spacegroup
+        else np.zeros(train_np.shape[0], dtype=np.int32)
+    )
+    val_spacegroup_np = (
+        np.asarray(val_spacegroup_ids, dtype=np.int32)
+        if has_spacegroup
+        else np.zeros(val_np.shape[0], dtype=np.int32)
+    )
+
+    if balanced_batching:
+        batching_family_np = np.asarray(batching_family_ids, dtype=np.int32)
+        batching_spacegroup_np = np.asarray(batching_spacegroup_ids, dtype=np.int32)
+        n_train_families = len(np.unique(batching_family_np))
+        effective_P = (
+            n_train_families
+            if batching_P is None
+            else min(batching_P, n_train_families)
+        )
+        effective_batch_size = effective_P * batching_K
+        logger.warning(
+            "batching_strategy='balanced': train.batch_size (%d) is ignored "
+            "for training batches -- effective batch size = P*K = %d*%d = "
+            "%d. Validation batches are unaffected (still random shuffle, "
+            "using batch_size=%d).",
+            config.batch_size,
+            effective_P,
+            batching_K,
+            effective_batch_size,
+            config.batch_size,
+        )
+    else:
+        effective_batch_size = config.batch_size
+
+    rng = np.random.default_rng(config.seed)
+    batches_per_epoch = int(np.ceil(train_np.shape[0] / effective_batch_size))
+    total_steps = max(1, config.epochs * batches_per_epoch)
+
+    history: Dict[str, List[float]] = {
+        "train_loss": [],
+        "val_loss": [],
+        "train_norm_penalty": [],
+        "val_norm_penalty": [],
+    }
+    if has_family:
+        history["train_family_supcon"] = []
+        history["val_family_supcon"] = []
+    if has_spacegroup:
+        history["train_spacegroup_supcon"] = []
+        history["val_spacegroup_supcon"] = []
+
+    tx = _make_optimizer(config.optimizer, config.learning_rate, total_steps)
+    lambda_family_jax = jnp.asarray(lambda_family, dtype=jnp.float32)
+    lambda_spacegroup_jax = jnp.asarray(lambda_spacegroup, dtype=jnp.float32)
+    lambda_norm_jax = jnp.asarray(lambda_norm, dtype=jnp.float32)
+
+    train_step = _make_train_step_no_projection(
+        model,
+        tx,
+        config.tau,
+        config.distance,
+        lambda_family_jax,
+        lambda_spacegroup_jax,
+        lambda_norm_jax,
+        has_family,
+        has_spacegroup,
+    )
+    eval_step = _make_eval_step_no_projection(
+        model,
+        config.tau,
+        config.distance,
+        lambda_family_jax,
+        lambda_spacegroup_jax,
+        lambda_norm_jax,
+        has_family,
+        has_spacegroup,
+    )
+    params = model.params
+    opt_state = tx.init(params)
+
+    best_val_loss = float("inf")
+    best_params = None
+    epochs_without_improvement = 0
+
+    for _ in range(config.epochs):
+        (
+            train_losses,
+            train_family_losses,
+            train_spacegroup_losses,
+            train_norm_penalties,
+            train_ns,
+        ) = ([], [], [], [], [])
+        if balanced_batching:
+            train_batches = iter_balanced_batches(
+                (train_np, train_family_np, train_spacegroup_np),
+                batching_family_np,
+                batching_spacegroup_np,
+                batching_P,
+                batching_K,
+                batching_S,
+                batches_per_epoch,
+                rng,
+            )
+        else:
+            train_batches = _iter_batches(
+                (train_np, train_family_np, train_spacegroup_np),
+                effective_batch_size,
+                rng,
+            )
+        for batch_x, batch_family, batch_spacegroup in train_batches:
+            batch_x_jax = jax.device_put(jnp.asarray(batch_x), device)
+            batch_family_jax = jax.device_put(jnp.asarray(batch_family), device)
+            batch_spacegroup_jax = jax.device_put(jnp.asarray(batch_spacegroup), device)
+            params, opt_state, loss, family_loss, spacegroup_loss, penalty = train_step(
+                params, batch_x_jax, batch_family_jax, batch_spacegroup_jax, opt_state
+            )
+            train_losses.append(float(loss))
+            train_ns.append(batch_x.shape[0])
+            train_norm_penalties.append(float(penalty))
+            if has_family:
+                train_family_losses.append(float(family_loss))
+            if has_spacegroup:
+                train_spacegroup_losses.append(float(spacegroup_loss))
+
+        (
+            val_losses,
+            val_family_losses,
+            val_spacegroup_losses,
+            val_norm_penalties,
+            val_ns,
+        ) = (
+            [],
+            [],
+            [],
+            [],
+            [],
+        )
+        for batch_x, batch_family, batch_spacegroup in _iter_batches(
+            (val_np, val_family_np, val_spacegroup_np), config.batch_size, rng
+        ):
+            batch_x_jax = jax.device_put(jnp.asarray(batch_x), device)
+            batch_family_jax = jax.device_put(jnp.asarray(batch_family), device)
+            batch_spacegroup_jax = jax.device_put(jnp.asarray(batch_spacegroup), device)
+            loss, family_loss, spacegroup_loss, penalty = eval_step(
+                params, batch_x_jax, batch_family_jax, batch_spacegroup_jax
+            )
+            val_losses.append(float(loss))
+            val_ns.append(batch_x.shape[0])
+            val_norm_penalties.append(float(penalty))
+            if has_family:
+                val_family_losses.append(float(family_loss))
+            if has_spacegroup:
+                val_spacegroup_losses.append(float(spacegroup_loss))
+
+        history["train_loss"].append(_weighted_mean(train_losses, train_ns))
+        history["val_loss"].append(_weighted_mean(val_losses, val_ns))
+        history["train_norm_penalty"].append(
+            _weighted_mean(train_norm_penalties, train_ns)
+        )
+        history["val_norm_penalty"].append(_weighted_mean(val_norm_penalties, val_ns))
+        if has_family:
+            history["train_family_supcon"].append(
+                _weighted_mean(train_family_losses, train_ns)
+            )
+            history["val_family_supcon"].append(
+                _weighted_mean(val_family_losses, val_ns)
+            )
+        if has_spacegroup:
+            history["train_spacegroup_supcon"].append(
+                _weighted_mean(train_spacegroup_losses, train_ns)
+            )
+            history["val_spacegroup_supcon"].append(
+                _weighted_mean(val_spacegroup_losses, val_ns)
+            )
+
+        if config.early_stopping:
+            current_val_loss = history["val_loss"][-1]
+            if current_val_loss < best_val_loss - config.early_stopping_min_delta:
+                best_val_loss = current_val_loss
+                epochs_without_improvement = 0
+                if config.early_stopping_restore_best:
+                    best_params = params
+            else:
+                epochs_without_improvement += 1
+                if epochs_without_improvement >= config.early_stopping_patience:
+                    break
+
+    if (
+        config.early_stopping
+        and config.early_stopping_restore_best
+        and best_params is not None
+    ):
+        params = best_params
+    model.params = params
+    return history

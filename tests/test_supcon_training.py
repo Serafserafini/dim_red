@@ -15,7 +15,13 @@ import numpy as np
 
 from dim_red.supcon.model import SupConEncoder
 from dim_red.supcon.tails import ProjectionTail
-from dim_red.supcon.training import TrainConfig, norm_penalty, supcon_loss, train_supcon
+from dim_red.supcon.training import (
+    TrainConfig,
+    norm_penalty,
+    supcon_loss,
+    train_supcon,
+    train_supcon_no_projection,
+)
 from dim_red.vae.database import VAEDatabase
 
 
@@ -919,3 +925,110 @@ def test_train_supcon_rejects_invalid_optimizer():
             train_family_ids=family_ids[train_idx],
             val_family_ids=family_ids[val_idx],
         )
+
+
+# --- train_supcon_no_projection (Khosla sweep D: encoder trained without --
+# a separate projection tail, loss computed directly on r) ----------------
+
+
+def test_train_supcon_no_projection_family_and_spacegroup_returns_history():
+    n = 40
+    train_db, val_db = _make_split_db(n=n)
+    train_idx, val_idx = _split_indices_like_train_val_split(n, 0.25, 0)
+
+    rng = np.random.default_rng(1)
+    family_ids = rng.integers(0, 3, size=n).astype(np.int32)
+    spacegroup_ids = rng.integers(0, 6, size=n).astype(np.int32)
+
+    model = SupConEncoder(input_dim=5, encoder_hidden_dim=[8], latent_dim=3, seed=0)
+    config = TrainConfig(epochs=2, batch_size=8, tau=0.1, seed=0, device="cpu")
+    history = train_supcon_no_projection(
+        model,
+        train_db,
+        val_db,
+        config,
+        train_family_ids=family_ids[train_idx],
+        val_family_ids=family_ids[val_idx],
+        train_spacegroup_ids=spacegroup_ids[train_idx],
+        val_spacegroup_ids=spacegroup_ids[val_idx],
+        lambda_family=1.0,
+        lambda_spacegroup=0.5,
+    )
+
+    for key in (
+        "train_loss",
+        "val_loss",
+        "train_family_supcon",
+        "val_family_supcon",
+        "train_spacegroup_supcon",
+        "val_spacegroup_supcon",
+    ):
+        assert key in history
+        assert len(history[key]) == 2
+        assert all(math.isfinite(v) for v in history[key])
+        assert all(v >= 0.0 for v in history[key])
+
+
+def test_train_supcon_no_projection_family_only_mode_has_no_spacegroup_keys():
+    n = 40
+    train_db, val_db = _make_split_db(n=n)
+    train_idx, val_idx = _split_indices_like_train_val_split(n, 0.25, 0)
+    rng = np.random.default_rng(1)
+    family_ids = rng.integers(0, 3, size=n).astype(np.int32)
+
+    model = SupConEncoder(input_dim=5, encoder_hidden_dim=[8], latent_dim=3, seed=0)
+    config = TrainConfig(epochs=1, batch_size=8, tau=0.1, seed=0, device="cpu")
+    history = train_supcon_no_projection(
+        model,
+        train_db,
+        val_db,
+        config,
+        train_family_ids=family_ids[train_idx],
+        val_family_ids=family_ids[val_idx],
+        lambda_family=1.0,
+    )
+
+    assert "train_family_supcon" in history
+    assert "train_spacegroup_supcon" not in history
+    for total, family in zip(history["train_loss"], history["train_family_supcon"]):
+        assert total == pytest.approx(family, abs=1e-6)
+
+
+def test_train_supcon_no_projection_requires_at_least_one_label_type():
+    train_db, val_db = _make_split_db(n=40)
+    model = SupConEncoder(input_dim=5, encoder_hidden_dim=[8], latent_dim=3, seed=0)
+    config = TrainConfig(epochs=1, batch_size=8, seed=0, device="cpu")
+
+    with pytest.raises(ValueError, match="nothing to contrast on"):
+        train_supcon_no_projection(model, train_db, val_db, config)
+
+
+def test_train_supcon_no_projection_updates_body_params():
+    n = 40
+    train_db, val_db = _make_split_db(n=n)
+    train_idx, val_idx = _split_indices_like_train_val_split(n, 0.25, 0)
+    rng = np.random.default_rng(1)
+    family_ids = rng.integers(0, 3, size=n).astype(np.int32)
+
+    model = SupConEncoder(input_dim=5, encoder_hidden_dim=[8], latent_dim=3, seed=0)
+    params_before = jax.tree_util.tree_map(lambda x: np.array(x), model.params)
+
+    config = TrainConfig(
+        epochs=5, batch_size=8, learning_rate=0.05, tau=0.1, seed=0, device="cpu"
+    )
+    train_supcon_no_projection(
+        model,
+        train_db,
+        val_db,
+        config,
+        train_family_ids=family_ids[train_idx],
+        val_family_ids=family_ids[val_idx],
+        lambda_family=1.0,
+    )
+
+    changed = jax.tree_util.tree_map(
+        lambda before, after: not np.allclose(before, np.array(after)),
+        params_before,
+        model.params,
+    )
+    assert any(jax.tree_util.tree_leaves(changed))
