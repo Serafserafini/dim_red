@@ -1,0 +1,94 @@
+# Round 15 follow-up: identical to round 7's reference body except
+# vae.encoder_hidden_dim: [256, 128] (was [128, 64]) -- a wider encoder
+# trunk, latent_dim (8) and supcon.projection_dim (128) left at round 7's
+# own values so this isolates the encoder-width question alone, not
+# conflated with the latent_dim/projection_dim findings from the rest of
+# round 15 (narrower projection consistently hurt; this tests whether
+# more capacity *before* the bottleneck, rather than at it, helps
+# instead).
+#
+# tails.classification (auto-trained, light recipe) identical to round 7's.
+#
+# Run with:
+#   dimred-run configs/single_run_supcon_encoder_256_128.example.yaml --cache-dir runs/_shared_dataset_cache_family_only_geom_rich
+
+seed: 42
+output_dir: runs/experiment_pipeline_encoder_256_128
+model: supcon
+data_source: pyxtal
+
+soap:
+  r_cut: 6.0
+  n_max: 8
+  l_max: 6
+  sigma: 0.5
+  element_agnostic: true
+  normalize_distances: false
+  species: null
+
+vae:
+  encoder_hidden_dim: [256, 128]
+  latent_dim: 8
+  mirror: true
+
+train:
+  epochs: 200
+  batch_size: 128
+  learning_rate: 0.001
+  optimizer: adam
+  val_ratio: 0.2
+  device: gpu
+  early_stopping:
+    enabled: true
+    patience: 20
+    min_delta: 0.0001
+    restore_best_weights: true
+
+supcon:
+  mode: family_only
+  lambda_family: 1.0
+  tau: 0.05
+  distance: cosine
+  lambda_norm: 0.0
+  projection_dim: 128
+  projection_hidden_dim: null
+
+batching:
+  strategy: random
+  balanced_params:
+    K: 16
+
+pyxtal:
+  families: [triclinic, monoclinic, orthorhombic, tetragonal, trigonal, hexagonal, cubic]
+  structures_per_family: 500
+  distribution: uniform
+  n_species: 1
+  seed: 42
+
+augmentation:
+  n_augmented: 4
+  keep_original: true
+  jitter_probability: 0.5
+  jitter_std: 0.05
+  vacancy_probability: 0.5
+  vacancy_atom_probability: 1
+  max_vacancies: 1
+  supercell_radius: 4.0
+  seed: 42
+
+tails:
+  train:
+    epochs: 40
+    batch_size: 32
+    learning_rate: 0.001
+    optimizer: adam
+    device: gpu
+    early_stopping:
+      enabled: true
+      patience: 10
+      min_delta: 0.0001
+      restore_best_weights: true
+  classification:
+    mode: family_only
+    lambda_family: 1.0
+    head_hidden_dim: 16
