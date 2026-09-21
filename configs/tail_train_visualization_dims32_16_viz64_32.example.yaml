@@ -1,0 +1,37 @@
+# Sweep E (round 15 follow-up): hidden-dim variation on the already-trained
+# 32/16 body (configs/single_run_supcon_dims_32_16.example.yaml) -- no
+# retraining of the body needed, just a fresh family visualization tail
+# with hidden_dim: [64, 32] (was [32, 16]). Same recipe as the round 15
+# euclidean family viz configs otherwise (tau=0.1/euclidean, heavy
+# recipe).
+#
+# Run with:
+#   dimred-train-tail configs/tail_train_visualization_dims32_16_viz64_32.example.yaml <run_dir of the dims_32_16 body>
+
+tail_kind: visualization
+
+visualization:
+  viz_dim: 2
+  mode: family_only
+  lambda_family: 1.0
+  tau: 0.1
+  distance: euclidean
+  lambda_norm: 0.0
+  hidden_dim: [64, 32]
+  batching:
+    strategy: random
+
+output_subdir: visualization_viz64_32
+
+seed: 42
+
+train:
+  epochs: 200
+  batch_size: 128
+  optimizer: adam
+  device: gpu
+  early_stopping:
+    enabled: true
+    patience: 20
+    min_delta: 0.0001
+    restore_best_weights: true

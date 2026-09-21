@@ -1,0 +1,32 @@
+# Sweep E (round 15 follow-up): hidden-dim variation on the already-trained
+# 32/16 body (configs/single_run_supcon_dims_32_16.example.yaml) -- no
+# retraining of the body needed, just a fresh family classification tail
+# with head_hidden_dim: 32 (was 16). Same mode/recipe as round 7's own
+# auto-trained family classifier (light recipe: epochs=40/batch=32/
+# patience=10) otherwise.
+#
+# Run with:
+#   dimred-train-tail configs/tail_train_classification_dims32_16_clf32.example.yaml <run_dir of the dims_32_16 body>
+
+tail_kind: classification
+
+classification:
+  mode: family_only
+  lambda_family: 1.0
+  head_hidden_dim: 32
+
+output_subdir: classification_clf32
+
+seed: 42
+
+train:
+  epochs: 40
+  batch_size: 32
+  learning_rate: 0.001
+  optimizer: adam
+  device: gpu
+  early_stopping:
+    enabled: true
+    patience: 10
+    min_delta: 0.0001
+    restore_best_weights: true

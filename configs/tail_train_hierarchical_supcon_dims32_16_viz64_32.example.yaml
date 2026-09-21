@@ -1,0 +1,41 @@
+# Sweep E (round 15 follow-up): hidden-dim variation on the spacegroup
+# pipeline, body dims held fixed at 32/16 (matching
+# configs/tail_train_hierarchical_supcon_dims_32_16.example.yaml) --
+# sg_visualization_hidden_dim: [64, 32] (was [32, 16]), everything else
+# unchanged.
+#
+# Run with:
+#   dimred-train-tail configs/tail_train_hierarchical_supcon_dims32_16_viz64_32.example.yaml <run_dir of the dims_32_16 body>
+
+tail_kind: hierarchical_supcon
+output_subdir: hierarchical_supcon_dims32_16_viz64_32
+
+hierarchical_supcon:
+  head_hidden_dim: 16
+  min_samples_per_expert: 10
+  sg_encoder_hidden_dim: [128, 64]
+  sg_latent_dim: 32
+  sg_tau: 0.05
+  sg_distance: cosine
+  sg_lambda_norm: 0.0
+  sg_projection_dim: 16
+  sg_projection_hidden_dim: null
+  sg_classifier_hidden_dim: 16
+  sg_visualization_hidden_dim: [64, 32]
+  sg_visualization_tau: 0.1
+  sg_visualization_distance: euclidean
+  sg_visualization_lambda_norm: 0.0
+
+seed: 42
+
+train:
+  epochs: 200
+  batch_size: 128
+  learning_rate: 0.001
+  optimizer: adam
+  device: gpu
+  early_stopping:
+    enabled: true
+    patience: 20
+    min_delta: 0.0001
+    restore_best_weights: true

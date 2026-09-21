@@ -1,0 +1,41 @@
+# Dimension-exploration follow-up (see
+# configs/single_run_supcon_dims_8_2.example.yaml): spacegroup
+# pipeline (hierarchical_supcon) on the SAME new body, sg_latent_dim=8
+# (was 8/32), sg_projection_dim=2 (was 128/16) -- everything else
+# identical to the established round 13/14 recipe.
+#
+# Run with:
+#   dimred-train-tail configs/tail_train_hierarchical_supcon_dims_8_2.example.yaml <run_dir printed by the single_run_supcon_dims_8_2 job>
+
+tail_kind: hierarchical_supcon
+output_subdir: hierarchical_supcon_dims_8_2
+
+hierarchical_supcon:
+  head_hidden_dim: 16
+  min_samples_per_expert: 10
+  sg_encoder_hidden_dim: [128, 64]
+  sg_latent_dim: 8
+  sg_tau: 0.05
+  sg_distance: cosine
+  sg_lambda_norm: 0.0
+  sg_projection_dim: 2
+  sg_projection_hidden_dim: null
+  sg_classifier_hidden_dim: 16
+  sg_visualization_hidden_dim: [32, 16]
+  sg_visualization_tau: 0.1
+  sg_visualization_distance: euclidean
+  sg_visualization_lambda_norm: 0.0
+
+seed: 42
+
+train:
+  epochs: 200
+  batch_size: 128
+  learning_rate: 0.001
+  optimizer: adam
+  device: gpu
+  early_stopping:
+    enabled: true
+    patience: 20
+    min_delta: 0.0001
+    restore_best_weights: true
