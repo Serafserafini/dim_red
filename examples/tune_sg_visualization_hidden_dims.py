@@ -1,9 +1,6 @@
 """
-Round 15 follow-up: for the families whose per-family spacegroup
-visualization is still the most confused (Orthorhombic, Tetragonal --
-identified from the round 15 cross-run analysis in
-experiments/round15_dims_notes.md), tune only the visualization tail's
-own hidden_dim (width and depth), keeping everything else frozen: the
+Round 15/16 follow-up: tune only the visualization tail's own hidden_dim
+(width and depth) per family, keeping everything else frozen -- the
 SupCon SG body used is the one from "best combo"
 (configs/single_run_supcon_best_combo.example.yaml's
 hierarchical_supcon sibling -- encoder [256,128], latent_dim 32,
@@ -19,11 +16,21 @@ SG embedding, exactly like dim_red.supcon.tail_training.
 train_visualization_tail already does for any other frozen-body
 visualization tail.
 
-Run with:
+Round 16 ran this for Orthorhombic/Tetragonal (the two most visually
+confused families per the round 15 cross-run analysis in
+experiments/round15_dims_notes.md). Cubic is deliberately excluded from
+every round of this sweep -- confirmed repeatedly (rounds 13-15) to be
+structurally insensitive to capacity/dimension changes of any kind, not
+just the SG body's own.
+
+Run with (defaults to every family except Cubic and the two already
+covered by round 16; pass explicit family names to target others):
     python examples/tune_sg_visualization_hidden_dims.py
+    python examples/tune_sg_visualization_hidden_dims.py Hexagonal Monoclinic
 """
 
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -44,7 +51,7 @@ RUN_DIR = Path(
 SG_DIR = RUN_DIR / "tails" / "hierarchical_supcon_best_combo" / "sg_experts"
 OUT_DIR = Path("runs/experiment_viz_tune_orthorhombic_tetragonal")
 
-FAMILIES = ["Orthorhombic", "Tetragonal"]
+DEFAULT_FAMILIES = ["Hexagonal", "Monoclinic", "Triclinic", "Trigonal"]
 CANDIDATES = {
     "64_32": [64, 32],  # baseline -- already trained as part of best_combo itself
     "128_64": [128, 64],
@@ -54,6 +61,13 @@ CANDIDATES = {
 
 
 def main():
+    families = sys.argv[1:] if len(sys.argv) > 1 else DEFAULT_FAMILIES
+    if "Cubic" in families:
+        raise ValueError(
+            "Cubic is deliberately excluded from this sweep -- see the module "
+            "docstring (rounds 13-15 already established it doesn't respond "
+            "to capacity/dimension changes)."
+        )
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     d = np.load(RUN_DIR / "embeddings.npz", allow_pickle=True)
     features = d["features"].astype(np.float32)
@@ -63,7 +77,7 @@ def main():
     spacegroups_all = d["spacegroups"]
 
     results = {}
-    for family in FAMILIES:
+    for family in families:
         family_mask = labels == family
         family_positions = np.flatnonzero(family_mask)
         train_mask = family_mask & (split == "train")
@@ -153,9 +167,17 @@ def main():
 
         results[family] = family_results
 
-    with open(OUT_DIR / "result.json", "w") as f:
+    # Merge with any results already saved by a previous invocation (e.g.
+    # round 16's Orthorhombic/Tetragonal run) instead of overwriting them.
+    result_path = OUT_DIR / "result.json"
+    if result_path.exists():
+        with open(result_path) as f:
+            existing = json.load(f)
+        existing.update(results)
+        results = existing
+    with open(result_path, "w") as f:
         json.dump(results, f, indent=2)
-    print(f"Saved results to {OUT_DIR / 'result.json'}")
+    print(f"Saved results to {result_path}")
 
 
 if __name__ == "__main__":
