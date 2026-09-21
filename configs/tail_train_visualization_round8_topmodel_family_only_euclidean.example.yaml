@@ -1,0 +1,57 @@
+# Symmetry follow-up to tail_train_visualization_round8_topmodel_family_only
+# .example.yaml (kept unchanged, not overwritten, as the historical
+# cosine-distance baseline that produced the numbers cited throughout
+# experiments/round13_notes.md/round13_hierarchical_supcon_notes.md as
+# "Experiment B"): only distance changes, cosine -> euclidean, so the
+# family-level visualization tail uses the SAME distance metric as the
+# per-family hierarchical_supcon spacegroup visualizer (whose class default
+# was already euclidean -- see
+# dim_red.pipeline.config.HierarchicalSupconTailConfig.sg_visualization_distance),
+# for a true apples-to-apples comparison between the family and spacegroup
+# pipelines.
+#
+# The original cosine choice here was a precaution against family_only
+# mode's single-term contrastive signal risking the unbounded-norm collapse
+# documented in the round-3 tail sweep for euclidean without a
+# spacegroup term (lambda_norm: 0.0, no regularizer against it). That
+# concern hasn't actually materialized in practice for this project's
+# spacegroup_only-shaped case: every hierarchical_supcon per-family
+# visualizer (also effectively single-term -- local spacegroup only) has
+# already used distance: euclidean + lambda_norm: 0.0 successfully across
+# rounds 13-14, with no collapse observed. Still watch train_norm_penalty
+# in loss_history.csv after this run; add a nonzero lambda_norm if it grows
+# unbounded.
+#
+# Everything else identical to the cosine sibling: same target body,
+# hidden_dim, tau, training recipe.
+#
+# Run with:
+#   dimred-train-tail configs/tail_train_visualization_round8_topmodel_family_only_euclidean.example.yaml runs/tuning_supcon_family_only_round7/20260914-1/model-supcon_hd-128-64_pyxtal-cub-hex-mon-ort-tet-tri-tri_nsp1_supcon-family_only_tau0.05_lf1-3
+
+tail_kind: visualization
+
+visualization:
+  viz_dim: 2
+  mode: family_only
+  lambda_family: 1.0
+  tau: 0.1
+  distance: euclidean
+  lambda_norm: 0.0
+  hidden_dim: [32, 16]
+  batching:
+    strategy: random
+
+output_subdir: visualization_round8_topmodel_family_only_euclidean
+
+seed: 42
+
+train:
+  epochs: 200
+  batch_size: 128
+  optimizer: adam
+  device: gpu
+  early_stopping:
+    enabled: true
+    patience: 20
+    min_delta: 0.0001
+    restore_best_weights: true
