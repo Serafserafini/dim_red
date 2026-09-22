@@ -850,10 +850,16 @@ def _train_hierarchical_supcon(
         with open(sg_dir / "classifier_tail_params.msgpack", "wb") as f:
             f.write(serialization.to_bytes(sg_classifier.params))
 
-        # 3. Visualization tail on top of the same frozen SG embedding.
+        # 3. Visualization tail on top of the same frozen SG embedding. Uses
+        # this family's own tuned hidden_dim when present in
+        # sg_visualization_hidden_dim_by_family (round 16's per-family
+        # tuning result), else falls back to the scalar sg_visualization_hidden_dim.
+        sg_viz_hidden_dim = hs.sg_visualization_hidden_dim_by_family.get(
+            family_name, hs.sg_visualization_hidden_dim
+        )
         sg_viz = VisualizationTail(
             input_dim=hs.sg_latent_dim,
-            hidden_dim=hs.sg_visualization_hidden_dim,
+            hidden_dim=sg_viz_hidden_dim,
             output_dim=2,
             seed=config.seed,
         )

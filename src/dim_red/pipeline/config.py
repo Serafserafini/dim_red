@@ -498,8 +498,11 @@ class SupConConfig:
     ``dim_red.pipeline.config.TailTrainConfig``.
 
     Attributes:
-        mode: Which label level(s) to contrast on: ``"family_only"``,
-            ``"spacegroup_only"``, or ``"family_and_spacegroup"`` (default).
+        mode: Which label level(s) to contrast on: ``"family_only"``
+            (default -- matches ``best_combo``, round 15's best-known
+            SupCon-family reference config, see
+            ``configs/single_run_supcon_best_combo.example.yaml``),
+            ``"spacegroup_only"``, or ``"family_and_spacegroup"``.
             Unlike ``AuxHeadsConfig.mode``, ``"spacegroup_only"`` is valid
             here -- the two SupCon terms are independent (no family ->
             spacegroup masking needed), so there's no reason a spacegroup
@@ -509,12 +512,14 @@ class SupConConfig:
         lambda_spacegroup: Weight of the spacegroup-level SupCon term.
             Ignored when ``mode == "family_only"``.
         tau: Temperature dividing similarities before the softmax inside the
-            SupCon loss.
+            SupCon loss. ``0.05`` (default) matches ``best_combo``.
         distance: Which similarity ``dim_red.supcon.training.supcon_loss``
-            computes: ``"euclidean"`` (default -- negative squared Euclidean
-            distance, the original formulation here, unbounded scale) or
-            ``"cosine"`` (cosine similarity between L2-normalized ``z``
-            vectors, bounded to ``[-1, 1]``). Forwarded as-is to
+            computes: ``"euclidean"`` (negative squared Euclidean distance,
+            the original formulation here, unbounded scale) or ``"cosine"``
+            (default -- cosine similarity between L2-normalized ``z``
+            vectors, bounded to ``[-1, 1]``; matches ``best_combo``, and
+            consistently outperformed ``"euclidean"`` in every round 1-7
+            sweep that compared them). Forwarded as-is to
             ``dim_red.supcon.training.TrainConfig.distance``.
         lambda_norm: Weight of the embedding-norm regularizer (mean squared
             L2 norm of the batch's projected ``z``), added to the total loss
@@ -539,11 +544,11 @@ class SupConConfig:
             layer matching the body's own ``latent_dim``.
     """
 
-    mode: str = "family_and_spacegroup"
+    mode: str = "family_only"
     lambda_family: float = 1.0
     lambda_spacegroup: float = 1.0
-    tau: float = 0.1
-    distance: str = "euclidean"
+    tau: float = 0.05
+    distance: str = "cosine"
     lambda_norm: float = 0.0
     projection_dim: int = 128
     projection_hidden_dim: Optional[List[int]] = None
@@ -1392,8 +1397,10 @@ class HierarchicalSupconTailConfig:
        the same split used everywhere else in this pipeline) via
        ``dim_red.supcon.training.train_supcon`` -- architecturally
        identical to how the real family-level SupCon body is trained
-       (``sg_encoder_hidden_dim``/``sg_latent_dim`` default to the same
-       ``[128, 64]``/``8`` this project's family bodies use), but
+       (``sg_encoder_hidden_dim``/``sg_latent_dim`` default to ``[256,
+       128]``/``32``, matching ``best_combo`` (round 15's best-known
+       reference body, see
+       ``configs/single_run_supcon_best_combo.example.yaml``), but
        contrasting on the *local spacegroup id* instead of family (passed
        via ``train_spacegroup_ids``, with ``lambda_family=0``/
        ``lambda_spacegroup=1`` -- the family term is left inactive since
@@ -1428,11 +1435,14 @@ class HierarchicalSupconTailConfig:
     representation.
 
     Attributes:
-        head_hidden_dim: Stage-1 family classifier's hidden width.
+        head_hidden_dim: Stage-1 family classifier's hidden width. ``32``
+            (default) matches ``best_combo`` (round 15).
         min_samples_per_expert: Same fallback threshold as
             ``HierarchicalTailConfig``.
         sg_encoder_hidden_dim: SupCon SG's own encoder hidden widths.
-        sg_latent_dim: SupCon SG's own output embedding width.
+            ``[256, 128]`` (default) matches ``best_combo``.
+        sg_latent_dim: SupCon SG's own output embedding width. ``32``
+            (default) matches ``best_combo``.
         sg_tau: SupCon SG's contrastive temperature.
         sg_distance: SupCon SG's similarity metric -- ``"euclidean"`` or
             ``"cosine"``.
@@ -1441,14 +1451,44 @@ class HierarchicalSupconTailConfig:
             body). ``0.0`` (default) disables it.
         sg_projection_dim: SupCon SG's own projection tail output width --
             the space its contrastive loss is actually computed in,
-            discarded after training (same as the real body's).
+            discarded after training (same as the real body's). Kept wide
+            (``128``, default) deliberately: round 15 exhaustively tested
+            narrowing this below the encoder's own output width (a
+            Khosla et al. 2020-style topology) and found it *always* hurt
+            spacegroup accuracy, monotonically so as it narrowed further
+            (0.89 oracle at 32/16 down to 0.56 at 8/2) -- regardless of how
+            wide the encoder/latent were, so the earlier idea that a
+            narrower projection paired with a wider encoder was the winning
+            combination is specifically wrong; wide projection combined
+            with wide latent (both at ``best_combo``'s "best of everything"
+            values) is what set the round's best spacegroup oracle,
+            0.9223 -- see ``experiments/round15_dims_notes.md``.
         sg_projection_hidden_dim: SupCon SG's own projection tail hidden
             widths. ``None`` (default) resolves to a single hidden layer
             matching ``sg_latent_dim``.
         sg_classifier_hidden_dim: Hidden width of the classifier trained on
-            top of the frozen SG embedding.
+            top of the frozen SG embedding. ``32`` (default) matches
+            ``best_combo``.
         sg_visualization_hidden_dim: Hidden widths of the visualization
-            tail trained on top of the frozen SG embedding.
+            tail trained on top of the frozen SG embedding, used as the
+            **fallback** for any family not present as a key in
+            ``sg_visualization_hidden_dim_by_family`` (below) -- currently
+            just Cubic, confirmed across rounds 13-16 to be structurally
+            insensitive to tail capacity (see
+            ``experiments/round17_cubic_root_cause_notes.md``), so never
+            tuned per-family. ``[64, 32]`` (default) matches ``best_combo``.
+        sg_visualization_hidden_dim_by_family: Per-family override of
+            ``sg_visualization_hidden_dim``, keyed by family name (e.g.
+            ``"Hexagonal"``) -- a family present here uses its own value
+            instead of the scalar fallback. Default: round 16's per-family
+            tuning result (``experiments/round16_sg_viz_tuning_notes.md``,
+            fixed ``best_combo`` body, only the visualizer's own
+            architecture varied) -- ``[64, 32, 16]`` (deeper, not wider)
+            won for Hexagonal/Monoclinic/Orthorhombic/Triclinic/Trigonal;
+            Tetragonal alone preferred ``[128, 64]`` (wider, not deeper).
+            Pass ``{}`` to disable per-family overrides entirely and force
+            every family (Cubic included) onto the ``sg_visualization_hidden_dim``
+            scalar, matching this tail_kind's pre-round-16 behavior.
         sg_visualization_tau: Visualization tail's contrastive temperature.
         sg_visualization_distance: Visualization tail's similarity metric --
             ``"euclidean"`` (default) or ``"cosine"``. Deliberately not
@@ -1466,17 +1506,27 @@ class HierarchicalSupconTailConfig:
             regularizer weight. ``0.0`` (default) disables it.
     """
 
-    head_hidden_dim: int = 16
+    head_hidden_dim: int = 32
     min_samples_per_expert: int = 10
-    sg_encoder_hidden_dim: List[int] = field(default_factory=lambda: [128, 64])
-    sg_latent_dim: int = 8
+    sg_encoder_hidden_dim: List[int] = field(default_factory=lambda: [256, 128])
+    sg_latent_dim: int = 32
     sg_tau: float = 0.05
     sg_distance: str = "cosine"
     sg_lambda_norm: float = 0.0
     sg_projection_dim: int = 128
     sg_projection_hidden_dim: Optional[List[int]] = None
-    sg_classifier_hidden_dim: int = 16
-    sg_visualization_hidden_dim: List[int] = field(default_factory=lambda: [32, 16])
+    sg_classifier_hidden_dim: int = 32
+    sg_visualization_hidden_dim: List[int] = field(default_factory=lambda: [64, 32])
+    sg_visualization_hidden_dim_by_family: Dict[str, List[int]] = field(
+        default_factory=lambda: {
+            "Hexagonal": [64, 32, 16],
+            "Monoclinic": [64, 32, 16],
+            "Orthorhombic": [64, 32, 16],
+            "Triclinic": [64, 32, 16],
+            "Trigonal": [64, 32, 16],
+            "Tetragonal": [128, 64],
+        }
+    )
     sg_visualization_tau: float = 0.1
     sg_visualization_distance: str = "euclidean"
     sg_visualization_lambda_norm: float = 0.0
@@ -1532,6 +1582,13 @@ class HierarchicalSupconTailConfig:
                 "hierarchical_supcon.sg_visualization_hidden_dim must be a "
                 "non-empty list of positive integers"
             )
+        for family_name, dims in self.sg_visualization_hidden_dim_by_family.items():
+            if not dims or any(d <= 0 for d in dims):
+                raise ValueError(
+                    "hierarchical_supcon.sg_visualization_hidden_dim_by_family"
+                    f"[{family_name!r}] must be a non-empty list of positive "
+                    "integers"
+                )
         if self.sg_visualization_distance not in _SUPCON_DISTANCES:
             raise ValueError(
                 f"hierarchical_supcon.sg_visualization_distance must be one "

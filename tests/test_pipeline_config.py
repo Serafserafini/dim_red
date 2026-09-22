@@ -412,7 +412,7 @@ def test_run_config_to_dict_roundtrips_aux_heads(tmp_path):
 def test_run_config_defaults_supcon_block(tmp_path):
     config_path = _write_yaml(tmp_path / "run.yaml", _single_run_dict())
     config = load_run_config(config_path)
-    assert config.supcon == SupConConfig(mode="family_and_spacegroup")
+    assert config.supcon == SupConConfig(mode="family_only")
 
 
 def test_supcon_config_rejects_invalid_mode():
@@ -427,8 +427,8 @@ def test_supcon_config_accepts_all_valid_modes(mode):
     assert SupConConfig(mode=mode).mode == mode
 
 
-def test_supcon_config_defaults_distance_to_euclidean():
-    assert SupConConfig().distance == "euclidean"
+def test_supcon_config_defaults_distance_to_cosine():
+    assert SupConConfig().distance == "cosine"
 
 
 def test_supcon_config_rejects_invalid_distance():

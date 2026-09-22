@@ -661,6 +661,11 @@ def test_train_tail_hierarchical_supcon_writes_expected_artifacts(tmp_path):
             sg_latent_dim=3,
             sg_classifier_hidden_dim=4,
             sg_visualization_hidden_dim=[4, 2],
+            # Isolate this test from the production per-family default (which
+            # has a real "Hexagonal" entry, colliding with this fixture's
+            # synthetic family name) -- every family uses the [4, 2] scalar
+            # above uniformly, matching this test's own intent.
+            sg_visualization_hidden_dim_by_family={},
         ),
         train=TailTrainSettings(epochs=2, batch_size=4),
     )
