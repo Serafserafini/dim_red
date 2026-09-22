@@ -163,22 +163,26 @@ class MaceEncoder:
             pooling: ``"mean"`` (default) or ``"sum"`` -- how per-atom
                 ``node_feats`` are pooled into one per-structure vector.
             max_nodes_per_batch/max_edges_per_batch/max_graphs_per_batch:
-                Fixed padded-batch budget (atoms/edges/structures) each
+                *Minimum* padded-batch budget (atoms/edges/structures) each
                 forward pass is padded up to -- purely a memory/throughput
                 knob, not a correctness one (results are identical
-                regardless of these). ``encode`` greedily bin-packs
-                ``atoms_list`` into chunks that fit under this budget
+                regardless of these, `encode` grows the actual budget past
+                this floor if a single structure needs more, see its own
+                docstring). ``encode`` greedily bin-packs ``atoms_list``
+                into chunks that fit under the (possibly grown) budget
                 (variable number of structures per chunk, since e.g. a
-                pathologically small periodic cell can have far more
-                neighbor-list edges within ``r_max`` than a typical one),
+                pathologically small periodic cell -- or a large augmented
+                supercell -- can have far more neighbor-list edges within
+                ``r_max`` than a typical structure in the same dataset),
                 rather than a fixed structure count per chunk -- padding
                 every chunk to a *count*-based batch size would pad to
                 ``batch_size * worst_single_structure_size``, which blows up
                 GPU memory the moment one outlier structure is much larger
                 than the rest of the dataset. Every chunk is still padded to
-                this *same* fixed budget, so the forward pass JIT-compiles
-                once and is reused for every chunk regardless of how many
-                real structures happen to be in it.
+                the *same* budget within one ``encode`` call, so the forward
+                pass JIT-compiles once per call and is reused for every
+                chunk regardless of how many real structures happen to be
+                in it.
 
         Raises:
             ValueError: If ``pooling`` isn't ``"mean"``/``"sum"``, or if
@@ -223,11 +227,7 @@ class MaceEncoder:
             representation per structure, in the same order as ``atoms_list``.
 
         Raises:
-            ValueError: If ``atoms_list`` is empty, or if a single structure
-                alone exceeds ``max_nodes_per_batch``/``max_edges_per_batch``
-                (e.g. a pathologically small periodic cell replicated many
-                times within ``r_max`` -- raise those budgets to accommodate
-                it).
+            ValueError: If ``atoms_list`` is empty.
         """
         if not atoms_list:
             raise ValueError("atoms_list is empty -- nothing to encode")
@@ -245,26 +245,32 @@ class MaceEncoder:
             (int(np.asarray(g.n_node).sum()), int(np.asarray(g.n_edge).sum()))
             for g in graphs
         ]
-        for i, (n, e) in enumerate(sizes):
-            if n >= self.max_nodes_per_batch or e >= self.max_edges_per_batch:
-                raise ValueError(
-                    f"Structure {i} ({n} atoms, {e} neighbor-list edges within "
-                    f"r_max={self.r_max}) alone exceeds max_nodes_per_batch="
-                    f"{self.max_nodes_per_batch}/max_edges_per_batch="
-                    f"{self.max_edges_per_batch} -- raise these (MaceEncoder "
-                    "constructor kwargs) to fit it."
-                )
 
-        # Greedily bin-pack into chunks that fit the fixed padding budget --
-        # see the constructor docstring for why this isn't just a fixed
-        # structure count per chunk.
+        # max_nodes_per_batch/max_edges_per_batch are a *minimum* padding
+        # budget (sized for decent multi-structure batching on typical
+        # structures), not a hard cap: a single outlier structure (e.g. a
+        # large augmented supercell -- pyxtal + augmentation.supercell_radius
+        # can produce periodic cells with far more atoms/neighbor-list edges
+        # within r_max than a typical one in the same dataset) grows the
+        # actual padding budget to fit it, rather than raising. Every chunk
+        # still shares this one grown shape, so the forward pass still only
+        # JIT-compiles once.
+        max_single_nodes = max(n for n, _e in sizes)
+        max_single_edges = max(e for _n, e in sizes)
+        n_node_pad = max(self.max_nodes_per_batch, max_single_nodes + 1)
+        n_edge_pad = max(self.max_edges_per_batch, max_single_edges + 1)
+        n_graph_pad = self.max_graphs_per_batch + 1
+
+        # Greedily bin-pack into chunks that fit the (possibly grown)
+        # padding budget -- see the constructor docstring for why this
+        # isn't just a fixed structure count per chunk.
         chunks: List[List[int]] = []
         current: List[int] = []
         cur_nodes = cur_edges = 0
         for i, (n, e) in enumerate(sizes):
             if current and (
-                cur_nodes + n >= self.max_nodes_per_batch
-                or cur_edges + e >= self.max_edges_per_batch
+                cur_nodes + n >= n_node_pad
+                or cur_edges + e >= n_edge_pad
                 or len(current) >= self.max_graphs_per_batch
             ):
                 chunks.append(current)
@@ -274,10 +280,6 @@ class MaceEncoder:
             cur_edges += e
         if current:
             chunks.append(current)
-
-        n_node_pad = self.max_nodes_per_batch
-        n_edge_pad = self.max_edges_per_batch
-        n_graph_pad = self.max_graphs_per_batch + 1
 
         results: List[Optional[np.ndarray]] = [None] * len(atoms_list)
         for chunk_indices in chunks:
