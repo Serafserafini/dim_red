@@ -12,17 +12,16 @@ to construct, so unlike CGCNN's Gaussian-expanded *scalar* distances,
 here keep the full relative displacement vector -- MACE derives angular
 correlations from that geometry itself.
 
-IMPORTANT -- verification status: ``mace_jax`` has no public, documented
-``ase.Atoms -> input dict`` conversion utility (no ASE ``Calculator``, no
-``atomic_data_from_ase``-style helper as of the version checked). The field
-names below (``node_attrs``, ``edge_index``, ``shifts``, ``batch``,
-``positions``, ``cell``) come from reading ``mace_jax.modules.models.MACE``'s
-``__call__``/``prepare_graph`` at
-https://github.com/ACEsuit/mace-jax/blob/main/mace_jax/modules/models.py --
-confirm these against the actually-installed ``mace_jax`` version's source
-(``mace_jax/modules/models.py``'s ``prepare_graph``,
-``mace_jax/tools/preprocess.py`` or similar) before relying on this in
-production; adjust field names/shapes here to match if they've drifted.
+NOT used by ``dim_red.mace.model`` (as of the ``mace_jax`` 0.2.0 rewrite --
+see that module's docstring): the real, installed ``mace_jax`` builds its
+model input via its own ``mace_jax.data.config_from_atoms``/
+``graph_from_configuration`` (a ``jraph.GraphsTuple``-based pipeline, not the
+plain-dict shape this module builds) and a Flax **NNX** module, not the
+Linen-``.apply({"params": ...})`` convention this module's field names were
+originally guessed against. Kept anyway as a lightweight, dependency-free
+(no ``jax``/``mace_jax`` import) description of a structure's neighbor
+graph -- still correct for what it claims to compute, just no longer wired
+into the actual inference path.
 
 Graph batching here follows jraph-style concatenation (one flat node axis and
 one flat edge axis across the whole batch, with a per-node ``batch`` index
