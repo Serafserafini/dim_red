@@ -1,0 +1,49 @@
+# SupCon-SG-style spacegroup test for model_kind: mace, on the same run as
+# experiments/mace_family_first_test.yaml (7 families x 100/family,
+# best_combo's augmentation, frozen MACE-MP-0 embedding).
+#
+# Mirrors best_combo's own hierarchical_supcon pipeline
+# (configs/tail_train_hierarchical_supcon_best_combo.example.yaml), with
+# the same substitution the family-level body already makes: the frozen
+# MACE embedding stands in for the per-family SupCon SG encoder+projection
+# entirely (dim_red.pipeline.tail_training._train_hierarchical_supcon skips
+# that training step for model_kind: mace and reuses the run's own frozen
+# embedding directly, restricted per family) -- sg_encoder_hidden_dim/
+# sg_latent_dim/sg_tau/sg_distance/sg_lambda_norm/sg_projection_dim/
+# sg_projection_hidden_dim below are therefore unused, kept only because
+# the config schema is shared with the supcon path.
+#
+# head_hidden_dim/sg_classifier_hidden_dim/sg_visualization_hidden_dim
+# match mace_family_first_test.yaml's own family-level tail sizing
+# (head_hidden_dim: 32, hidden_dim: [64, 32]) for a like-for-like
+# comparison against that run's own family-only tails.
+#
+# Run with:
+#   dimred-train-tail configs/tail_train_hierarchical_supcon_mace_family_first_test.example.yaml \
+#       runs/model-mace_hd-1_pyxtal-cub-hex-mon-ort-tet-tri-tri_nsp1-2
+
+tail_kind: hierarchical_supcon
+output_subdir: hierarchical_supcon_mace_first_test
+
+hierarchical_supcon:
+  head_hidden_dim: 32
+  min_samples_per_expert: 10
+  sg_classifier_hidden_dim: 32
+  sg_visualization_hidden_dim: [64, 32]
+  sg_visualization_tau: 0.1
+  sg_visualization_distance: euclidean
+  sg_visualization_lambda_norm: 0.0
+
+seed: 42
+
+train:
+  epochs: 200
+  batch_size: 128
+  learning_rate: 0.001
+  optimizer: adam
+  device: gpu
+  early_stopping:
+    enabled: true
+    patience: 20
+    min_delta: 0.0001
+    restore_best_weights: true

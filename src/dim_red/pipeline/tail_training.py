@@ -108,12 +108,22 @@ logger = logging.getLogger("dim_red.pipeline")
 # "hierarchical" itself): it always recomputes native SOAP when the
 # referenced hierarchical tail used expert_input="soap" (the default), and
 # only a SOAP-based (supcon) body has that descriptor to recompute at all.
+# "hierarchical_supcon" also allows "mace" (not "cgcnn"): its per-family
+# stage-2 step normally trains a fresh SupCon body on native SOAP, which
+# only a SOAP-based body has -- but model_kind: mace never trains anything
+# at all (a frozen foundation-model forward pass stands in for a from-
+# scratch encoder+projection), so _train_hierarchical_supcon skips that
+# per-family training step for mace and reuses the run's own frozen
+# embedding directly as each family's SG representation instead, same
+# substitution the family-level body already makes. cgcnn isn't included
+# here: it neither has SOAP to recompute (like mace) nor is a frozen body
+# (unlike mace, it trains from scratch), so neither branch applies to it.
 _TAIL_MODEL_KINDS: Dict[str, Tuple[str, ...]] = {
     "classification": ("supcon", "cgcnn", "mace"),
     "visualization": ("supcon", "cgcnn", "mace", "vae", "autoencoder"),
     "hierarchical": ("supcon", "cgcnn", "mace"),
     "hierarchical_visualization": ("supcon",),
-    "hierarchical_supcon": ("supcon",),
+    "hierarchical_supcon": ("supcon", "mace"),
 }
 
 
@@ -594,6 +604,20 @@ def _train_hierarchical_supcon(
     down -- see ``dim_red.pipeline.config.HierarchicalSupconTailConfig`` for
     the full rationale.
 
+    For ``model_kind == "mace"`` there is no per-family body/projection
+    training step at all: a frozen MACE embedding IS the "encoder +
+    projection" (this is exactly the same substitution the family-level
+    body makes -- ``model_kind: mace`` never trains anything, an already-
+    pretrained foundation-model forward pass stands in for the SupCon
+    encoder+projection there too), so stage 2 reuses the run's own frozen
+    embedding (``r_all``, restricted to that family's rows) directly as
+    each family's representation, skipping straight to the classifier +
+    visualizer steps -- no ``sg_body``/``sg_projection``, no native-SOAP
+    recompute (a mace run has no SOAP features to recompute at all), and
+    ``hs.sg_encoder_hidden_dim``/``sg_latent_dim``/``sg_tau``/``sg_distance``/
+    ``sg_lambda_norm``/``sg_projection_dim``/``sg_projection_hidden_dim``
+    (all body/projection-training hyperparameters) go unused.
+
     Predictions are assembled into the exact same ``tail_predictions.npz``
     schema ``"hierarchical"`` already produces, so every existing
     downstream reader (``dim_red.pipeline.compare.
@@ -602,6 +626,7 @@ def _train_hierarchical_supcon(
     unmodified.
     """
     hs = config.hierarchical_supcon
+    is_mace = loaded.config.model_kind == "mace"
     r_all = loaded.embeddings["embeddings"]
     labels_all = loaded.embeddings["labels"]
     spacegroups_all = loaded.embeddings["spacegroups"]
@@ -610,16 +635,37 @@ def _train_hierarchical_supcon(
     train_idx = split_all == "train"
     val_idx = split_all == "val"
 
-    logger.info(
-        "Recomputing native SOAP features from %s for hierarchical_supcon's "
-        "per-family SupCon SG bodies",
-        run_dir / "dataset.extxyz",
-    )
-    r_soap_all = _compute_native_soap_features(
-        run_dir, loaded.config, loaded.embeddings
-    )
-    soap_input_dim = r_soap_all.shape[1]
-    logger.info("Recomputed native SOAP features: shape=%s", r_soap_all.shape)
+    if is_mace:
+        # The frozen MACE embedding replaces the per-family SupCon SG body
+        # entirely -- see the docstring above. r_soap_all/soap_input_dim
+        # below are simply r_all/its own width in this case (never a real
+        # SOAP descriptor), kept as the same two names so the per-family
+        # loop further down needs no separate mace-vs-supcon branching
+        # beyond the body-training block itself.
+        r_soap_all = r_all
+        soap_input_dim = r_all.shape[1]
+        logger.info(
+            "model_kind=mace: using the run's own frozen MACE embedding "
+            "(dim=%d) directly as each family's SG representation -- no "
+            "per-family body/projection training, no SOAP recompute",
+            soap_input_dim,
+        )
+    else:
+        logger.info(
+            "Recomputing native SOAP features from %s for hierarchical_supcon's "
+            "per-family SupCon SG bodies",
+            run_dir / "dataset.extxyz",
+        )
+        r_soap_all = _compute_native_soap_features(
+            run_dir, loaded.config, loaded.embeddings
+        )
+        soap_input_dim = r_soap_all.shape[1]
+        logger.info("Recomputed native SOAP features: shape=%s", r_soap_all.shape)
+
+    # Representation width fed to the per-family classifier/visualizer --
+    # the SG body's own trained latent_dim normally, or the frozen MACE
+    # embedding's width when there's no SG body being trained at all.
+    sg_repr_dim = soap_input_dim if is_mace else hs.sg_latent_dim
 
     family_classes, family_ids = _build_vocab_ids(labels_all.tolist())
     logger.info("%d family classes: %s", len(family_classes), family_classes)
@@ -771,58 +817,81 @@ def _train_hierarchical_supcon(
         sg_dir = tail_dir / "sg_experts" / _sanitize_family_dirname(family_name)
         sg_dir.mkdir(parents=True, exist_ok=True)
 
-        # 1. SupCon SG: a fresh body+projection tail trained from scratch on
-        # this family's native SOAP subset, contrasting on local spacegroup
-        # id (the spacegroup slot directly -- family is constant within this
-        # subset, so that term is left inactive).
-        sg_body = SupConEncoder(
-            input_dim=soap_input_dim,
-            encoder_hidden_dim=hs.sg_encoder_hidden_dim,
-            latent_dim=hs.sg_latent_dim,
-            seed=config.seed,
-        )
-        sg_projection = ProjectionTail(
-            input_dim=hs.sg_latent_dim,
-            hidden_dim=hs.sg_projection_hidden_dim or [hs.sg_latent_dim],
-            projection_dim=hs.sg_projection_dim,
-            seed=config.seed,
-        )
-        sg_body_history = train_supcon(
-            sg_body,
-            sg_projection,
-            VAEDatabase.from_array(r_soap_all[family_mask_train]),
-            VAEDatabase.from_array(r_soap_all[expert_val_mask]),
-            sg_body_train_config,
-            train_spacegroup_ids=local_ids_full[family_mask_train],
-            val_spacegroup_ids=local_ids_full[expert_val_mask],
-            lambda_family=0.0,
-            lambda_spacegroup=1.0,
-            lambda_norm=hs.sg_lambda_norm,
-        )
-        logger.info(
-            "Family %r: trained SupCon SG body on %d training rows, %d local "
-            "spacegroup classes, %d/%d epochs, final train_loss=%.4f "
-            "val_loss=%.4f",
-            family_name,
-            n_train_k,
-            len(local_classes),
-            len(sg_body_history["train_loss"]),
-            config.train.epochs,
-            sg_body_history["train_loss"][-1],
-            sg_body_history["val_loss"][-1],
-        )
-        _save_loss_history(sg_dir / "sg_body_loss_history.csv", sg_body_history)
-        with open(sg_dir / "sg_body_params.msgpack", "wb") as f:
-            f.write(serialization.to_bytes(sg_body.params))
-        with open(sg_dir / "sg_projection_params.msgpack", "wb") as f:
-            f.write(serialization.to_bytes(sg_projection.params))
-        with open(sg_dir / "local_spacegroup_classes.yaml", "w") as f:
-            yaml.safe_dump(
-                {"local_spacegroup_classes": [int(c) for c in local_classes]}, f
+        sg_body = None
+        if is_mace:
+            # No body/projection to train: the frozen MACE embedding IS the
+            # SG representation for this family, same substitution the
+            # family-level body already makes.
+            with open(sg_dir / "local_spacegroup_classes.yaml", "w") as f:
+                yaml.safe_dump(
+                    {"local_spacegroup_classes": [int(c) for c in local_classes]}, f
+                )
+            logger.info(
+                "Family %r: using the frozen MACE embedding directly (no SG "
+                "body trained), %d training rows, %d local spacegroup classes",
+                family_name,
+                n_train_k,
+                len(local_classes),
             )
+        else:
+            # 1. SupCon SG: a fresh body+projection tail trained from scratch
+            # on this family's native SOAP subset, contrasting on local
+            # spacegroup id (the spacegroup slot directly -- family is
+            # constant within this subset, so that term is left inactive).
+            sg_body = SupConEncoder(
+                input_dim=soap_input_dim,
+                encoder_hidden_dim=hs.sg_encoder_hidden_dim,
+                latent_dim=hs.sg_latent_dim,
+                seed=config.seed,
+            )
+            sg_projection = ProjectionTail(
+                input_dim=hs.sg_latent_dim,
+                hidden_dim=hs.sg_projection_hidden_dim or [hs.sg_latent_dim],
+                projection_dim=hs.sg_projection_dim,
+                seed=config.seed,
+            )
+            sg_body_history = train_supcon(
+                sg_body,
+                sg_projection,
+                VAEDatabase.from_array(r_soap_all[family_mask_train]),
+                VAEDatabase.from_array(r_soap_all[expert_val_mask]),
+                sg_body_train_config,
+                train_spacegroup_ids=local_ids_full[family_mask_train],
+                val_spacegroup_ids=local_ids_full[expert_val_mask],
+                lambda_family=0.0,
+                lambda_spacegroup=1.0,
+                lambda_norm=hs.sg_lambda_norm,
+            )
+            logger.info(
+                "Family %r: trained SupCon SG body on %d training rows, %d local "
+                "spacegroup classes, %d/%d epochs, final train_loss=%.4f "
+                "val_loss=%.4f",
+                family_name,
+                n_train_k,
+                len(local_classes),
+                len(sg_body_history["train_loss"]),
+                config.train.epochs,
+                sg_body_history["train_loss"][-1],
+                sg_body_history["val_loss"][-1],
+            )
+            _save_loss_history(sg_dir / "sg_body_loss_history.csv", sg_body_history)
+            with open(sg_dir / "sg_body_params.msgpack", "wb") as f:
+                f.write(serialization.to_bytes(sg_body.params))
+            with open(sg_dir / "sg_projection_params.msgpack", "wb") as f:
+                f.write(serialization.to_bytes(sg_projection.params))
+            with open(sg_dir / "local_spacegroup_classes.yaml", "w") as f:
+                yaml.safe_dump(
+                    {"local_spacegroup_classes": [int(c) for c in local_classes]}, f
+                )
 
-        # Frozen SG embedding for every row of this family (train+val).
-        r_sg_family_all = np.asarray(sg_body.encode(r_soap_all[family_mask_all]))
+        # Frozen SG embedding for every row of this family (train+val) --
+        # the frozen MACE embedding subset directly when is_mace, otherwise
+        # the just-trained SG body's own encode().
+        r_sg_family_all = (
+            r_soap_all[family_mask_all]
+            if is_mace
+            else np.asarray(sg_body.encode(r_soap_all[family_mask_all]))
+        )
         family_positions = np.flatnonzero(family_mask_all)
         pos_lookup = {row: i for i, row in enumerate(family_positions)}
         train_pos = np.array([pos_lookup[i] for i in np.flatnonzero(family_mask_train)])
@@ -831,7 +900,7 @@ def _train_hierarchical_supcon(
 
         # 2. Classifier on top of the frozen SG embedding.
         sg_classifier = ClassificationTail(
-            input_dim=hs.sg_latent_dim,
+            input_dim=sg_repr_dim,
             hidden_dim=hs.sg_classifier_hidden_dim,
             n_family_classes=len(local_classes),
             seed=config.seed,
@@ -858,7 +927,7 @@ def _train_hierarchical_supcon(
             family_name, hs.sg_visualization_hidden_dim
         )
         sg_viz = VisualizationTail(
-            input_dim=hs.sg_latent_dim,
+            input_dim=sg_repr_dim,
             hidden_dim=sg_viz_hidden_dim,
             output_dim=2,
             seed=config.seed,
@@ -918,7 +987,11 @@ def _train_hierarchical_supcon(
 
         cols = [spacegroup_class_to_col[c] for c in local_classes]
         if predicted_mask.any():
-            r_sg_predicted = np.asarray(sg_body.encode(r_soap_all[predicted_mask]))
+            r_sg_predicted = (
+                r_soap_all[predicted_mask]
+                if is_mace
+                else np.asarray(sg_body.encode(r_soap_all[predicted_mask]))
+            )
             local_probs = np.asarray(
                 jax.nn.softmax(sg_classifier.classify_family(r_sg_predicted), axis=-1)
             )
