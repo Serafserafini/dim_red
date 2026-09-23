@@ -2,8 +2,9 @@
 
 File pensato per essere dato in input a Claude Design per costruire il deck. Contenuto
 **sintetico** (titoli + bullet, non prosa) — il testo da dire a voce è in `discorso.md`,
-allineato slide per slide con questo. 14 slide, ~23-25 minuti (sopra il target di 20 — vedi
-nota sul taglio in cima a `discorso.md`), talk interno/informale.
+allineato slide per slide con questo. 14 slide, ~18-19 minuti (ricalcolato sul conteggio
+parole reale, comodamente sotto il target di 20 — vedi nota in cima a `discorso.md`), talk
+interno/informale.
 
 Tono generale del deck: pulito, poco testo per slide (il parlato porta il contenuto), tono
 onesto/proof-of-concept — evitare grafica che comunichi "risultati definitivi" o

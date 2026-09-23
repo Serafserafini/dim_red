@@ -24,15 +24,17 @@ round-per-round degli esperimenti, niente costi di training, framing onesto
 accenno cauto (nessuna spiegazione di causa-radice — non ancora abbastanza sicura da
 portare in pubblico).
 
-## I due file operativi per preparare il talk vero e proprio
+## I file operativi per preparare il talk vero e proprio
 
 - **`discorso.md`** — il discorso parola per parola, sezione per sezione, sincronizzato con
-  `struttura_talk.md`. **Bozza v1, da rifinire insieme** — in particolare le sezioni su
-  nested sampling/brass e sul lavoro precedente RDF/UMAP sono scritte solo sulla base del
-  brainstorm, senza dettagli/aneddoti che solo tu hai.
+  `struttura_talk.md`. Rifinito insieme, 14 slide, timestamp ricalcolati sul conteggio
+  parole reale (~18-19 minuti totali).
 - **`brief_slides_claude_design.md`** — brief sintetico slide-per-slide (titoli, bullet,
-  indicazioni di visual), pensato come input per Claude Design. Sincronizzato 1:1 con
-  `discorso.md` (stessa numerazione di slide).
+  indicazioni di visual), sincronizzato 1:1 con `discorso.md`.
+- **`prompt_per_claude_design.md`** — **il file da usare per generare davvero il deck**:
+  un prompt autosufficiente (include tutto il contenuto di discorso + brief, incluse le
+  speaker notes) da incollare in Claude Design per ottenere un `.pptx` editabile. Contiene
+  anche una checklist di quali immagini caricare prima di lanciarlo.
 
 ## Gli altri file
 

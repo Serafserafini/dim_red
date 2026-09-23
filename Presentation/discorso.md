@@ -11,13 +11,14 @@ tono, dove vuoi tagliare, dove vuoi aggiungere un dettaglio personale (soprattut
 sezioni 1 e 3, che vengono da lavoro tuo che io non ho potuto leggere da nessuna parte) e
 lo sistemiamo insieme frase per frase.
 
-Tempo stimato: ~3300 parole (aggiornato dopo la slide 8 sulla teoria SupCon e
-l'espansione di 11-12 su classificatore famiglia/esperti spacegroup),
-~130-140 parole/minuto con pause per slide → **circa 23-25 minuti**, sopra i 20 di target.
-Candidati per tagliare, in ordine di impatto: l'esempio delle 3 cubiche/2 esagonali in
-slide 8 (~1 min), la frase su tau in slide 8 (~30s), accorciare slide 12 a una sola
-menzione di Cubic invece di viz+confusion matrix separate (~30s). Vedi anche la nota
-originale sulla slide 8 più sotto.
+Tempo stimato, **ricalcolato per davvero** sul conteggio parole effettivo di ogni slide
+(non più una stima a occhio): **~1950 parole totali**, a 105 parole/minuto "effettive"
+(pace naturale di lettura + pause per cambio slide e assorbimento delle figure) →
+**circa 18-19 minuti**, comodamente sotto i 20 di target, con un po' di margine per
+domande last-minute o un ritmo più disteso a voce. Le vecchie stime (2950, poi 3300
+parole) erano rimaste indietro rispetto alle modifiche fatte via via e non erano mai
+state ricalcolate sul testo reale — questa lo è. Timestamp per slide aggiornati di
+conseguenza qui sotto.
 
 ---
 
@@ -29,7 +30,7 @@ struttura, in situazioni dove i metodi classici non ce la fanno. Vi anticipo sub
 è un lavoro finito — è più un'idea che sta prendendo forma, e oggi voglio condividere con
 voi a che punto siamo, compresi i punti che non abbiamo ancora chiariti del tutto.
 
-## [SLIDE 2: Motivazione — nested sampling / brass] — 0:30
+## [SLIDE 2: Motivazione — nested sampling / brass] — ~0:42
 
 Il problema da cui siamo partiti nasce dal Nested Sampling — lo conoscete già, quindi solo
 un richiamo veloce: è un metodo di campionamento che esplora lo spazio delle configurazioni
@@ -42,7 +43,7 @@ questa fase, con questa simmetria". Un esempio concreto, che ci servirà tra poc
 spiegare cosa avevamo già provato e perché non bastava, è l'ottone, il brass, che ha
 diverse fasi — alfa, beta, gamma — ciascuna con una propria simmetria cristallina.
 
-## [SLIDE 3: Il problema — perché serve altro] — ~2:00
+## [SLIDE 3: Il problema — perché serve altro] — ~2:01
 
 Il problema è che queste strutture non sono pulite. Vengono da mosse Monte Carlo a
 temperatura finita, quindi sono rumorose: gli atomi sono spostati rispetto ai punti esatti
@@ -62,7 +63,7 @@ sistema.
 
 Quindi ci serve qualcos'altro.
 
-## [SLIDE 4: Lavoro precedente — SOAP + UMAP] — ~3:30
+## [SLIDE 4: Lavoro precedente — SOAP + UMAP] — ~3:37
 
 L'unico approccio che ci ha dato risultati concreti è stato questo: abbiamo preso le
 strutture più rappresentative per una certa coppia di temperatura e composizione, le
@@ -77,7 +78,7 @@ gamma del brass, prese dalla letteratura, sono cadute esattamente dentro quei cl
 
 [FIGURA: il grafico dei cluster esiste già — va solo recuperato da dove l'avete salvato]
 
-## [SLIDE 5: La domanda che porta a dim_red] — ~5:30
+## [SLIDE 5: La domanda che porta a dim_red] — ~4:36
 
 Questo però ci ha lasciato con una domanda: e se non avessimo strutture di riferimento con
 cui confrontare? Il brass lo conosciamo bene, ma per un sistema nuovo potremmo non avere nessuna
@@ -88,7 +89,7 @@ cristalline in generale — indipendente dal nostro sistema chimico specifico �
 robusto al rumore termico e alle vacanze atomiche. L'idea è allenare un modello di machine
 learning a riconoscere lo spacegroup, usando strutture la cui simmetria é nota e sicura.
 
-## [SLIDE 6: Intro tecnica — SOAP e visualizzazione] — ~7:00
+## [SLIDE 6: Intro tecnica — SOAP e visualizzazione] — ~5:33
 
 Partiamo dal caso più semplice: sistemi con un solo tipo di atomo. Per ogni struttura ci
 serve un descrittore globale — un vettore di numeri che la rappresenti. Il mio punto di
@@ -103,7 +104,7 @@ questo spazio a bassa dimensione: quando una struttura è in una zona di transiz
 sua fase non è ben definita, è utile poter vedere "dove si trova" e verso quale simmetria
 tende — non solo ottenere un'etichetta secca.
 
-## [SLIDE 7: Cosa serve — encoder + classifier, perché non AE/VAE] — ~8:30
+## [SLIDE 7: Cosa serve — encoder + classifier, perché non AE/VAE] — ~6:55
 
 Quindi le due cose che ci servono sono: un **encoder**, che riduce la struttura a questa
 rappresentazione compatta, e un **classificatore**, che le assegna un'etichetta di
@@ -114,7 +115,7 @@ variazionale. Ma nel nostro caso la capacità di ricostruzione — quindi tutto 
 completamente superflua. Quello che ci interessa davvero è separare simmetrie diverse tra
 loro, non ricostruire l'input.
 
-## [SLIDE 8: SupCon — la teoria] — ~10:00
+## [SLIDE 8: SupCon — la teoria] — ~7:37
 
 L'architettura che abbiamo scelto è quella del Supervised Contrastive Learning, SupCon.
 Voglio spendere un minuto in più sulla teoria, perché è il cuore di tutto il progetto.
@@ -147,7 +148,7 @@ alto, il gradiente è più uniforme su tutti i punti. Nel nostro caso misuriamo 
 col coseno tra i vettori — normalizzati, quindi conta solo la direzione, non la lunghezza —
 perché in pratica dà risultati più stabili della distanza euclidea diretta.
 
-## [SLIDE 9: Architettura SupCon — 4 blocchi] — ~12:00
+## [SLIDE 9: Architettura SupCon — 4 blocchi] — ~10:47
 
 Prendendo spunto proprio da questo articolo, abbiamo pensato il nostro modello come quattro
 blocchi che si possono montare insieme, usati durante un training diviso in due fasi separate.
@@ -173,7 +174,7 @@ l'idea regge, prima di complicarci la vita con un'architettura più sofisticata.
 successivo, che vedremo tra poco, è proprio sostituire questi MLP con un embedding già
 pre-addestrato.
 
-## [SLIDE 10: Risultati — framing onesto + dataset + due step] — ~13:30
+## [SLIDE 10: Risultati — framing onesto + dataset + due step] — ~13:07
 
 Passiamo a cosa abbiamo fatto in pratica — e qui vorrei essere onesto: quello che segue non
 è un sistema finito, è un proof-of-concept che mostra che l'idea regge, con alcuni limiti
@@ -195,7 +196,7 @@ blocchi visti prima — cambia solo quanti strati nascosti diamo a ciascun MLP e
 larghi.
 
 
-## [SLIDE 11: Risultati — il classificatore di famiglia] — ~16:00
+## [SLIDE 11: Risultati — il classificatore di famiglia] — ~14:50
 
 Passiamo a qualche risultato concreto di training. Il dataset è quello di cui vi ho appena
 parlato: le strutture sintetiche generate con pyxtal sulle sette famiglie, con il rumore
@@ -213,7 +214,7 @@ diagonalità, con un'accuratezza media di circa il 97%
 A questo punto, le strutture identificate con una certa famiglia vengono passate
 all'esperto corrispondente, per classificarne lo spacegroup.
 
-## [SLIDE 12: Risultati — gli esperti di spacegroup, e l'eccezione Cubic] — ~17:30
+## [SLIDE 12: Risultati — gli esperti di spacegroup, e l'eccezione Cubic] — ~16:01
 
 Qui vedete il plot generato dalla visualization tail per ciascuna famiglia. Come vedete, la
 separazione in gruppi resta evidente per quasi tutte — con un'eccezione: il cubic.
@@ -225,7 +226,7 @@ Dai numerosi test fatti finora, il problema non sembra dipendere dal modello, ma
 probabilmente dall'input — dal descrittore SOAP stesso, per quella famiglia specifica. Su
 questo sto ancora indagando, quindi non ho ancora una risposta definitiva da darvi oggi.
 
-## [SLIDE 13: Futuro — MACE] — ~20:30
+## [SLIDE 13: Futuro — MACE] — ~16:47
 
 Come prossimo passo, l'idea è sostituire la coppia "SOAP più encoder allenato" con
 l'embedding di un modello **MACE** già pre-addestrato che come sappiamo, cattura
@@ -234,7 +235,7 @@ singolo atomo. È un'ipotesi che vogliamo provare, anche per vedere se aiuta sui
 difficili che abbiamo incontrato finora — non vi prometto che li risolverà, ma è la
 direzione in cui stiamo andando.
 
-## [SLIDE 14: Conclusioni] — ~22:00
+## [SLIDE 14: Conclusioni] — ~17:29
 
 Per riassumere. Siamo partiti da un problema concreto: le strutture del Nested Sampling
 sono troppo rumorose per gli strumenti classici di identificazione della simmetria.
@@ -254,12 +255,12 @@ identificati. Grazie, sono felice di rispondere a domande.
 
 ## Note per la revisione insieme
 
-- **Slide 8** (teoria SupCon): nuova, aggiunta su tua richiesta — formula della loss
-  (versione a coseno, quella che usiamo davvero) + esempio concreto. Ha spostato in avanti
-  di ~2 minuti tutto quello che segue — il totale ora è ~21-22 minuti anziché 20, vedi nota
-  sul tempo qui sopra. Se serve tornare a 20 netti, i candidati più facili da tagliare sono
-  l'esempio delle 3 cubiche/2 esagonali (si può raccontare senza, solo con la formula) o la
-  frase sulla temperatura tau.
+- **Slide 8** (teoria SupCon): è la slide più lunga del discorso (~3:10 min da sola, quasi
+  il doppio di ogni altra) — formula della loss (versione a coseno, quella che usiamo
+  davvero) + esempio concreto + spiegazione di tau. Col ricalcolo del tempo (nota sopra) il
+  totale resta comunque sotto i 20 minuti, quindi non serve tagliarla per stare nei tempi —
+  ma se in prova risulta comunque la più pesante da reggere a voce, i candidati sono
+  l'esempio delle 3 cubiche/2 esagonali o la frase su tau.
 - **Slide 11-12** (riscritte su tuo testo, espanse rispetto alla bozza precedente): ora
   mostrano davvero 4 figure — mappa famiglia, confusion matrix famiglia, mappa
   spacegroup per famiglia, confusion matrix per esperto — vedi `brief_slides_claude_design.md`
