@@ -1,0 +1,44 @@
+# Per-family SupCon SG experts for the full round-15-scale supcon_mace run
+# (experiments/supcon_mace_best_combo_scale.yaml) -- same body architecture
+# as best_combo's own hierarchical_supcon config
+# (configs/tail_train_hierarchical_supcon_best_combo.example.yaml), just
+# each per-family SG body trained on the native MACE embedding (recomputed
+# via dim_red.pipeline.tail_training._compute_native_mace_features) instead
+# of native SOAP.
+#
+# Run with:
+#   dimred-train-tail configs/tail_train_hierarchical_supcon_supcon_mace_best_combo_scale.example.yaml \
+#       <run_dir printed by experiments/supcon_mace_best_combo_scale.yaml>
+
+tail_kind: hierarchical_supcon
+output_subdir: hierarchical_supcon_supcon_mace_best_combo_scale
+
+hierarchical_supcon:
+  head_hidden_dim: 32
+  min_samples_per_expert: 10
+  sg_encoder_hidden_dim: [256, 128]
+  sg_latent_dim: 32
+  sg_tau: 0.05
+  sg_distance: cosine
+  sg_lambda_norm: 0.0
+  sg_projection_dim: 128
+  sg_projection_hidden_dim: null
+  sg_classifier_hidden_dim: 32
+  sg_visualization_hidden_dim: [64, 32]
+  sg_visualization_tau: 0.1
+  sg_visualization_distance: euclidean
+  sg_visualization_lambda_norm: 0.0
+
+seed: 42
+
+train:
+  epochs: 200
+  batch_size: 128
+  learning_rate: 0.001
+  optimizer: adam
+  device: gpu
+  early_stopping:
+    enabled: true
+    patience: 20
+    min_delta: 0.0001
+    restore_best_weights: true

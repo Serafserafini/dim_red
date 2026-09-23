@@ -1,0 +1,31 @@
+# Smoke test for hierarchical_supcon on a model_kind: supcon_mace run --
+# per-family SupCon SG body trained on the native MACE embedding (recomputed
+# via dim_red.pipeline.tail_training._compute_native_mace_features), not
+# SOAP. Tiny body dims to match the tiny smoke-test run this targets.
+#
+# Run with:
+#   dimred-train-tail configs/tail_train_hierarchical_supcon_supcon_mace_smoke_test.example.yaml \
+#       runs/model-supcon_mace_hd-64-32_pyxtal-cub-hex-ort_nsp1_supcon-family_only_tau0.05_lf1
+
+tail_kind: hierarchical_supcon
+output_subdir: hierarchical_supcon_smoke_test
+
+hierarchical_supcon:
+  head_hidden_dim: 16
+  min_samples_per_expert: 5
+  sg_encoder_hidden_dim: [32, 16]
+  sg_latent_dim: 8
+  sg_tau: 0.05
+  sg_distance: cosine
+  sg_projection_dim: 32
+  sg_classifier_hidden_dim: 16
+  sg_visualization_hidden_dim: [16, 8]
+
+seed: 42
+
+train:
+  epochs: 40
+  batch_size: 16
+  learning_rate: 0.001
+  optimizer: adam
+  device: gpu

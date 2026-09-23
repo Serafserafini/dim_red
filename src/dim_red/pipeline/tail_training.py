@@ -121,22 +121,18 @@ logger = logging.getLogger("dim_red.pipeline")
 # same substitution the family-level body already makes. cgcnn isn't
 # included here: it neither has SOAP to recompute (like mace) nor is a
 # frozen body (unlike mace, it trains from scratch), so neither branch
-# applies to it. "supcon_mace" is deliberately NOT included in
-# "hierarchical_supcon" (unlike "classification"/"visualization"/
-# "hierarchical", which all treat it exactly like "supcon" -- see
-# single_run.run_single's is_supcon): its own per-family stage 2 would need
-# a *native MACE* feature recompute (not SOAP, not the run's own frozen
-# body) as the SupCon-SG body's input to mirror how plain "supcon" runs use
-# native SOAP there, which this module doesn't implement yet -- allowing it
-# through would silently fall into the "mace" branch below and skip
-# per-family body training even though supcon_mace, unlike mace, actually
-# has a trained body worth building on top of.
+# applies to it. "supcon_mace" IS included in "hierarchical_supcon" too
+# (alongside "supcon"/"mace"): its per-family stage 2 trains a real SupCon
+# SG body, same as plain "supcon", just fed the native MACE embedding
+# (recomputed via _compute_native_mace_features, the supcon_mace
+# counterpart of _compute_native_soap_features) instead of native SOAP --
+# the same substitution supcon_mace's own family-level body already makes.
 _TAIL_MODEL_KINDS: Dict[str, Tuple[str, ...]] = {
     "classification": ("supcon", "cgcnn", "mace", "supcon_mace"),
     "visualization": ("supcon", "cgcnn", "mace", "supcon_mace", "vae", "autoencoder"),
     "hierarchical": ("supcon", "cgcnn", "mace", "supcon_mace"),
     "hierarchical_visualization": ("supcon",),
-    "hierarchical_supcon": ("supcon", "mace"),
+    "hierarchical_supcon": ("supcon", "mace", "supcon_mace"),
 }
 
 
@@ -315,6 +311,57 @@ def _compute_native_soap_features(
         average="outer",
         normalize_distances=soap.normalize_distances,
     )
+    return apply_standardization(raw_features, feature_mean, feature_std)
+
+
+def _compute_native_mace_features(
+    run_dir: Path,
+    run_config: RunConfig,
+    embeddings: Dict[str, np.ndarray],
+) -> np.ndarray:
+    """Recomputes the native (pre-body) standardized MACE embedding for
+    ``_train_hierarchical_supcon``'s ``model_kind == "supcon_mace"`` branch --
+    the exact counterpart of ``_compute_native_soap_features`` for a body
+    trained on MACE features instead of SOAP ones. Reads ``dataset.extxyz``
+    back (the exact structures/order the body was trained on), runs a fresh
+    frozen ``dim_red.mace.model.MaceEncoder`` forward pass with the run's own
+    ``mace:`` hyperparameters (the same featurization
+    ``dim_red.pipeline.dataset_cache._compute_mace_and_standardize`` used at
+    training time), and standardizes with the run's own saved
+    ``feature_mean``/``feature_std`` (never refit here) -- lands in exactly
+    the representation the ``supcon_mace`` body's encoder itself was trained
+    on, just without the body's own compression, mirroring why
+    ``_compute_native_soap_features`` recomputes SOAP instead of reusing the
+    body's own (possibly bottlenecked) embedding for a plain ``supcon`` run.
+
+    Raises:
+        ValueError: If ``run_config.model_kind != "supcon_mace"``.
+        FileNotFoundError: If ``run_dir / "dataset.extxyz"`` doesn't exist.
+    """
+    if run_config.model_kind != "supcon_mace":
+        raise ValueError(
+            "_compute_native_mace_features requires model_kind='supcon_mace' "
+            f"(got {run_config.model_kind!r} for {run_dir})"
+        )
+    feature_mean = embeddings["feature_mean"]
+    feature_std = embeddings["feature_std"]
+    dataset_path = run_dir / "dataset.extxyz"
+    if not dataset_path.exists():
+        raise FileNotFoundError(
+            f"hierarchical_supcon on a supcon_mace run requires {dataset_path} "
+            "to still exist (it recomputes the native MACE embedding from it) "
+            "-- this run's raw structures appear to have been removed"
+        )
+    atoms_list = read_atoms(str(dataset_path), index=":")
+
+    # Imported here, not at module top, so this module stays importable
+    # without mace_jax installed unless a supcon_mace run's hierarchical_supcon
+    # tail is actually trained -- same lazy-heavy-dependency convention as
+    # dim_red.pipeline.single_run/dataset_cache's own MaceEncoder imports.
+    from dim_red.mace.model import MaceEncoder
+
+    encoder = MaceEncoder(**run_config.mace.mace_kwargs())
+    raw_features = np.asarray(encoder.encode(atoms_list))
     return apply_standardization(raw_features, feature_mean, feature_std)
 
 
@@ -625,11 +672,20 @@ def _train_hierarchical_supcon(
     encoder+projection there too), so stage 2 reuses the run's own frozen
     embedding (``r_all``, restricted to that family's rows) directly as
     each family's representation, skipping straight to the classifier +
-    visualizer steps -- no ``sg_body``/``sg_projection``, no native-SOAP
+    visualizer steps -- no ``sg_body``/``sg_projection``, no native-feature
     recompute (a mace run has no SOAP features to recompute at all), and
     ``hs.sg_encoder_hidden_dim``/``sg_latent_dim``/``sg_tau``/``sg_distance``/
     ``sg_lambda_norm``/``sg_projection_dim``/``sg_projection_hidden_dim``
     (all body/projection-training hyperparameters) go unused.
+
+    For ``model_kind == "supcon_mace"``, by contrast, stage 2 trains a real
+    per-family SupCon SG body -- same as plain ``"supcon"`` -- just on the
+    *native MACE embedding* (recomputed via ``_compute_native_mace_features``,
+    the ``supcon_mace`` counterpart of ``_compute_native_soap_features``)
+    instead of native SOAP: ``supcon_mace``'s own body training is itself
+    already "SupCon fed MACE features", so its per-family expert mirrors
+    that same substitution one level down, exactly the same way its family-
+    level body already replaces plain ``supcon``'s SOAP input with MACE's.
 
     Predictions are assembled into the exact same ``tail_predictions.npz``
     schema ``"hierarchical"`` already produces, so every existing
@@ -640,6 +696,7 @@ def _train_hierarchical_supcon(
     """
     hs = config.hierarchical_supcon
     is_mace = loaded.config.model_kind == "mace"
+    is_supcon_mace = loaded.config.model_kind == "supcon_mace"
     r_all = loaded.embeddings["embeddings"]
     labels_all = loaded.embeddings["labels"]
     spacegroups_all = loaded.embeddings["spacegroups"]
@@ -663,6 +720,17 @@ def _train_hierarchical_supcon(
             "per-family body/projection training, no SOAP recompute",
             soap_input_dim,
         )
+    elif is_supcon_mace:
+        logger.info(
+            "Recomputing native MACE features from %s for hierarchical_supcon's "
+            "per-family SupCon SG bodies (model_kind=supcon_mace)",
+            run_dir / "dataset.extxyz",
+        )
+        r_soap_all = _compute_native_mace_features(
+            run_dir, loaded.config, loaded.embeddings
+        )
+        soap_input_dim = r_soap_all.shape[1]
+        logger.info("Recomputed native MACE features: shape=%s", r_soap_all.shape)
     else:
         logger.info(
             "Recomputing native SOAP features from %s for hierarchical_supcon's "
@@ -676,8 +744,10 @@ def _train_hierarchical_supcon(
         logger.info("Recomputed native SOAP features: shape=%s", r_soap_all.shape)
 
     # Representation width fed to the per-family classifier/visualizer --
-    # the SG body's own trained latent_dim normally, or the frozen MACE
-    # embedding's width when there's no SG body being trained at all.
+    # the SG body's own trained latent_dim normally (supcon and supcon_mace
+    # alike -- both train a real per-family SupCon SG body), or the frozen
+    # MACE embedding's width when there's no SG body being trained at all
+    # (plain mace only).
     sg_repr_dim = soap_input_dim if is_mace else hs.sg_latent_dim
 
     family_classes, family_ids = _build_vocab_ids(labels_all.tolist())
@@ -848,9 +918,12 @@ def _train_hierarchical_supcon(
             )
         else:
             # 1. SupCon SG: a fresh body+projection tail trained from scratch
-            # on this family's native SOAP subset, contrasting on local
-            # spacegroup id (the spacegroup slot directly -- family is
-            # constant within this subset, so that term is left inactive).
+            # on this family's native subset -- SOAP for a plain "supcon"
+            # run, MACE for "supcon_mace" (r_soap_all/soap_input_dim were
+            # already resolved to whichever one applies, above) --
+            # contrasting on local spacegroup id (the spacegroup slot
+            # directly -- family is constant within this subset, so that
+            # term is left inactive).
             sg_body = SupConEncoder(
                 input_dim=soap_input_dim,
                 encoder_hidden_dim=hs.sg_encoder_hidden_dim,
