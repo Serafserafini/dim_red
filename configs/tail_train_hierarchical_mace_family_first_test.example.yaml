@@ -1,0 +1,49 @@
+# First spacegroup test for model_kind: mace, on the same run as
+# experiments/mace_family_first_test.yaml (7 families x 100/family,
+# best_combo's augmentation, frozen MACE-MP-0 embedding). Two-stage
+# "hierarchical" tail (dim_red.pipeline.tail_training._train_hierarchical_tail):
+# stage 1 predicts family, stage 2 routes to one independent per-family
+# spacegroup expert.
+#
+# expert_input: body (NOT the project-wide default of "soap" since
+# 2026-09-17 -- see configs/tail_train_hierarchical_round7_soap_experts
+# .example.yaml's own note) -- deliberately: model_kind: mace never
+# computes SOAP at all (dim_red.pipeline.dataset_cache's mace branch
+# pools a frozen MACE forward pass directly, not dscribe SOAP), so a
+# mace run's config.yaml soap: block is an unused, default-valued
+# placeholder (see configs/single_run_mace.example.yaml) -- "soap"
+# expert_input would recompute meaningless descriptors, unrelated to
+# what the frozen body actually saw. The only sensible representation
+# for a spacegroup expert here is the same frozen MACE embedding (256-
+# dim) stage 1 already uses.
+#
+# No new MACE forward pass needed here at all -- train_tail uses
+# load_run_embeddings, reading straight from the run's own already-
+# cached embeddings.npz (labels/spacegroups included unconditionally).
+#
+# Run with:
+#   dimred-train-tail configs/tail_train_hierarchical_mace_family_first_test.example.yaml \
+#       runs/model-mace_hd-1_pyxtal-cub-hex-mon-ort-tet-tri-tri_nsp1-2
+
+tail_kind: hierarchical
+
+hierarchical:
+  head_hidden_dim: 32
+  min_samples_per_expert: 10
+  expert_input: body
+
+output_subdir: hierarchical_mace_first_test
+
+seed: 42
+
+train:
+  epochs: 200
+  batch_size: 128
+  learning_rate: 0.001
+  optimizer: adam
+  device: gpu
+  early_stopping:
+    enabled: true
+    patience: 20
+    min_delta: 0.0001
+    restore_best_weights: true
