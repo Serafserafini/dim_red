@@ -4,10 +4,34 @@ Scaletta ricostruita 1:1 dall'indice del brainstorm (`/home/seraftu/Work/Present
 Le sezioni 1-4 e l'introduzione tecnica (5) riportano fedelmente quanto già scritto nel
 brainstorm, solo riorganizzato per slide — **non ho aggiunto contenuto nuovo lì**, quella
 parte è farina del tuo sacco e non è nel codice che posso leggere. La sezione **Risultati**
-(7) è invece riempita con i numeri reali dello studio `dim_red` (vedi `storia_studio.md`
-per il racconto completo e le fonti). La sezione **Futuro** (8) collega la tua idea
-("sostituire SOAP+encoder con embedding MACE") allo stato reale del modulo `mace/` nel
-codice.
+(7) è riempita con materiale reale dello studio `dim_red`, ma **tenuta volutamente
+leggera** (vedi vincoli sotto). La sezione **Futuro** (8) collega la tua idea ("sostituire
+SOAP+encoder con embedding MACE") allo stato reale del modulo `mace/` nel codice.
+
+## Vincoli del talk (dati esplicitamente da te, guidano tutta questa scaletta)
+
+- **~20 minuti** — talk corto, non un report esaustivo.
+- **Niente racconto round-per-round degli esperimenti**, niente tabelle di
+  configurazioni/iperparametri.
+- **Niente costi di training.**
+- **Obiettivo: chiarire l'idea, non vendere risultati** — framing esplicitamente onesto,
+  "non c'è ancora nulla di perfettamente funzionante". Proof-of-concept/lavoro in corso,
+  non sistema maturo.
+- **Su Cubic: solo un accenno.** Niente gradi di libertà della cella, niente "effetto
+  soglia", niente tre misure indipendenti — non hai ancora una spiegazione di cui ti
+  senti sicuro, nonostante le analisi già fatte. Una frase sola, cauta: difficoltà
+  sistematica su quella famiglia, indipendente dal modello, più probabilmente legata
+  all'input/al training set. Resta un'osservazione aperta, non un risultato chiuso.
+
+## Budget di tempo indicativo (per tagliare in prova, non vincolante)
+
+| Sezioni | Contenuto | Tempo |
+|---|---|---|
+| 1-2 | Motivazione (nested sampling/brass) + problema (simmetrie rumorose) | ~4 min |
+| 3-4 | Lavoro precedente (RDF/Steinhardt+UMAP) + domanda che porta a `dim_red` | ~3 min |
+| 5-6 | Intro tecnica (SOAP, encoder+classifier) + architettura SupCon a 4 blocchi | ~6 min |
+| 7 | Risultati — leggeri, l'idea illustrata, non un report | ~5 min |
+| 8 | Futuro (MACE) + framing "lavoro in corso" | ~2 min |
 
 ---
 
@@ -154,86 +178,69 @@ backup/domande.
 
 ---
 
-## 7. Risultati
+## 7. Risultati — leggeri, l'idea illustrata, non un report
 
-Fonte completa con tutti i numeri: `storia_studio.md`. Qui solo lo scheletro allineato ai
-punti del brainstorm.
+Obiettivo di questa sezione: mostrare che l'approccio **funziona in linea di principio** e
+dire onestamente **a che punto siamo**, non presentare un report esaustivo di esperimenti.
+Frase di apertura suggerita, da dire esplicitamente: *"Quello che segue non è un sistema
+finito — è un proof-of-concept che mostra che l'idea regge, con dei limiti che stiamo
+ancora capendo."* Per chi vuole il dettaglio completo dopo il talk, tutto il resto è in
+`storia_studio.md` — ma non serve per queste slide.
 
-### Generazione del dataset e augmentation
+### Il dataset: strutture sintetiche generate, non raccolte
 
-- Dataset generato con `pyxtal` (non Materials Project): 7 famiglie cristalline
-  (triclinic, monoclinic, orthorhombic, tetragonal, trigonal, hexagonal, cubic), 500
-  strutture "grezze" per famiglia.
-- **Augmentation** (`dim_red.augmentation`, config di riferimento — `configs/tuning_sweep_supcon_family_only_round7.example.yaml`):
-  `n_augmented: 4` + originale mantenuto (`keep_original: true`) → **5 copie per
-  struttura**, per un totale di **17.500 strutture**. Ogni copia augmentata ha, con
-  probabilità 0.5 ciascuno, jitter posizionale (rumore Gaussiano, `jitter_std: 0.05 Å`)
-  e/o rimozione di un atomo (`vacancy_probability: 0.5`, max 1 vacanza) — garantito che
-  almeno uno dei due venga applicato a ogni copia augmentata.
-- Featurizzazione: **SOAP** (`r_cut=6.0, n_max=8, l_max=6, sigma=0.5`), con
-  `element_agnostic: true` (nessuna informazione sulla specie chimica, solo geometria pura
-  — la scelta coerente con l'obiettivo "sistema-indipendente" della sezione 4) → descrittore
-  a 252 dimensioni per struttura.
+Una riga, non una tabella: le strutture di training sono generate sinteticamente con
+`pyxtal` (non prese dal Materials Project) — coerente con il requisito della sezione 4
+("conoscenza pregressa, indipendente dal sistema chimico specifico"). Migliaia di
+strutture per ciascuna delle 7 famiglie cristalline, con rumore/difetti aggiunti
+artificialmente (jitter posizionale, vacanze atomiche) per abituare il modello proprio al
+tipo di rumore descritto nella sezione 2. Non serve altro dettaglio qui — niente numeri di
+`n_augmented`/`jitter_std`, quelli sono da nota a piè di pagina se qualcuno chiede.
 
-### Fallimento del tentativo diretto, e la soluzione a due step
+### L'idea a due step: prima la famiglia, poi lo spacegroup
 
-- Primo tentativo: predire **direttamente** lo spacegroup (`family_and_spacegroup` in un
-  solo passo) — **fallito**, troppa varietà (decine di spacegroup possibili).
-- Soluzione adottata: **processo a due step**.
+- Primo tentativo: predire **direttamente** lo spacegroup in un solo passo — **non ha
+  funzionato bene**, troppa varietà (decine di spacegroup possibili per famiglia).
+- Idea adottata, più semplice da spiegare che da un unico modello monolitico: **processo
+  a due step**.
   1. Un classificatore di **famiglia cristallina** (7 classi).
-  2. Per ogni famiglia, un modello **"esperto"** dedicato alla classificazione dello
-     **spacegroup** all'interno di quella famiglia.
-  - Entrambi gli stadi partono dallo stesso descrittore SOAP e sono **completamente
-    indipendenti** tra loro, così come sono indipendenti gli esperti delle diverse
-    famiglie.
+  2. Per ogni famiglia, un modello **"esperto"** dedicato allo **spacegroup** solo
+     all'interno di quella famiglia.
+  - I due stadi partono dallo stesso descrittore SOAP e sono indipendenti tra loro, così
+    come sono indipendenti gli esperti delle diverse famiglie — un modello semplice
+    "spezzato" in pezzi più piccoli e mirati, non un'architettura più complessa.
 
-Numeri concreti di questa architettura a due stadi (corpo di riferimento, famiglia
-0.9726-0.9938 a seconda del setup chimico; esperti diretti su SOAP nativo, non
-sull'embedding compresso — decisivo, +32 punti rispetto a partire dall'embedding a 8-dim):
-**accuratezza famiglia** fino a 0.97-0.99, **accuratezza spacegroup oracle** fino a
-**0.93** con gli esperti meglio configurati. Dettaglio completo: `storia_studio.md`, Atto 4.
+Un'unica frase di risultato, senza tabelle: **il passo di famiglia funziona bene**, il
+passo di spacegroup funziona **bene per la maggior parte delle famiglie**, con
+un'eccezione (vedi sotto). Questo basta per dire "l'idea regge" senza scendere in numeri
+round-per-round.
 
-### Classification matrix e mappe 2D (famiglia + spacegroup)
+### Una mappa, per far vedere invece che raccontare
 
-Figure reali già pronte, nessun nuovo run necessario — indice completo in
-`04_figure_disponibili.md` / `experiments/plots/README.md`. In sintesi:
-- Matrici di confusione per famiglia e per spacegroup-per-famiglia: `experiments/plots/round7/confusion_matrix_topmodel_val.png`,
-  `experiments/plots/round17/confusion_<famiglia>_best.png` (una per famiglia).
-- Mappe 2D famiglia: `experiments/plots/round15/viz_family_best_combo.png` e varianti.
-- Mappe 2D spacegroup per famiglia (tutte e 7 insieme): `experiments/plots/round16/grid_all_families_BEST.png`.
+Una sola figura vale più di qualunque tabella qui: una mappa 2D dove i punti — ogni punto
+una struttura — si raggruppano per famiglia/simmetria. Candidata:
+`experiments/plots/round16/grid_all_families_BEST.png` (tutte e 7 le famiglie, ciascuna
+con la sua mappa spacegroup) oppure una singola mappa famiglia più semplice
+(`experiments/plots/round15/viz_family_best_combo.png`) se 20 minuti non lasciano spazio
+per spiegare 7 pannelli. Scegline **una**, non entrambe — indice completo delle
+alternative in `04_figure_disponibili.md`.
 
-### Il problema di Cubic — dal brainstorm come domanda aperta, ora **risolto**
+### Cubic: un'osservazione aperta, non una spiegazione
 
-Il brainstorm pone la domanda esattamente così: *"Problema con i cubic: indipendente dal
-modello, soap related? Training data related?"* — questa è oggi una domanda **chiusa**,
-con una risposta precisa e verificata (round 17, tre misure indipendenti):
+Una famiglia — Cubic — è sistematicamente più difficile da classificare delle altre sei,
+in ogni configurazione provata. Da dire con questa cautela, senza andare oltre:
 
-- **Non è training-data related**: Cubic non ha classi sbilanciate, non ha meno atomi/
-  struttura delle altre famiglie, e la sua confusione è diffusa su 203 coppie diverse di
-  spacegroup (non concentrata su poche coppie "difficili" come le coppie enantiomorfe,
-  ipotesi inizialmente sospettata e poi esclusa).
-- **È SOAP-related, ma nel senso più profondo**: SOAP è un descrittore **locale**
-  (ambiente atomico), e Cubic è l'unico sistema cristallino con **zero gradi di libertà**
-  nella forma della cella (a=b=c, tutti gli angoli a 90° per definizione — fatto
-  cristallografico esatto, non un'approssimazione). Tutte le altre famiglie hanno almeno
-  un parametro di forma libero (1 per esagonale/tetragonale/trigonale, fino a 5 per
-  triclina).
-- **Scoperta chiave — è un effetto soglia, non un gradiente**: ogni famiglia con ≥1 grado
-  di libertà arriva a **≥0.989** di accuratezza oracle sullo spacegroup, indipendentemente
-  da quanti gradi di libertà ne abbia in più. Solo Cubic (0 gradi di libertà) crolla al
-  **0.497** — un gradino netto, non una discesa progressiva.
-- **Indipendente dal modello**: confermato allargando encoder, collo di bottiglia,
-  classificatore, visualizzatore — nessuna leva di capacità sposta mai l'accuratezza di
-  Cubic in modo significativo, in ogni round in cui è stato testato.
+> Cubic ci dà più filo da torcere delle altre famiglie. Non sembra dipendere dal modello
+> (cambiando architettura o capacità il problema resta identico) — il sospetto è che
+> c'entri più l'input/il training set per quella famiglia che il modello in sé. È una
+> cosa che stiamo ancora indagando, non un risultato chiuso.
 
-**Conclusione da slide**: il tetto ~50% di Cubic è un limite strutturale genuino di un
-descrittore locale come SOAP applicato a un sistema senza alcun grado di libertà di forma
-— non un bug, non un problema di training, non risolvibile con più capacità o più dati.
-Le uniche strade praticabili sono qualitativamente diverse: descrittori a raggio più lungo,
-o feature esplicitamente derivate dalla simmetria dello spacegroup. Ottima slide di
-chiusura per la sezione Risultati: risponde in modo definitivo a una domanda che il
-brainstorm lasciava aperta. Dettaglio completo con le tre misure e le tabelle numeriche:
-`storia_studio.md`, Atto 5.
+Niente di più su questa slide — non gradi di libertà, non "effetto soglia", non tre misure
+indipendenti. Se in Q&A qualcuno spinge sul "perché", va bene rispondere con la stessa
+cautela ("abbiamo alcune ipotesi ma non ci sentiamo ancora di affermarle con sicurezza")
+invece di anticipare qui una spiegazione di cui non ti fidi ancora del tutto — il dettaglio
+esiste comunque in `storia_studio.md`, Atto 5, se in futuro ti convince abbastanza da
+volerlo raccontare.
 
 ---
 
@@ -249,17 +256,19 @@ foundation model su ~1.6M strutture da traiettorie di rilassamento Materials Pro
 convertito da Torch a `mace_jax`. A differenza di SOAP+encoder:
 - **Non si allena nulla nel corpo** — un solo forward pass per ottenere l'embedding.
 - Cattura nativamente interazioni **angolari/a molti corpi** (3-body+), non solo
-  l'ambiente locale pairwise che limita SOAP — potenzialmente **la strada più diretta per
-  affrontare il problema di Cubic**: se il limite è "SOAP è troppo locale", un corpo
-  equivariante pre-addestrato su dati reali potrebbe portare un segnale che SOAP
-  strutturalmente non può avere. Collegamento diretto, e piuttosto forte, con la sezione 7.
+  l'ambiente locale pairwise di SOAP — un candidato interessante da provare anche per
+  vedere se aiuta sui casi più difficili incontrati finora (Cubic incluso), senza
+  promettere in slide che lo risolverà: è un'ipotesi da testare, non una soluzione già
+  in mano.
 - La classificazione (famiglia/spacegroup) userebbe la stessa infrastruttura di *tail* già
   costruita per supcon (fase 2: `ClassificationTail`/`VisualizationTail`), applicata sopra
   l'embedding MACE congelato invece che sopra il corpo supcon.
 
 **Stato reale ad oggi**: nessun run MACE esiste ancora in `experiments/` — è un passo
 successivo, non ancora eseguito, esattamente come lo presenta il brainstorm ("Futuro").
-Config di esempio già pronto nel repo: `configs/single_run_mace.example.yaml`.
+Config di esempio già pronto nel repo: `configs/single_run_mace.example.yaml`. Buona slide
+di chiusura per ribadire il framing di tutto il talk: **lavoro in corso**, questa è la
+direzione, non un traguardo già raggiunto.
 
 ---
 
@@ -269,6 +278,6 @@ Config di esempio già pronto nel repo: `configs/single_run_mace.example.yaml`.
   `dim_red`) non sono nel repo `dim_red` — vanno recuperate da dove sono conservate.
 - Un diagramma a blocchi per la sezione 6 (encoder/projection/classification/visualization
   tail) — concettuale, nessun dato, descritto sopra ma non ancora disegnato.
-- Selezione finale delle figure per la sezione 7 tra quelle elencate in
-  `04_figure_disponibili.md` (ce ne sono più di quante ne servano per un talk — è una
-  scelta editoriale, non tecnica).
+- Scegliere **una sola** figura per la sezione 7 tra le due candidate proposte lì (mappa
+  famiglia semplice vs griglia a 7 pannelli famiglia+spacegroup) — con 20 minuti a
+  disposizione non c'è spazio per più di una.
