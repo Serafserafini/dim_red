@@ -1,0 +1,39 @@
+# SupCon-SG-style spacegroup test for model_kind: mace, on the full
+# round-15-scale run (experiments/mace_family_best_combo_scale.yaml --
+# 7 families x 500/family, best_combo's own augmentation, frozen
+# MACE-MP-0 embedding). Same content as
+# tail_train_hierarchical_supcon_mace_family_first_test.example.yaml
+# (the 100/family smoke-test version) -- see that file for the full
+# rationale -- just a distinct output_subdir so both results (100/family
+# smoke test vs. 500/family real comparison) survive side by side under
+# the same run_dir's tails/.
+#
+# Run with:
+#   dimred-train-tail configs/tail_train_hierarchical_supcon_mace_best_combo_scale.example.yaml \
+#       <run_dir printed by mace_family_best_combo_scale.yaml>
+
+tail_kind: hierarchical_supcon
+output_subdir: hierarchical_supcon_mace_best_combo_scale
+
+hierarchical_supcon:
+  head_hidden_dim: 32
+  min_samples_per_expert: 10
+  sg_classifier_hidden_dim: 32
+  sg_visualization_hidden_dim: [64, 32]
+  sg_visualization_tau: 0.1
+  sg_visualization_distance: euclidean
+  sg_visualization_lambda_norm: 0.0
+
+seed: 42
+
+train:
+  epochs: 200
+  batch_size: 128
+  learning_rate: 0.001
+  optimizer: adam
+  device: gpu
+  early_stopping:
+    enabled: true
+    patience: 20
+    min_delta: 0.0001
+    restore_best_weights: true
