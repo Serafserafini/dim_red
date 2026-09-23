@@ -157,6 +157,12 @@ Riferimento: Khosla et al., *Supervised Contrastive Learning*, NeurIPS 2020 (arX
 — l'articolo citato nel brainstorm come ispirazione. La loss SupCon ha come obiettivo
 diretto la separazione delle classi in uno spazio a dimensione ridotta.
 
+Ora divisa in due slide nel discorso vero e proprio (vedi `discorso.md`/
+`brief_slides_claude_design.md`, slide 8-9): una prima slide di teoria con la formula della
+loss (positivi/negativi, temperatura τ, similarità coseno — la variante che usiamo davvero)
+e un esempio concreto (batch con 3 strutture cubiche + 2 esagonali), poi i quattro blocchi.
+Questa espansione ha spostato la stima di tempo del talk da ~20 a ~21-22 minuti.
+
 Quattro blocchi, montabili insieme (`dim_red.supcon`):
 
 | Blocco | Cosa fa | Quando si allena |
