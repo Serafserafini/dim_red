@@ -20,7 +20,7 @@ logger = logging.getLogger("dim_red.pipeline")
 _AUX_HEADS_MODES = ("none", "family_only", "family_and_spacegroup")
 _SUPCON_MODES = ("family_only", "spacegroup_only", "family_and_spacegroup")
 _SUPCON_DISTANCES = ("euclidean", "cosine")
-_MODEL_KINDS = ("vae", "autoencoder", "supcon", "cgcnn", "mace")
+_MODEL_KINDS = ("vae", "autoencoder", "supcon", "cgcnn", "mace", "supcon_mace")
 _DATA_SOURCES = ("fetch", "pyxtal")
 _OPTIMIZER_KINDS = ("adam", "velo")
 
@@ -666,12 +666,26 @@ class RunConfig:
             ``"mace"`` reads its checkpoint path/cutoff from ``mace`` instead
             -- its embedding width is whatever the loaded checkpoint says,
             not a config choice, so ``vae.latent_dim`` isn't read at all for
-            it. ``"vae"``/``"autoencoder"``/``"cgcnn"`` read their aux-head
-            settings from ``aux_heads``; ``"supcon"`` reads its loss
+            it. ``"supcon_mace"`` is ``"supcon"``'s training recipe (body +
+            ``ProjectionTail``, contrastive loss, everything read from
+            ``supcon``/``vae``/``batching`` exactly like ``"supcon"``) fed
+            ``"mace"``'s frozen embedding instead of a standardized SOAP
+            descriptor as its raw input features -- i.e. the encoder+
+            projection stack is *trained* (unlike plain ``"mace"``, which
+            never trains anything), just on top of MACE's pretrained
+            representation instead of SOAP, so it still needs
+            ``mace.checkpoint_path`` set (same requirement as ``"mace"``)
+            despite also training a body. This gets the supervised-
+            contrastive optimization plain ``"mace"`` lacks (that embedding
+            is never adapted to separate family/spacegroup at all) while
+            starting from a pretrained-on-real-materials representation
+            instead of SOAP's purely geometric one. ``"vae"``/
+            ``"autoencoder"``/``"cgcnn"`` read their aux-head settings from
+            ``aux_heads``; ``"supcon"``/``"supcon_mace"`` read their loss
             settings from ``supcon`` instead (``aux_heads`` is ignored for
-            it), and its training-batch sampling strategy from ``batching``
-            (ignored for ``"vae"``/``"autoencoder"``/``"cgcnn"``, which
-            always use a plain shuffle). See
+            them), and their training-batch sampling strategy from
+            ``batching`` (ignored for ``"vae"``/``"autoencoder"``/
+            ``"cgcnn"``, which always use a plain shuffle). See
             ``dim_red.pipeline.single_run.run_single``.
         data_source: How the dataset (before SOAP) is built: ``"fetch"``
             (default -- the ``fetch`` config block queries Materials
@@ -748,12 +762,20 @@ class RunConfig:
                 "unlike vae/autoencoder which can train an unsupervised "
                 "reconstruction objective alone)"
             )
-        if self.model_kind == "mace" and not self.mace.checkpoint_path:
-            raise ValueError(
-                "model_kind='mace' requires mace.checkpoint_path to be set "
-                "(a frozen body has no training objective at all -- there is "
+        if self.model_kind in ("mace", "supcon_mace") and not self.mace.checkpoint_path:
+            reason = (
+                "a frozen body has no training objective at all -- there is "
                 "nothing to build its architecture/weights from besides an "
-                "already-pretrained, already-converted checkpoint)"
+                "already-pretrained, already-converted checkpoint"
+                if self.model_kind == "mace"
+                else "its raw input features come from a frozen MACE forward "
+                "pass (the body trained on top of them is supcon_mace's own "
+                "SupConEncoder+ProjectionTail, but that needs MACE's "
+                "embedding to train on in the first place)"
+            )
+            raise ValueError(
+                f"model_kind={self.model_kind!r} requires mace.checkpoint_path "
+                f"to be set ({reason})"
             )
 
 

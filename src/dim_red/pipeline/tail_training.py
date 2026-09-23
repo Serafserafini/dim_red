@@ -107,21 +107,34 @@ logger = logging.getLogger("dim_red.pipeline")
 # restricted to "supcon" only (not just "supcon"/"cgcnn"/"mace" like
 # "hierarchical" itself): it always recomputes native SOAP when the
 # referenced hierarchical tail used expert_input="soap" (the default), and
-# only a SOAP-based (supcon) body has that descriptor to recompute at all.
-# "hierarchical_supcon" also allows "mace" (not "cgcnn"): its per-family
-# stage-2 step normally trains a fresh SupCon body on native SOAP, which
-# only a SOAP-based body has -- but model_kind: mace never trains anything
-# at all (a frozen foundation-model forward pass stands in for a from-
-# scratch encoder+projection), so _train_hierarchical_supcon skips that
-# per-family training step for mace and reuses the run's own frozen
-# embedding directly as each family's SG representation instead, same
-# substitution the family-level body already makes. cgcnn isn't included
-# here: it neither has SOAP to recompute (like mace) nor is a frozen body
-# (unlike mace, it trains from scratch), so neither branch applies to it.
+# only a SOAP-based (supcon) body has that descriptor to recompute at all
+# ("supcon_mace" isn't included either, for the identical reason: its raw
+# input is a MACE embedding, not SOAP -- expert_input="soap" would recompute
+# an unrelated, default-valued descriptor for it exactly like it would for
+# plain "mace"). "hierarchical_supcon" also allows "mace" (not "cgcnn"):
+# its per-family stage-2 step normally trains a fresh SupCon body on native
+# SOAP, which only a SOAP-based body has -- but model_kind: mace never
+# trains anything at all (a frozen foundation-model forward pass stands in
+# for a from-scratch encoder+projection), so _train_hierarchical_supcon
+# skips that per-family training step for mace and reuses the run's own
+# frozen embedding directly as each family's SG representation instead,
+# same substitution the family-level body already makes. cgcnn isn't
+# included here: it neither has SOAP to recompute (like mace) nor is a
+# frozen body (unlike mace, it trains from scratch), so neither branch
+# applies to it. "supcon_mace" is deliberately NOT included in
+# "hierarchical_supcon" (unlike "classification"/"visualization"/
+# "hierarchical", which all treat it exactly like "supcon" -- see
+# single_run.run_single's is_supcon): its own per-family stage 2 would need
+# a *native MACE* feature recompute (not SOAP, not the run's own frozen
+# body) as the SupCon-SG body's input to mirror how plain "supcon" runs use
+# native SOAP there, which this module doesn't implement yet -- allowing it
+# through would silently fall into the "mace" branch below and skip
+# per-family body training even though supcon_mace, unlike mace, actually
+# has a trained body worth building on top of.
 _TAIL_MODEL_KINDS: Dict[str, Tuple[str, ...]] = {
-    "classification": ("supcon", "cgcnn", "mace"),
-    "visualization": ("supcon", "cgcnn", "mace", "vae", "autoencoder"),
-    "hierarchical": ("supcon", "cgcnn", "mace"),
+    "classification": ("supcon", "cgcnn", "mace", "supcon_mace"),
+    "visualization": ("supcon", "cgcnn", "mace", "supcon_mace", "vae", "autoencoder"),
+    "hierarchical": ("supcon", "cgcnn", "mace", "supcon_mace"),
     "hierarchical_visualization": ("supcon",),
     "hierarchical_supcon": ("supcon", "mace"),
 }

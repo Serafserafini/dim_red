@@ -891,7 +891,7 @@ def build_graph_dataset_for_run(
     )
 
 
-# --- MACE dataset caching (RunConfig.model_kind == "mace" only) ------------
+# --- MACE dataset caching (RunConfig.model_kind == "mace" or "supcon_mace") --
 #
 # Unlike the CGCNN graph path above, MACE's body is frozen/pretrained -- there
 # is no training loop to feed padded per-atom graph arrays into, so this
@@ -950,7 +950,12 @@ def _compute_mace_and_standardize(
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Returns ``(X_std, feature_mean, feature_std)`` -- the MACE counterpart
     to ``_compute_soap_and_standardize``, used *instead of* it when
-    ``RunConfig.model_kind == "mace"``. Runs a frozen, pretrained
+    ``RunConfig.model_kind`` is ``"mace"`` (a frozen body, these ARE its
+    embeddings) or ``"supcon_mace"`` (a trained SupCon body, these are its
+    raw *input* features, standardized the exact same way SOAP's raw input
+    features are for plain ``"supcon"`` -- model_kind-agnostic either way,
+    since this function only ever runs a frozen MACE forward pass regardless
+    of what trains on its output afterward). Runs a frozen, pretrained
     ``dim_red.mace.model.MaceEncoder`` forward pass over every structure
     (no training, no gradient), then standardizes the resulting embedding
     matrix the same way SOAP features are -- kept for consistency with

@@ -175,7 +175,7 @@ def _build_model(config: RunConfig, input_dim: int, embeddings: Dict[str, np.nda
     ``embeddings['family_classes']``/``['spacegroup_classes']``, since
     ``RunConfig`` itself doesn't carry the resolved class counts.
     """
-    if config.model_kind == "supcon":
+    if config.model_kind in ("supcon", "supcon_mace"):
         from dim_red.supcon.model import SupConEncoder
 
         return SupConEncoder(
@@ -296,20 +296,25 @@ def load_trained_run(run_dir: Union[str, Path]) -> LoadedRun:
         mean = np.zeros(0, dtype=np.float32)
         std = np.ones(0, dtype=np.float32)
         input_dim = 0
-    elif config.model_kind == "mace":
+    elif config.model_kind in ("mace", "supcon_mace"):
         # Like SOAP-based kinds, feature_mean/feature_std are always saved
         # (dim_red.pipeline.dataset_cache.build_mace_dataset_for_run always
         # returns them -- there's no "pre-existing run predating this field"
-        # fallback case for mace, since this model_kind didn't exist before
-        # that field did) -- taken directly from embeddings.npz, same fast
-        # path as the SOAP-based kinds below. No species list: MaceEncoder
-        # doesn't use dim_red.soap's chemical-species machinery at all (its
-        # checkpoint carries its own supported-species table internally,
-        # loaded from config.mace.checkpoint_path at construction time) --
-        # kept as an inert empty placeholder, same treatment cgcnn's species
-        # field gets above, so LoadedRun's shape stays uniform.
-        # dataset.extxyz isn't read here, and the SOAP-recompute fallback
-        # below never applies to this model_kind at all.
+        # fallback case for mace/supcon_mace, since neither model_kind
+        # existed before that field did) -- taken directly from
+        # embeddings.npz, same fast path as the SOAP-based kinds below. No
+        # species list: MaceEncoder doesn't use dim_red.soap's chemical-
+        # species machinery at all (its checkpoint carries its own
+        # supported-species table internally, loaded from
+        # config.mace.checkpoint_path at construction time) -- kept as an
+        # inert empty placeholder, same treatment cgcnn's species field
+        # gets above, so LoadedRun's shape stays uniform. This branch only
+        # resolves the *raw input features'* standardization stats/width
+        # (identical for both model kinds -- MACE's own frozen embedding);
+        # _build_model (below) is what actually differs, constructing
+        # either a frozen MaceEncoder or a trained SupConEncoder on top of
+        # that same input_dim. dataset.extxyz isn't read here, and the
+        # SOAP-recompute fallback below never applies to either.
         species = []
         mean = embeddings["feature_mean"]
         std = embeddings["feature_std"]
@@ -394,6 +399,15 @@ def load_trained_run(run_dir: Union[str, Path]) -> LoadedRun:
             config.mace.checkpoint_path,
             input_dim,
         )
+    elif config.model_kind == "supcon_mace":
+        logger.info(
+            "Loaded supcon_mace model from %s (mace checkpoint=%s, %d-dim MACE "
+            "input, latent_dim=%d)",
+            run_dir,
+            config.mace.checkpoint_path,
+            input_dim,
+            config.vae.latent_dim,
+        )
     else:
         logger.info(
             "Loaded %s model from %s (%d species, %d-dim SOAP input, latent_dim=%d)",
@@ -453,6 +467,23 @@ def encode_structures(loaded: LoadedRun, atoms_list: List[Atoms]) -> np.ndarray:
         # land in a comparable space, not just the raw forward pass.
         raw = np.asarray(loaded.model.encode(atoms_list))
         return apply_standardization(raw, loaded.feature_mean, loaded.feature_std)
+
+    if loaded.config.model_kind == "supcon_mace":
+        # loaded.model here is the *trained* SupConEncoder (see _build_model),
+        # not something that can featurize raw Atoms itself -- a separate,
+        # freshly-constructed frozen MaceEncoder does the same featurization
+        # step training used (dim_red.pipeline.dataset_cache
+        # ._compute_mace_and_standardize), standardized with this run's own
+        # feature_mean/feature_std, and only *then* passed through the
+        # trained body -- mirrors the SOAP branch below's
+        # "_raw_soap_matrix -> apply_standardization -> model.encode" shape,
+        # just with MACE's frozen forward pass standing in for SOAP.
+        from dim_red.mace.model import MaceEncoder
+
+        mace_encoder = MaceEncoder(**loaded.config.mace.mace_kwargs())
+        raw = np.asarray(mace_encoder.encode(atoms_list))
+        X_std = apply_standardization(raw, loaded.feature_mean, loaded.feature_std)
+        return np.asarray(loaded.model.encode(X_std))
 
     X_raw = _raw_soap_matrix(atoms_list, loaded.config.soap.as_kwargs(), loaded.species)
     X_std = apply_standardization(X_raw, loaded.feature_mean, loaded.feature_std)

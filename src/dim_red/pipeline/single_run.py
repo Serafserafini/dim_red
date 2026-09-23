@@ -142,7 +142,7 @@ def make_run_name(config: RunConfig) -> str:
         name += f"_aux-{aux.mode}_lf{aux.lambda_family:g}"
         if aux.mode == "family_and_spacegroup":
             name += f"_lsg{aux.lambda_spacegroup:g}"
-    if config.model_kind == "supcon":
+    if config.model_kind in ("supcon", "supcon_mace"):
         sc = config.supcon
         name += f"_supcon-{sc.mode}_tau{sc.tau:g}"
         if sc.mode != "spacegroup_only":
@@ -326,6 +326,7 @@ def run_single(
         )
         is_cgcnn = config.model_kind == "cgcnn"
         is_mace = config.model_kind == "mace"
+        uses_mace_features = config.model_kind in ("mace", "supcon_mace")
         if is_cgcnn:
             (
                 graph_arrays,
@@ -343,7 +344,7 @@ def run_single(
                 nbr_idx.shape[2],
             )
         else:
-            if is_mace:
+            if uses_mace_features:
                 build_fn = build_mace_dataset_for_run
             else:
                 build_fn = build_dataset_for_run
@@ -363,7 +364,16 @@ def run_single(
         shutil.copyfile(structures_path, dataset_path)
         logger.info("Saved training dataset structures to %s", dataset_path)
 
-        is_supcon = config.model_kind == "supcon"
+        # supcon_mace uses the exact same training recipe as supcon (body +
+        # ProjectionTail, contrastive loss, supcon:/batching: config) --
+        # just fed MACE features (uses_mace_features, above) instead of
+        # SOAP ones as X. Every is_supcon branch below (model construction,
+        # TrainConfig, train_supcon call, projection_params.msgpack save,
+        # tail eligibility) is therefore correct unchanged for it too; only
+        # is_mace (strictly model_kind == "mace", never supcon_mace) stays
+        # its own thing below, since supcon_mace -- unlike plain mace --
+        # does encode()/train a real body.
+        is_supcon = config.model_kind in ("supcon", "supcon_mace")
         if is_supcon:
             aux_mode = config.supcon.mode
             use_family = aux_mode != "spacegroup_only"
