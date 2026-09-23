@@ -1380,6 +1380,17 @@ class HierarchicalSupconTailConfig:
     SupCon body -> classifier -> visualizer pattern one level down, instead
     of being a single classifier trained directly on native SOAP.
 
+    Also usable against a ``model_kind: mace`` run (not just ``supcon``):
+    since a frozen MACE embedding already stands in for the family-level
+    encoder+projection (``model_kind: mace`` never trains anything), stage
+    2's per-family "SupCon SG" body/projection-training step is skipped
+    entirely in that case -- the run's own frozen embedding, restricted to
+    each family's rows, is used directly as that family's representation
+    for the classifier/visualizer steps instead. ``sg_encoder_hidden_dim``/
+    ``sg_latent_dim``/``sg_tau``/``sg_distance``/``sg_lambda_norm``/
+    ``sg_projection_dim``/``sg_projection_hidden_dim`` (all below) are then
+    unused. See ``dim_red.pipeline.tail_training._train_hierarchical_supcon``.
+
     Stage 1 (family) is unchanged from ``"hierarchical"``: one
     ``ClassificationTail`` on the frozen body's own embedding, hidden width
     ``head_hidden_dim``.
