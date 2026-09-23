@@ -47,22 +47,27 @@ presente ai percorsi originali.
   visualizzatore migliore trovato, palette corretta (niente colori ripetuti oltre 10
   classi, a differenza delle versioni round 13-15).
 
-### Su Cubic (round 17) — materiale di approfondimento, NON per il talk da 20 min
+### Su Cubic (round 17)
 
-Nota: nel talk attuale (`struttura_talk.md`, sezione 7) Cubic è **solo un accenno cauto**,
-senza spiegazione di causa-radice — indicazione esplicita dell'utente, che non si sente
-ancora sicuro del finding del round 17 nonostante le analisi fatte. Le figure sotto restano
-indicizzate qui per un eventuale approfondimento futuro (per te stesso, o se in futuro il
-finding ti convince abbastanza da volerlo raccontare), **non da usare in questa versione
-del talk**:
+Aggiornamento: nel discorso attuale (`discorso.md`, slide 12) Cubic **compare** — si
+mostrano le confusion matrix per esperto, e Cubic salta all'occhio come l'unica
+problematica — ma senza la spiegazione di causa-radice del round 17 (niente gradi di
+libertà della cella, niente "effetto soglia", niente le tre misure indipendenti). Resta un
+sospetto dichiarato a voce ("probabilmente il descrittore SOAP, non il modello"), non un
+risultato chiuso — indicazione esplicita dell'utente, che non si sente ancora sicuro del
+finding del round 17 nonostante le analisi fatte.
 - `experiments/plots/round17/confusion_cubic_best.png` — massa diffusa su tutta la
-  matrice, nessuna diagonale.
+  matrice, nessuna diagonale. **Usata in slide 12** come una delle due confusion matrix di
+  contrasto (vedi `brief_slides_claude_design.md`).
 - `experiments/plots/round17/confusion_tetragonal_best.png` — contrappunto diretto: 68
-  classi (il numero più alto), ma diagonale quasi perfetta.
+  classi (il numero più alto), ma diagonale quasi perfetta. **Candidata come seconda
+  figura di contrasto in slide 12**, ma qualunque delle altre 6 funziona altrettanto bene
+  per lo scopo (mostrare "Cubic è l'eccezione", non serve necessariamente questa specifica).
 - Le altre 5 (`confusion_hexagonal_best.png`, `_monoclinic_`, `_orthorhombic_`,
-  `_triclinic_`, `_trigonal_best.png`) per un pannello completo a 7.
-- Tabelle numeriche (gradi di libertà per famiglia, soglia 0/1+ gradi di libertà) — solo
-  testo, riportate per intero in `storia_studio.md`, Atto 5.
+  `_triclinic_`, `_trigonal_best.png`) — di riserva, non tutte necessarie in slide.
+- Tabelle numeriche (gradi di libertà per famiglia, soglia 0/1+ gradi di libertà) — **queste
+  restano fuori dal talk**, solo testo, riportate per intero in `storia_studio.md`, Atto 5,
+  per un eventuale approfondimento futuro.
 
 ## Sezione 6 — Architettura (diagramma concettuale)
 
