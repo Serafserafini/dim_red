@@ -2,6 +2,7 @@
 Plotting utilities for visualization of reduced dimensional spaces.
 """
 
+import math
 from typing import Dict, List, Optional, Sequence
 
 import matplotlib.pyplot as plt
@@ -17,6 +18,7 @@ def plot_reduced_space(
     save_path: Optional[str] = None,
     xlabel: str = "Principal Component 1",
     ylabel: str = "Principal Component 2",
+    legend: bool = True,
 ) -> None:
     """Plots the 2D reduced dimensional space using Matplotlib.
 
@@ -27,6 +29,9 @@ def plot_reduced_space(
         save_path: If provided, saves the plot to this filepath; otherwise the figure is shown (interactively, or captured inline in a notebook).
         xlabel: Label for the x-axis (first reduced dimension).
         ylabel: Label for the y-axis (second reduced dimension).
+        legend: Whether to draw a legend. Visualization-tail plot grids
+            (``dim_red.pipeline.tail_training``) pass ``False`` since a
+            per-class legend on every subplot of a grid clutters it.
     """
     if X_reduced.shape[1] < 2:
         raise ValueError("X_reduced must have at least 2 components for a 2D plot.")
@@ -52,7 +57,8 @@ def plot_reduced_space(
     plt.xlabel(xlabel)
     plt.ylabel(ylabel)
     plt.title(title, fontsize=14, fontweight="bold", pad=15)
-    plt.legend(frameon=True, facecolor="white", edgecolor="none")
+    if legend:
+        plt.legend(frameon=True, facecolor="white", edgecolor="none")
     plt.grid(True, linestyle="--", alpha=0.5)
 
     plt.tight_layout()
@@ -76,6 +82,7 @@ def plot_reduced_space_3d(
     xlabel: str = "Dimension 1",
     ylabel: str = "Dimension 2",
     zlabel: str = "Dimension 3",
+    legend: bool = True,
 ) -> None:
     """Plots a 3D reduced space using Matplotlib.
 
@@ -93,6 +100,9 @@ def plot_reduced_space_3d(
         xlabel: Label for the x-axis (first reduced dimension).
         ylabel: Label for the y-axis (second reduced dimension).
         zlabel: Label for the z-axis (third reduced dimension).
+        legend: Whether to draw a legend. Visualization-tail plot grids
+            (``dim_red.pipeline.tail_training``) pass ``False`` since a
+            per-class legend on every subplot of a grid clutters it.
 
     Raises:
         ValueError: If ``X_reduced`` doesn't have exactly 3 components.
@@ -124,7 +134,8 @@ def plot_reduced_space_3d(
     ax.set_ylabel(ylabel)
     ax.set_zlabel(zlabel)
     ax.set_title(title, fontsize=14, fontweight="bold", pad=15)
-    ax.legend(frameon=True, facecolor="white", edgecolor="none")
+    if legend:
+        ax.legend(frameon=True, facecolor="white", edgecolor="none")
 
     plt.tight_layout()
 
@@ -704,3 +715,64 @@ def plot_reliability_diagram(
         plt.show()
 
     plt.close()
+
+
+def plot_image_grid(
+    image_paths: Sequence[str],
+    titles: Optional[Sequence[str]] = None,
+    save_path: Optional[str] = None,
+    ncols: int = 2,
+    suptitle: Optional[str] = None,
+) -> None:
+    """Composites a set of already-rendered PNGs into one grid figure.
+
+    Each image is embedded as-is (no recomputation) -- meant for stitching
+    together plots that are each already a complete, independently-styled
+    figure (e.g. ``plot_confusion_matrix`` output, which has its own
+    colorbar and tick-thinning/sizing logic per class count), where
+    re-deriving a shared-axes subplot version would mean duplicating that
+    logic. For plots built from raw per-point coordinates (e.g.
+    ``plot_reduced_space``), prefer a real ``plt.subplots`` grid over raw
+    data instead of stitching PNGs.
+
+    Args:
+        image_paths: Paths to the source PNGs, in the order they should
+            appear (row-major).
+        titles: Optional per-cell title, same length as ``image_paths``.
+        save_path: If provided, saves the grid to this filepath; otherwise
+            shown interactively/inline.
+        ncols: Number of columns in the grid.
+        suptitle: Optional figure-level title.
+    """
+    n = len(image_paths)
+    if n == 0:
+        raise ValueError("image_paths must be non-empty.")
+    if titles is not None and len(titles) != n:
+        raise ValueError("titles must be the same length as image_paths.")
+
+    nrows = math.ceil(n / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(7 * ncols, 6 * nrows))
+    axes = np.atleast_1d(axes).flatten()
+
+    for i, path in enumerate(image_paths):
+        img = plt.imread(path)
+        axes[i].imshow(img)
+        axes[i].axis("off")
+        if titles is not None:
+            axes[i].set_title(titles[i], fontsize=12, fontweight="bold")
+
+    for ax in axes[n:]:
+        ax.axis("off")
+
+    if suptitle:
+        fig.suptitle(suptitle, fontsize=14, fontweight="bold")
+
+    fig.tight_layout(rect=[0, 0, 1, 0.96] if suptitle else None)
+
+    if save_path:
+        fig.savefig(save_path, dpi=200)
+        print(f"Plot saved successfully to {save_path}")
+    else:
+        plt.show()
+
+    plt.close(fig)

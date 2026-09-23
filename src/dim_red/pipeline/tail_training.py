@@ -1046,6 +1046,7 @@ def _train_hierarchical_supcon(
             [str(sg) for sg in local_spacegroups.tolist()],
             title=f"{family_name} SupCon SG visualization ({run_dir.name})",
             save_path=str(sg_dir / "visualization_plot_spacegroup.png"),
+            legend=False,
         )
         logger.info(
             "Saved family %r SupCon SG visualization plot to %s",
@@ -1338,6 +1339,7 @@ def _train_hierarchical_visualization(
             [str(sg) for sg in local_spacegroups_all.tolist()],
             title=f"{family_name} visualization ({hv.input_source} input, {run_dir.name})",
             save_path=str(plot_path),
+            legend=False,
         )
         logger.info("Saved family %r visualization plot to %s", family_name, plot_path)
         trained_families.append(family_name)
@@ -1718,6 +1720,7 @@ def train_tail(config: TailTrainConfig) -> Path:
                     labels_all.tolist(),
                     title=f"{tail_dir.name} ({run_dir.name})",
                     save_path=str(family_plot_path),
+                    legend=False,
                 )
                 logger.info(
                     "Saved family-colored visualization plot to %s", family_plot_path
@@ -1730,6 +1733,7 @@ def train_tail(config: TailTrainConfig) -> Path:
                         [str(sg) for sg in spacegroups_all.tolist()],
                         title=f"{tail_dir.name} ({run_dir.name}) -- spacegroup",
                         save_path=str(spacegroup_plot_path),
+                        legend=False,
                     )
                     logger.info(
                         "Saved spacegroup-colored visualization plot to %s",
