@@ -55,6 +55,13 @@ fi
 
 cd "${SLURM_SUBMIT_DIR}"
 
+# Run from a git worktree whose editable `pip install -e .` still resolves
+# to a DIFFERENT checkout's src/ (an editable install records an absolute
+# path, independent of cwd) -- prepend this worktree's own src/ so
+# `dimred-run` actually executes *this* checkout's code, not whatever
+# happened to be installed when `pip install -e .` was last run elsewhere.
+export PYTHONPATH="${SLURM_SUBMIT_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}"
+
 dimred-run "${CONFIG_YAML}"
 
 echo "Run complete."
