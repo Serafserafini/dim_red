@@ -838,6 +838,21 @@ def plot_latent_space_grid(
     plt.close(fig)
 
 
+def _masked_accuracy(
+    pred: np.ndarray, true: np.ndarray, mask: Optional[np.ndarray] = None
+) -> float:
+    """Accuracy of ``pred`` vs. ``true``, restricted to ``mask`` when given.
+    ``NaN`` (not an error) if the (masked) arrays are empty, e.g. a ``split``
+    with no ``"val"`` rows at all.
+    """
+    if mask is not None:
+        pred = pred[mask]
+        true = true[mask]
+    if pred.size == 0:
+        return float("nan")
+    return float((pred == true).mean())
+
+
 def classification_accuracies_from_npz(npz: Dict[str, np.ndarray]) -> Dict[str, float]:
     """Family/spacegroup classification accuracy from any npz-shaped dict
     carrying ``family_probs``/``family_classes``/``labels`` and, optionally,
@@ -848,14 +863,49 @@ def classification_accuracies_from_npz(npz: Dict[str, np.ndarray]) -> Dict[str, 
     classification tail) share, letting callers (e.g.
     ``dim_red.pipeline.benchmark``) read either uniformly. Returns an empty
     dict if neither is present.
+
+    When ``npz`` also carries a ``split`` array (``"train"``/``"val"`` per
+    row -- saved by every ``embeddings.npz``/``tail_predictions.npz`` since
+    ``dim_red.pipeline.single_run.run_single`` first introduced it), each
+    metric is additionally split three ways: ``<name>_all`` (every row,
+    train+val pooled -- this function's only behavior before this feature
+    existed), ``<name>_train``, and ``<name>_val``, and the bare ``<name>``
+    key (e.g. ``"family"``) switches from meaning train+val pooled to being
+    an alias for ``<name>_val``. Val rows are the ones the model never
+    trained on, so this is the honest generalization number and the one most
+    callers want; use ``<name>_all`` to recover the previous, train+val-
+    pooled number. **This is a deliberate default-behavior change for any
+    npz that carries a ``split`` array** (i.e. every real run's artifacts) --
+    a pooled number is always higher than (or equal to) the corresponding
+    val-only one, so don't compare the two across this change without
+    switching to ``_all``/``_val`` explicitly. An npz with no ``split`` array
+    at all (e.g. a hand-built payload, or one predating ``split``) keeps the
+    original behavior exactly: only the bare, train+val-pooled ``<name>`` key.
     """
     accs: Dict[str, float] = {}
+    split = npz.get("split")
+
+    def _add(name: str, pred: np.ndarray, true: np.ndarray) -> None:
+        if split is None:
+            accs[name] = _masked_accuracy(pred, true)
+            return
+        # Bare `name` inserted first -- callers that key off "the first
+        # metric column" (e.g. benchmark_row's headline-columns-first
+        # contract, plot_aux_accuracy_comparison's CSV) see the val-only
+        # number in that position, exactly where the old pooled number used
+        # to be; `_all`/`_train`/`_val` follow as reference detail.
+        val_acc = _masked_accuracy(pred, true, split == "val")
+        accs[name] = val_acc
+        accs[f"{name}_all"] = _masked_accuracy(pred, true)
+        accs[f"{name}_train"] = _masked_accuracy(pred, true, split == "train")
+        accs[f"{name}_val"] = val_acc
+
     if "family_probs" in npz:
         pred = npz["family_classes"][npz["family_probs"].argmax(axis=1)]
-        accs["family"] = float((pred == npz["labels"]).mean())
+        _add("family", pred, npz["labels"])
     if "spacegroup_probs" in npz and "spacegroups" in npz:
         pred = npz["spacegroup_classes"][npz["spacegroup_probs"].argmax(axis=1)]
-        accs["spacegroup"] = float((pred == npz["spacegroups"]).mean())
+        _add("spacegroup", pred, npz["spacegroups"])
     return accs
 
 
@@ -865,19 +915,31 @@ def hierarchical_accuracies_from_npz(npz: Dict[str, np.ndarray]) -> Dict[str, fl
     ``tail_predictions.npz``.
 
     Same ``family``/``spacegroup`` keys as ``classification_accuracies_from_npz``
-    (computed the exact same way, since a hierarchical tail's payload shares
-    that same schema -- ``spacegroup`` here already reflects the honest,
-    end-to-end pipeline: stage 1's *predicted* family picked which per-family
-    expert produced ``spacegroup_probs``), plus ``spacegroup_oracle`` when
-    ``spacegroup_probs_oracle`` is present -- accuracy if stage 1's *true*
-    family had been used to pick the expert instead, isolating expert
-    quality from stage-1 routing quality. Returns an empty dict if none of
-    the expected keys are present.
+    (computed the exact same way, including the ``_all``/``_train``/``_val``
+    breakdown, since a hierarchical tail's payload shares that same schema --
+    ``spacegroup`` here already reflects the honest, end-to-end pipeline:
+    stage 1's *predicted* family picked which per-family expert produced
+    ``spacegroup_probs``), plus ``spacegroup_oracle`` (and its own
+    ``_all``/``_train``/``_val`` breakdown) when ``spacegroup_probs_oracle``
+    is present -- accuracy if stage 1's *true* family had been used to pick
+    the expert instead, isolating expert quality from stage-1 routing
+    quality. Returns an empty dict if none of the expected keys are present.
     """
     accs = classification_accuracies_from_npz(npz)
     if "spacegroup_probs_oracle" in npz and "spacegroups" in npz:
         pred = npz["spacegroup_classes"][npz["spacegroup_probs_oracle"].argmax(axis=1)]
-        accs["spacegroup_oracle"] = float((pred == npz["spacegroups"]).mean())
+        true = npz["spacegroups"]
+        split = npz.get("split")
+        if split is None:
+            accs["spacegroup_oracle"] = _masked_accuracy(pred, true)
+        else:
+            val_acc = _masked_accuracy(pred, true, split == "val")
+            accs["spacegroup_oracle"] = val_acc
+            accs["spacegroup_oracle_all"] = _masked_accuracy(pred, true)
+            accs["spacegroup_oracle_train"] = _masked_accuracy(
+                pred, true, split == "train"
+            )
+            accs["spacegroup_oracle_val"] = val_acc
     return accs
 
 

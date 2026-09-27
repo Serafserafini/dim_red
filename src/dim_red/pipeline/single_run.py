@@ -178,6 +178,46 @@ def _split_indices(n_samples: int, val_ratio: float, seed: int) -> tuple:
     return indices[n_val:], indices[:n_val]
 
 
+def _split_indices_grouped(material_ids: List, val_ratio: float, seed: int) -> tuple:
+    """Reproducible train/val split at the *group* level (unique
+    ``material_id``), so every augmented copy of a structure lands in the
+    same split as its original and its sibling copies.
+
+    ``dim_red.augmentation.augment_structures`` keeps ``material_id``
+    identical across an original structure and every one of its augmented
+    (jittered/vacancy) copies (only ``source_material_id`` changes) --
+    splitting per-row instead of per-group therefore routinely put a
+    near-duplicate of a training structure into validation, inflating val
+    accuracy (a val row is very often just a jittered/vacancy twin of a
+    structure whose other copies are being trained on). Splitting at the
+    ``material_id`` level closes that leak: every copy of a given structure
+    goes to the same side.
+
+    When every ``material_id`` is already unique (no augmentation, or
+    augmentation that never duplicates a ``material_id``), this degenerates
+    to exactly one group per sample, so it falls back to ``_split_indices``
+    and reproduces its split byte-for-byte -- every pre-existing,
+    non-augmented config's split is therefore completely unaffected by this
+    function's introduction; only augmented datasets, which never had a
+    guarantee like this before, see a different (larger, since it's no
+    longer optimistic) split.
+    """
+    n_samples = len(material_ids)
+    material_ids_arr = np.asarray(material_ids)
+    unique_groups, inverse = np.unique(material_ids_arr, return_inverse=True)
+    n_groups = unique_groups.shape[0]
+    if n_groups == n_samples:
+        return _split_indices(n_samples, val_ratio, seed)
+
+    n_val_groups = max(1, int(round(n_groups * val_ratio)))
+    n_val_groups = min(n_val_groups, n_groups - 1)
+    rng = np.random.default_rng(seed)
+    shuffled_group_order = rng.permutation(n_groups)
+    val_group_ids = shuffled_group_order[:n_val_groups]
+    val_mask = np.isin(inverse, val_group_ids)
+    return np.flatnonzero(~val_mask), np.flatnonzero(val_mask)
+
+
 def _build_vocab_ids(values: List) -> Tuple[List, np.ndarray]:
     """Map arbitrary hashable values to a sorted vocabulary and integer ids.
 
@@ -439,8 +479,8 @@ def run_single(
                 )
             logger.info("%d spacegroup classes observed", len(spacegroup_classes))
 
-        train_idx, val_idx = _split_indices(
-            n_samples, config.train.val_ratio, config.seed
+        train_idx, val_idx = _split_indices_grouped(
+            material_ids, config.train.val_ratio, config.seed
         )
         if is_cgcnn:
             graph_db = GraphDatabase.from_arrays(
@@ -449,7 +489,8 @@ def run_single(
             train_db = graph_db[train_idx]
             val_db = graph_db[val_idx]
             logger.info(
-                "Train/val split: %d train / %d val (val_ratio=%.2f, seed=%d)",
+                "Train/val split (grouped by material_id): %d train / %d val "
+                "(val_ratio=%.2f, seed=%d)",
                 train_db.n_samples,
                 val_db.n_samples,
                 config.train.val_ratio,
@@ -459,7 +500,8 @@ def run_single(
             train_db = VAEDatabase.from_array(X[train_idx])
             val_db = VAEDatabase.from_array(X[val_idx])
             logger.info(
-                "Train/val split: %d train / %d val (val_ratio=%.2f, seed=%d)",
+                "Train/val split (grouped by material_id): %d train / %d val "
+                "(val_ratio=%.2f, seed=%d)",
                 train_db.data.shape[0],
                 val_db.data.shape[0],
                 config.train.val_ratio,

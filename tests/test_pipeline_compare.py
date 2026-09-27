@@ -791,3 +791,31 @@ def test_hierarchical_accuracies_from_npz_reports_oracle_separately():
     assert accs["family"] == 3 / 4
     assert accs["spacegroup"] == 1.0
     assert accs["spacegroup_oracle"] == 1.0
+
+
+def test_classification_accuracies_from_npz_splits_train_val_when_split_present():
+    """With a ``split`` array, the bare ``family`` key becomes val-only
+    accuracy (not train+val pooled), and ``_all``/``_train``/``_val`` are all
+    reported alongside for reference -- see this function's docstring.
+    """
+    npz = _classification_npz(with_spacegroup=False)
+    # Rows 0-2 (correctly predicted) are train; row 3 (the one incorrect
+    # prediction) is val -- so val accuracy (0.0) differs sharply from both
+    # train (1.0) and the train+val-pooled number (3/4).
+    npz["split"] = np.array(["train", "train", "train", "val"])
+
+    accs = classification_accuracies_from_npz(npz)
+
+    assert accs["family_all"] == 3 / 4
+    assert accs["family_train"] == 1.0
+    assert accs["family_val"] == 0.0
+    assert accs["family"] == accs["family_val"] == 0.0
+
+
+def test_classification_accuracies_from_npz_no_split_key_keeps_pooled_only_behavior():
+    """A hand-built npz with no ``split`` array at all keeps the original
+    (pre-breakdown) behavior exactly: only the bare, pooled ``family`` key.
+    """
+    npz = _classification_npz(with_spacegroup=False)
+    accs = classification_accuracies_from_npz(npz)
+    assert accs == {"family": 3 / 4}

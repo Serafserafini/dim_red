@@ -306,6 +306,53 @@ def test_run_single_augmentation_expands_dataset(tmp_path):
     assert sum(a.info["augmented"] for a in dataset_atoms) == n_fetched
 
 
+def test_run_single_augmentation_split_never_separates_sibling_copies(tmp_path):
+    """Every augmented copy of a structure shares its original's
+    ``material_id`` (dim_red.augmentation.augment_structures) -- the train/val
+    split must therefore keep an original and all of its augmented copies on
+    the same side, never splitting siblings across train and val (which
+    would leak a near-duplicate of a training row into validation).
+    """
+    n_fetched = 8
+    config = RunConfig(
+        fetch=FetchConfig(crystal_systems=["cubic"], limit_per_system=n_fetched),
+        soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
+        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
+        train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
+        augmentation=AugmentationConfig(
+            n_augmented=3, jitter_probability=1.0, jitter_std=0.05, seed=0
+        ),
+        seed=0,
+        output_dir=str(tmp_path / "runs"),
+    )
+    fake_atoms = [_fake_atoms("Cu", f"mp-{i}") for i in range(n_fetched)]
+
+    with (
+        patch(
+            "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
+            return_value=fake_atoms,
+        ),
+        patch(
+            "dim_red.pipeline.dataset_cache.compute_soap",
+            side_effect=_fake_compute_soap(),
+        ),
+    ):
+        run_dir = run_single(config)
+
+    embeddings = np.load(run_dir / "embeddings.npz")
+    material_ids = embeddings["material_ids"]
+    split = embeddings["split"]
+    for material_id in set(material_ids.tolist()):
+        splits_for_group = set(split[material_ids == material_id].tolist())
+        assert len(splits_for_group) == 1, (
+            f"material_id={material_id!r} has copies split across "
+            f"{splits_for_group} -- train/val split leaked sibling copies"
+        )
+    # Sanity check both sides are still non-empty (val_ratio=0.25 of 8 groups
+    # -> 2 groups in val, each contributing 1 original + 3 augmented copies).
+    assert set(split.tolist()) == {"train", "val"}
+
+
 def test_run_single_augmentation_supercell_radius_expands_single_atom_structures(
     tmp_path,
 ):

@@ -140,6 +140,11 @@ def run_classification_accuracies(run: RunData) -> Dict[str, float]:
     exact paths, not a dedup-suffixed ``tails/classification-2``/
     ``tails/hierarchical-2`` from a repeated manual ``dimred-train-tail``
     call. Returns ``{}`` if none of these sources has classifier predictions.
+
+    Every source here carries a per-row ``split`` array, so the bare
+    ``"family"``/``"spacegroup"`` keys returned are val-only accuracy (not
+    train+val pooled) -- see ``classification_accuracies_from_npz``'s
+    docstring for the ``_all``/``_train``/``_val`` breakdown this implies.
     """
     accs = classification_accuracies_from_npz(run.embeddings)
     if accs:
@@ -217,7 +222,10 @@ def benchmark_row(
 
     1. **Primary** -- ``run_classification_accuracies`` (``"family"``, and
        ``"spacegroup"`` when available): crystal-family classification
-       accuracy.
+       accuracy on the held-out val split (not train+val pooled -- see
+       ``dim_red.pipeline.compare.classification_accuracies_from_npz``),
+       plus ``family_all``/``family_train``/``spacegroup_all``/
+       ``spacegroup_train`` for reference.
     2. **Secondary** -- ``embedding_quality_metrics`` computed on
        ``_resolve_2d_embedding(run)`` (keys prefixed ``family_2d``/
        ``spacegroup_2d``): how well families/phases separate specifically
