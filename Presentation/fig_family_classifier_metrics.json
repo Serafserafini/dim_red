@@ -1,0 +1,112 @@
+{
+  "run_dir": "experiments/runs/experiment_pipeline_best_combo/model-supcon_hd-256-128_pyxtal-cub-hex-mon-ort-tet-tri-tri_nsp1_supcon-family_only_tau0.05_lf1",
+  "viz_tail": "visualization_family_only_euclidean",
+  "classification_tail": "classification",
+  "viz2d_family": {
+    "all": {
+      "family_silhouette": 0.8286114931106567,
+      "family_kmeans_ari": 0.9701604130075011,
+      "family_kmeans_nmi": 0.9620067594824431,
+      "family_knn_accuracy": 0.9874285714285713,
+      "n_points": 17500
+    },
+    "val": {
+      "family_silhouette": 0.78514564037323,
+      "family_kmeans_ari": 0.9368082577264571,
+      "family_kmeans_nmi": 0.9288695049360979,
+      "family_knn_accuracy": 0.9691428571428572,
+      "n_points": 3500
+    }
+  },
+  "classification_val": {
+    "split": "val",
+    "n_val": 3500,
+    "accuracy": 0.9522857142857143,
+    "accuracy_all_points_train_plus_val": 0.9693714285714286,
+    "per_family_recall": {
+      "Triclinic": 0.9922480620155039,
+      "Monoclinic": 0.9621212121212122,
+      "Orthorhombic": 0.9225806451612903,
+      "Tetragonal": 0.9649122807017544,
+      "Trigonal": 0.8957915831663327,
+      "Hexagonal": 0.9457202505219207,
+      "Cubic": 0.978
+    },
+    "confusion_counts": {
+      "order": [
+        "Triclinic",
+        "Monoclinic",
+        "Orthorhombic",
+        "Tetragonal",
+        "Trigonal",
+        "Hexagonal",
+        "Cubic"
+      ],
+      "matrix": [
+        [
+          512,
+          2,
+          0,
+          2,
+          0,
+          0,
+          0
+        ],
+        [
+          4,
+          508,
+          11,
+          1,
+          2,
+          1,
+          1
+        ],
+        [
+          2,
+          18,
+          429,
+          5,
+          2,
+          3,
+          6
+        ],
+        [
+          0,
+          0,
+          5,
+          495,
+          1,
+          0,
+          12
+        ],
+        [
+          0,
+          0,
+          4,
+          0,
+          447,
+          39,
+          9
+        ],
+        [
+          0,
+          0,
+          1,
+          0,
+          25,
+          453,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          4,
+          7,
+          0,
+          489
+        ]
+      ]
+    }
+  }
+}

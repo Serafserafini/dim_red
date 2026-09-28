@@ -1,0 +1,27 @@
+/* Slide geometry, in px on the 1280x720 (16:9) canvas.
+   Values read directly from slideMaster1.xml / slideLayout*.xml. */
+:root{
+  --slide-w:1280px;
+  --slide-h:720px;
+
+  --slide-margin:49px;          /* logo, footer text, page number inset */
+  --slide-content-x:137px;      /* left edge of every title / body placeholder */
+  --slide-content-w:975px;      /* standard content width */
+  --slide-content-w-wide:1092px;/* title-slide / master width */
+
+  --slide-title-y:163px;        /* large-logo layouts */
+  --slide-title-y-small:49px;   /* "Logo klein" layouts */
+  --slide-title-h:87px;
+  --slide-body-y:276px;         /* large-logo layouts */
+  --slide-body-y-small:163px;   /* "Logo klein" layouts */
+  --slide-body-h:325px;
+
+  --slide-copyright-y:608px;
+  --slide-bar-y:655px;          /* blue footer bar top edge */
+  --slide-bar-h:65px;
+  --slide-footer-baseline-y:670px;
+
+  --logo-full-w:204px;
+  --logo-full-h:77px;
+  --logo-mark:51px;             /* small square logo, "Logo klein" layouts */
+}

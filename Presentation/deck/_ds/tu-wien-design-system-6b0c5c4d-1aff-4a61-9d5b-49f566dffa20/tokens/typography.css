@@ -1,0 +1,45 @@
+/* TU Wien typography.
+   The Office templates set both major and minor theme fonts to Arial
+   (ppt/theme/theme1.xml, <a:fontScheme name="Arial">). No webfont binaries ship
+   with the templates, so the stack resolves to the locally installed Arial and
+   falls back to metric-compatible substitutes. */
+:root{
+  --font-sans:Arial,"Helvetica Neue","Liberation Sans",Helvetica,sans-serif;
+  --font-body:var(--font-sans);
+  --font-display:var(--font-sans);
+
+  --weight-regular:400;
+  --weight-bold:700;   /* the only emphasis weight the templates use */
+
+  /* PowerPoint sets 90% line spacing, which is 90% of its own 1.2 default.
+     The CSS equivalent is ~1.08; use it for headlines and bulleted body copy. */
+  --leading-tight:1.08;
+  --leading-normal:1.35;
+
+  /* Slide type ramp. Authored in pt in PowerPoint; px values are for a
+     1280x720 slide canvas (960pt wide → 1pt = 1.3333px). */
+  --slide-title-hero:72px;   /* 54pt — title-slide headline */
+  --slide-title:42.67px;     /* 32pt — standard slide title, bold, blue */
+  --slide-title-small:37.33px;/* 28pt — "Logo klein" slide title */
+  --slide-quote:53.33px;     /* 40pt — quote slide */
+  --slide-subtitle:42.67px;  /* 32pt — title-slide subtitle */
+  --slide-subtitle-photo:32px;/* 24pt — subtitle on photo title slide */
+  --slide-body-1:29.33px;    /* 22pt — body level 1 */
+  --slide-body-2:26.67px;    /* 20pt — body level 2 */
+  --slide-body-3:24px;       /* 18pt — body level 3-5 (accessibility floor) */
+  --slide-table:21.33px;     /* 16pt — table cells */
+  --slide-footer:16px;       /* 12pt — running footer + slide number */
+  --slide-url:18.67px;       /* 14pt — www.tuwien.at lockup */
+  --slide-caption:10.67px;   /* 8pt  — copyright / source note */
+
+  /* Document / screen ramp (same ratios, reflowable contexts) */
+  --text-3xl:40px;
+  --text-2xl:32px;
+  --text-xl:24px;
+  --text-lg:20px;
+  --text-md:18px;
+  --text-sm:16px;
+  --text-xs:14px;
+
+  --tracking-normal:0;
+}

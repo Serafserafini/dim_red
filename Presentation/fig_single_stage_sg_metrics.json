@@ -1,0 +1,36 @@
+{
+  "run_dir": "experiments/runs/presentation_single_stage/model-supcon_hd-256-128_pyxtal-cub-hex-mon-ort-tet-tri-tri_nsp1_supcon-family_and_spacegroup_tau0.05_lf1_lsg1",
+  "viz_tail": "visualization_family_and_spacegroup_euclidean",
+  "viz2d_all": {
+    "family_silhouette": 0.6943907737731934,
+    "family_kmeans_ari": 0.9555052784660332,
+    "family_kmeans_nmi": 0.9449105891391373,
+    "family_knn_accuracy": 0.9801714285714285,
+    "spacegroup_silhouette": -0.18652142584323883,
+    "spacegroup_kmeans_ari": 0.14632755640984213,
+    "spacegroup_kmeans_nmi": 0.567247594642509,
+    "spacegroup_knn_accuracy": 0.35988571428571425,
+    "n_points": 17500
+  },
+  "viz2d_val": {
+    "family_silhouette": 0.6532368063926697,
+    "family_kmeans_ari": 0.9142280572191612,
+    "family_kmeans_nmi": 0.903535689652505,
+    "family_knn_accuracy": 0.9588571428571429,
+    "spacegroup_silhouette": -0.24600698053836823,
+    "spacegroup_kmeans_ari": 0.1340613890377908,
+    "spacegroup_kmeans_nmi": 0.6246580632928761,
+    "spacegroup_knn_accuracy": null,
+    "n_points": 3500
+  },
+  "classification_tail": {
+    "train": {
+      "family_accuracy": 0.9859285714285714,
+      "spacegroup_accuracy": 0.7209285714285715
+    },
+    "val": {
+      "family_accuracy": 0.9628571428571429,
+      "spacegroup_accuracy": 0.6271428571428571
+    }
+  }
+}

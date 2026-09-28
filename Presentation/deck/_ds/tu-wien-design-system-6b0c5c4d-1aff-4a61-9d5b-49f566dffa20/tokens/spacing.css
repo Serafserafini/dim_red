@@ -1,0 +1,18 @@
+/* Spacing derived from the PowerPoint guide lines (Führungslinien).
+   Base unit 8px; the named steps are the measurements the template actually uses. */
+:root{
+  --space-1:4px;
+  --space-2:8px;
+  --space-3:12px;
+  --space-4:16px;
+  --space-5:24px;
+  --space-6:32px;
+  --space-7:49px;   /* outer page margin — logo & footer inset */
+  --space-8:64px;
+  --space-9:88px;   /* gutter between outer margin and content column */
+  --space-10:137px; /* content column left edge */
+
+  --gap-bullet:8px;      /* bullet square to text */
+  --gap-paragraph:8px;   /* 6pt spcBef on body level 1 */
+  --indent-level-2:28px; /* marL 533400 EMU - 270000 EMU */
+}

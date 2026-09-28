@@ -1,0 +1,74 @@
+{
+  "Monoclinic": {
+    "source": "experiments/runs/experiment_viz_tune_orthorhombic_tetragonal/Monoclinic/64_32_16/visualization_embeddings.npz",
+    "viz_hidden_dim": "64_32_16",
+    "n_points": 2500,
+    "n_spacegroups": 13,
+    "all": {
+      "spacegroup_silhouette": 0.8234720826148987,
+      "spacegroup_kmeans_ari": 0.9878689532483925,
+      "spacegroup_kmeans_nmi": 0.9886090601445245,
+      "spacegroup_knn_accuracy": 0.9968
+    },
+    "val": {
+      "spacegroup_silhouette": 0.7367900013923645,
+      "spacegroup_kmeans_ari": 0.9491550972783922,
+      "spacegroup_kmeans_nmi": 0.96433169568175,
+      "spacegroup_knn_accuracy": 0.988607367475292
+    }
+  },
+  "Trigonal": {
+    "source": "experiments/runs/experiment_viz_tune_orthorhombic_tetragonal/Trigonal/64_32_16/visualization_embeddings.npz",
+    "viz_hidden_dim": "64_32_16",
+    "n_points": 2500,
+    "n_spacegroups": 25,
+    "all": {
+      "spacegroup_silhouette": 0.7366293668746948,
+      "spacegroup_kmeans_ari": 0.9662430507554906,
+      "spacegroup_kmeans_nmi": 0.975330100877366,
+      "spacegroup_knn_accuracy": 0.9823999999999999
+    },
+    "val": {
+      "spacegroup_silhouette": 0.5944323539733887,
+      "spacegroup_kmeans_ari": 0.8786608132594441,
+      "spacegroup_kmeans_nmi": 0.9338656227266309,
+      "spacegroup_knn_accuracy": 0.933878787878788
+    }
+  },
+  "Tetragonal": {
+    "source": "experiments/runs/experiment_viz_tune_orthorhombic_tetragonal/Tetragonal/128_64/visualization_embeddings.npz",
+    "viz_hidden_dim": "128_64",
+    "n_points": 2500,
+    "n_spacegroups": 68,
+    "all": {
+      "spacegroup_silhouette": 0.6432375907897949,
+      "spacegroup_kmeans_ari": 0.9160539094482472,
+      "spacegroup_kmeans_nmi": 0.9645300074624638,
+      "spacegroup_knn_accuracy": 0.9676
+    },
+    "val": {
+      "spacegroup_silhouette": 0.4618397355079651,
+      "spacegroup_kmeans_ari": 0.7494765670269338,
+      "spacegroup_kmeans_nmi": 0.916671496237831,
+      "spacegroup_knn_accuracy": null
+    }
+  },
+  "Cubic": {
+    "source": "experiments/runs/experiment_pipeline_best_combo/model-supcon_hd-256-128_pyxtal-cub-hex-mon-ort-tet-tri-tri_nsp1_supcon-family_only_tau0.05_lf1/tails/hierarchical_supcon_best_combo/sg_experts/Cubic/visualization_embeddings.npz",
+    "viz_hidden_dim": "64_32",
+    "n_points": 2500,
+    "n_spacegroups": 36,
+    "all": {
+      "spacegroup_silhouette": 0.01848870888352394,
+      "spacegroup_kmeans_ari": 0.2472629511563061,
+      "spacegroup_kmeans_nmi": 0.5921755097108838,
+      "spacegroup_knn_accuracy": 0.46040000000000003
+    },
+    "val": {
+      "spacegroup_silhouette": -0.005704773124307394,
+      "spacegroup_kmeans_ari": 0.23644627046910904,
+      "spacegroup_kmeans_nmi": 0.6265088489478693,
+      "spacegroup_knn_accuracy": 0.36
+    }
+  }
+}

@@ -1,0 +1,402 @@
+{
+  "plugins": [
+    "react",
+    "import"
+  ],
+  "rules": {
+    "react/forbid-elements": [
+      "warn",
+      {
+        "forbid": []
+      }
+    ],
+    "no-restricted-imports": [
+      "warn",
+      {
+        "patterns": [
+          {
+            "group": [
+              "components/brand/**",
+              "components/content/**",
+              "components/slide/**"
+            ],
+            "message": "Import design-system components from 'index.js', not component internals."
+          }
+        ]
+      }
+    ],
+    "no-restricted-syntax": [
+      "warn",
+      {
+        "selector": "Literal[value=/#[0-9a-fA-F]{3,8}\\b/]",
+        "message": "Raw hex color — use a design-system color token via var()."
+      },
+      {
+        "selector": "Literal[value=/\\b\\d+px\\b/]",
+        "message": "Raw px value — use a design-system spacing token via var()."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='AgendaItem'] > JSXAttribute > JSXIdentifier[name!=/^(?:text|level|number|dimmed|key|ref|className|style|children)$/]",
+        "message": "<AgendaItem> doesn't accept that prop. Declared props: text, level, number, dimmed."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='BulletItem'] > JSXAttribute > JSXIdentifier[name!=/^(?:text|level|bold|bullet|key|ref|className|style|children)$/]",
+        "message": "<BulletItem> doesn't accept that prop. Declared props: text, level, bold, bullet."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='Button'] > JSXAttribute > JSXIdentifier[name!=/^(?:variant|size|disabled|as|key|ref|className|style|children)$/]",
+        "message": "<Button> doesn't accept that prop. Declared props: variant, size, disabled, as."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='Button'] > JSXAttribute[name.name='variant'] > Literal[value!=/^(?:primary|secondary|ghost)$/]",
+        "message": "<Button> variant must be one of 'primary' | 'secondary' | 'ghost'."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='Button'] > JSXAttribute[name.name='size'] > Literal[value!=/^(?:sm|md|lg)$/]",
+        "message": "<Button> size must be one of 'sm' | 'md' | 'lg'."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='Button'] > JSXAttribute[name.name='as'] > Literal[value!=/^(?:button|a)$/]",
+        "message": "<Button> as must be one of 'button' | 'a'."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='ContactBlock'] > JSXAttribute > JSXIdentifier[name!=/^(?:name|unit|lines|phone|email|website|key|ref|className|style|children)$/]",
+        "message": "<ContactBlock> doesn't accept that prop. Declared props: name, unit, lines, phone, email, website."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='CopyrightNote'] > JSXAttribute > JSXIdentifier[name!=/^(?:tone|key|ref|className|style|children)$/]",
+        "message": "<CopyrightNote> doesn't accept that prop. Declared props: tone."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='CopyrightNote'] > JSXAttribute[name.name='tone'] > Literal[value!=/^(?:inverse)$/]",
+        "message": "<CopyrightNote> tone must be one of 'inverse'."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='DataTable'] > JSXAttribute > JSXIdentifier[name!=/^(?:columns|rows|totalRow|variant|caption|key|ref|className|style|children)$/]",
+        "message": "<DataTable> doesn't accept that prop. Declared props: columns, rows, totalRow, variant, caption."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='Logo'] > JSXAttribute > JSXIdentifier[name!=/^(?:variant|tone|height|width|base|key|ref|className|style|children)$/]",
+        "message": "<Logo> doesn't accept that prop. Declared props: variant, tone, height, width, base."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='Logo'] > JSXAttribute[name.name='variant'] > Literal[value!=/^(?:full|mark)$/]",
+        "message": "<Logo> variant must be one of 'full' | 'mark'."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='Logo'] > JSXAttribute[name.name='tone'] > Literal[value!=/^(?:light|dark)$/]",
+        "message": "<Logo> tone must be one of 'light' | 'dark'."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='Quote'] > JSXAttribute > JSXIdentifier[name!=/^(?:children|attribution|key|ref|className|style|children)$/]",
+        "message": "<Quote> doesn't accept that prop. Declared props: children, attribution."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='Slide'] > JSXAttribute > JSXIdentifier[name!=/^(?:variant|logo|footer|pageNumber|image|base|key|ref|className|style|children)$/]",
+        "message": "<Slide> doesn't accept that prop. Declared props: variant, logo, footer, pageNumber, image, base."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='Slide'] > JSXAttribute[name.name='variant'] > Literal[value!=/^(?:default|compact|accent|photo|blank)$/]",
+        "message": "<Slide> variant must be one of 'default' | 'compact' | 'accent' | 'photo' | 'blank'."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='Slide'] > JSXAttribute[name.name='logo'] > Literal[value!=/^(?:full|mark|none)$/]",
+        "message": "<Slide> logo must be one of 'full' | 'mark' | 'none'."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='SlideBody'] > JSXAttribute > JSXIdentifier[name!=/^(?:variant|columns|gap|x|y|width|height|key|ref|className|style|children)$/]",
+        "message": "<SlideBody> doesn't accept that prop. Declared props: variant, columns, gap, x, y, width, height."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='SlideBody'] > JSXAttribute[name.name='variant'] > Literal[value!=/^(?:default|compact)$/]",
+        "message": "<SlideBody> variant must be one of 'default' | 'compact'."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='SlideFooter'] > JSXAttribute > JSXIdentifier[name!=/^(?:text|pageNumber|bare|key|ref|className|style|children)$/]",
+        "message": "<SlideFooter> doesn't accept that prop. Declared props: text, pageNumber, bare."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='SlideTitle'] > JSXAttribute > JSXIdentifier[name!=/^(?:variant|tone|key|ref|className|style|children)$/]",
+        "message": "<SlideTitle> doesn't accept that prop. Declared props: variant, tone."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='SlideTitle'] > JSXAttribute[name.name='variant'] > Literal[value!=/^(?:default|compact|hero|quote)$/]",
+        "message": "<SlideTitle> variant must be one of 'default' | 'compact' | 'hero' | 'quote'."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='SlideTitle'] > JSXAttribute[name.name='tone'] > Literal[value!=/^(?:inverse)$/]",
+        "message": "<SlideTitle> tone must be one of 'inverse'."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='UrlLockup'] > JSXAttribute > JSXIdentifier[name!=/^(?:href|children|align|key|ref|className|style|children)$/]",
+        "message": "<UrlLockup> doesn't accept that prop. Declared props: href, children, align."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='UrlLockup'] > JSXAttribute[name.name='align'] > Literal[value!=/^(?:left|right)$/]",
+        "message": "<UrlLockup> align must be one of 'left' | 'right'."
+      }
+    ]
+  },
+  "overrides": [
+    {
+      "files": [
+        "**/index.js"
+      ],
+      "rules": {
+        "no-restricted-imports": "off"
+      }
+    }
+  ],
+  "x-omelette": {
+    "components": {
+      "AgendaItem": {
+        "replaces": []
+      },
+      "BulletItem": {
+        "replaces": []
+      },
+      "Button": {
+        "replaces": []
+      },
+      "ContactBlock": {
+        "replaces": []
+      },
+      "CopyrightNote": {
+        "replaces": []
+      },
+      "DataTable": {
+        "replaces": []
+      },
+      "Logo": {
+        "replaces": []
+      },
+      "Quote": {
+        "replaces": []
+      },
+      "Slide": {
+        "replaces": []
+      },
+      "SlideBody": {
+        "replaces": []
+      },
+      "SlideFooter": {
+        "replaces": []
+      },
+      "SlideTitle": {
+        "replaces": []
+      },
+      "UrlLockup": {
+        "replaces": []
+      }
+    },
+    "tokens": [
+      "--border-default",
+      "--border-subtle",
+      "--border-width",
+      "--border-width-rule",
+      "--bullet-color",
+      "--chart-1",
+      "--chart-2",
+      "--chart-3",
+      "--chart-4",
+      "--chart-5",
+      "--chart-6",
+      "--focus-offset",
+      "--focus-ring",
+      "--font-body",
+      "--font-display",
+      "--font-sans",
+      "--gap-bullet",
+      "--gap-paragraph",
+      "--indent-level-2",
+      "--leading-normal",
+      "--leading-tight",
+      "--logo-full-h",
+      "--logo-full-w",
+      "--logo-mark",
+      "--motion-ease",
+      "--motion-fast",
+      "--motion-none",
+      "--radius-none",
+      "--radius-sharp",
+      "--shadow-default",
+      "--shadow-none",
+      "--slide-bar-h",
+      "--slide-bar-y",
+      "--slide-body-1",
+      "--slide-body-2",
+      "--slide-body-3",
+      "--slide-body-h",
+      "--slide-body-y",
+      "--slide-body-y-small",
+      "--slide-caption",
+      "--slide-content-w",
+      "--slide-content-w-wide",
+      "--slide-content-x",
+      "--slide-copyright-y",
+      "--slide-footer",
+      "--slide-footer-baseline-y",
+      "--slide-h",
+      "--slide-margin",
+      "--slide-quote",
+      "--slide-subtitle",
+      "--slide-subtitle-photo",
+      "--slide-table",
+      "--slide-title",
+      "--slide-title-h",
+      "--slide-title-hero",
+      "--slide-title-small",
+      "--slide-title-y",
+      "--slide-title-y-small",
+      "--slide-url",
+      "--slide-w",
+      "--space-1",
+      "--space-10",
+      "--space-2",
+      "--space-3",
+      "--space-4",
+      "--space-5",
+      "--space-6",
+      "--space-7",
+      "--space-8",
+      "--space-9",
+      "--surface-accent",
+      "--surface-bar",
+      "--surface-page",
+      "--surface-tint",
+      "--surface-tint-strong",
+      "--text-2xl",
+      "--text-3xl",
+      "--text-body",
+      "--text-heading",
+      "--text-inverse",
+      "--text-lg",
+      "--text-link",
+      "--text-link-hover",
+      "--text-md",
+      "--text-muted",
+      "--text-sm",
+      "--text-xl",
+      "--text-xs",
+      "--tracking-normal",
+      "--tuw-black",
+      "--tuw-blue",
+      "--tuw-blue-10",
+      "--tuw-blue-40",
+      "--tuw-blue-60",
+      "--tuw-blue-band",
+      "--tuw-blue-grey",
+      "--tuw-green-1",
+      "--tuw-grey",
+      "--tuw-magenta-1",
+      "--tuw-white",
+      "--weight-bold",
+      "--weight-regular"
+    ],
+    "tokenKinds": {
+      "--tuw-blue": "color",
+      "--tuw-blue-60": "color",
+      "--tuw-blue-40": "color",
+      "--tuw-blue-10": "color",
+      "--tuw-grey": "color",
+      "--tuw-blue-grey": "color",
+      "--tuw-black": "color",
+      "--tuw-white": "color",
+      "--tuw-green-1": "color",
+      "--tuw-magenta-1": "color",
+      "--tuw-blue-band": "color",
+      "--text-body": "font",
+      "--text-heading": "font",
+      "--text-muted": "font",
+      "--text-inverse": "font",
+      "--text-link": "font",
+      "--text-link-hover": "font",
+      "--surface-page": "color",
+      "--surface-accent": "color",
+      "--surface-tint": "color",
+      "--surface-tint-strong": "color",
+      "--surface-bar": "color",
+      "--border-default": "color",
+      "--border-subtle": "color",
+      "--bullet-color": "color",
+      "--chart-1": "color",
+      "--chart-2": "color",
+      "--chart-3": "color",
+      "--chart-4": "color",
+      "--chart-5": "color",
+      "--chart-6": "color",
+      "--font-sans": "font",
+      "--font-body": "font",
+      "--font-display": "font",
+      "--weight-regular": "font",
+      "--weight-bold": "font",
+      "--leading-tight": "font",
+      "--leading-normal": "font",
+      "--slide-title-hero": "spacing",
+      "--slide-title": "spacing",
+      "--slide-title-small": "spacing",
+      "--slide-quote": "spacing",
+      "--slide-subtitle": "spacing",
+      "--slide-subtitle-photo": "spacing",
+      "--slide-body-1": "spacing",
+      "--slide-body-2": "spacing",
+      "--slide-body-3": "spacing",
+      "--slide-table": "spacing",
+      "--slide-footer": "spacing",
+      "--slide-url": "spacing",
+      "--slide-caption": "spacing",
+      "--text-3xl": "font",
+      "--text-2xl": "font",
+      "--text-xl": "font",
+      "--text-lg": "font",
+      "--text-md": "font",
+      "--text-sm": "font",
+      "--text-xs": "font",
+      "--tracking-normal": "font",
+      "--space-1": "spacing",
+      "--space-2": "spacing",
+      "--space-3": "spacing",
+      "--space-4": "spacing",
+      "--space-5": "spacing",
+      "--space-6": "spacing",
+      "--space-7": "spacing",
+      "--space-8": "spacing",
+      "--space-9": "spacing",
+      "--space-10": "spacing",
+      "--gap-bullet": "spacing",
+      "--gap-paragraph": "spacing",
+      "--indent-level-2": "spacing",
+      "--slide-w": "spacing",
+      "--slide-h": "spacing",
+      "--slide-margin": "spacing",
+      "--slide-content-x": "spacing",
+      "--slide-content-w": "spacing",
+      "--slide-content-w-wide": "spacing",
+      "--slide-title-y": "spacing",
+      "--slide-title-y-small": "spacing",
+      "--slide-title-h": "spacing",
+      "--slide-body-y": "spacing",
+      "--slide-body-y-small": "spacing",
+      "--slide-body-h": "spacing",
+      "--slide-copyright-y": "spacing",
+      "--slide-bar-y": "spacing",
+      "--slide-bar-h": "spacing",
+      "--slide-footer-baseline-y": "spacing",
+      "--logo-full-w": "spacing",
+      "--logo-full-h": "spacing",
+      "--logo-mark": "spacing",
+      "--radius-none": "radius",
+      "--radius-sharp": "radius",
+      "--shadow-none": "shadow",
+      "--shadow-default": "shadow",
+      "--border-width": "spacing",
+      "--border-width-rule": "spacing",
+      "--focus-ring": "color",
+      "--focus-offset": "spacing",
+      "--motion-none": "other",
+      "--motion-fast": "other",
+      "--motion-ease": "other"
+    },
+    "fontFamilies": []
+  }
+}

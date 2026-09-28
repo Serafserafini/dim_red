@@ -1,0 +1,50 @@
+/* TU Wien colour system — values taken verbatim from the "TU Wien" theme colour
+   scheme embedded in TUW_Musterpraesentation.potx (ppt/theme/theme1.xml) and from
+   the custom colours documented in TUW_Praesentation_Manual.potx. */
+:root{
+  /* --- Base palette (Office theme scheme) --- */
+  --tuw-blue:#006699;        /* accent1 / dk2 / tx2 — the TU Wien primary */
+  --tuw-blue-60:#72ADD5;     /* accent2 */
+  --tuw-blue-40:#A6D5EC;     /* accent3 */
+  --tuw-blue-10:#DFF2FD;     /* accent4 / lt2 */
+  --tuw-grey:#646363;        /* accent5 */
+  --tuw-blue-grey:#5485AB;   /* accent6 */
+  --tuw-black:#000000;       /* dk1 / tx1 */
+  --tuw-white:#FFFFFF;       /* lt1 / bg1 */
+
+  /* --- Custom colours (alternative TUW design themes) --- */
+  --tuw-green-1:#007E71;     /* "TU Grün" — 4.97:1 on white */
+  --tuw-magenta-1:#BA4682;   /* "TU Magenta" — 4.9:1 on white */
+
+  /* --- Derived --- */
+  --tuw-blue-band:rgba(0,102,153,.4); /* table banding: accent1 @ 40% */
+
+  /* --- Semantic aliases --- */
+  --text-body:var(--tuw-black);
+  --text-heading:var(--tuw-blue);
+  --text-muted:var(--tuw-grey);
+  --text-inverse:var(--tuw-white);
+  --text-link:var(--tuw-blue);
+  --text-link-hover:var(--tuw-black);
+
+  --surface-page:var(--tuw-white);
+  --surface-accent:var(--tuw-blue);
+  --surface-tint:var(--tuw-blue-10);
+  --surface-tint-strong:var(--tuw-blue-40);
+  --surface-bar:var(--tuw-blue);
+
+  --border-default:var(--tuw-blue);
+  --border-subtle:var(--tuw-blue-40);
+  --bullet-color:var(--tuw-blue);
+
+  /* Categorical / chart sequence: theme accents in cycle order */
+  --chart-1:var(--tuw-blue);
+  --chart-2:var(--tuw-blue-60);
+  --chart-3:var(--tuw-blue-40);
+  --chart-4:var(--tuw-blue-10);
+  --chart-5:var(--tuw-grey);
+  --chart-6:var(--tuw-blue-grey);
+}
+/* Alternative design themes. Apply on any container: <div data-tuw-theme="green"> */
+[data-tuw-theme="green"]{--tuw-blue:#007E71;--surface-accent:#007E71;--text-heading:#007E71;--border-default:#007E71;--bullet-color:#007E71;}
+[data-tuw-theme="magenta"]{--tuw-blue:#BA4682;--surface-accent:#BA4682;--text-heading:#BA4682;--border-default:#BA4682;--bullet-color:#BA4682;}

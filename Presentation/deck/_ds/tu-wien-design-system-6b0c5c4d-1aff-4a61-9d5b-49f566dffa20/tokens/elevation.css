@@ -1,0 +1,15 @@
+/* The TU Wien Office templates are flat: no drop shadows, no rounded corners,
+   no gradients. These tokens exist so consumers stay flat by default. */
+:root{
+  --radius-none:0;
+  --radius-sharp:0;      /* brand default for every surface */
+  --shadow-none:none;
+  --shadow-default:none;
+  --border-width:1px;
+  --border-width-rule:2px;  /* emphasis rules, e.g. table total row */
+  --focus-ring:2px solid var(--tuw-blue);
+  --focus-offset:2px;
+  --motion-none:none; /* @kind other */    /* the templates specify no slide transitions */
+  --motion-fast:120ms; /* @kind other */
+  --motion-ease:linear; /* @kind other */
+}
