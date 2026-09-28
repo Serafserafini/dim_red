@@ -1548,7 +1548,7 @@ class HierarchicalSupconTailConfig:
     sg_lambda_norm: float = 0.0
     sg_projection_dim: int = 128
     sg_projection_hidden_dim: Optional[List[int]] = None
-    sg_classifier_hidden_dim: int = 32
+    sg_classifier_hidden_dim: Union[int, List[int]] = 32
     sg_visualization_hidden_dim: List[int] = field(default_factory=lambda: [64, 32])
     sg_visualization_hidden_dim_by_family: Dict[str, List[int]] = field(
         default_factory=lambda: {
@@ -1603,10 +1603,15 @@ class HierarchicalSupconTailConfig:
                 "hierarchical_supcon.sg_projection_hidden_dim, if set, must be "
                 "a non-empty list of positive integers"
             )
-        if self.sg_classifier_hidden_dim <= 0:
+        _sg_clf_dims = (
+            (self.sg_classifier_hidden_dim,)
+            if isinstance(self.sg_classifier_hidden_dim, int)
+            else self.sg_classifier_hidden_dim
+        )
+        if not _sg_clf_dims or any(d <= 0 for d in _sg_clf_dims):
             raise ValueError(
                 "hierarchical_supcon.sg_classifier_hidden_dim must be a "
-                "positive integer"
+                "positive integer, or a non-empty list of positive integers"
             )
         if not self.sg_visualization_hidden_dim or any(
             d <= 0 for d in self.sg_visualization_hidden_dim

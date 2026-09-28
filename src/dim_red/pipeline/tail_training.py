@@ -56,6 +56,7 @@ hierarchical expert simply reuses that same "family" head slot to mean
 from __future__ import annotations
 
 import csv
+import dataclasses
 import logging
 from collections import Counter
 from pathlib import Path
@@ -786,6 +787,14 @@ def _train_hierarchical_supcon(
         early_stopping_min_delta=config.train.early_stopping.min_delta,
         early_stopping_restore_best=config.train.early_stopping.restore_best_weights,
     )
+    # The per-family SG visualizer's own contrastive loss settings -- same
+    # training mechanics as tail_train_config, only tau/distance differ (the
+    # classifiers above never read tau/distance, so they keep the base config).
+    sg_viz_train_config = dataclasses.replace(
+        tail_train_config,
+        tau=hs.sg_visualization_tau,
+        distance=hs.sg_visualization_distance,
+    )
     sg_body_train_config = SupConBodyTrainConfig(
         epochs=config.train.epochs,
         batch_size=config.train.batch_size,
@@ -1022,7 +1031,7 @@ def _train_hierarchical_supcon(
             sg_viz,
             r_sg_family_all[train_pos],
             r_sg_family_all[val_pos],
-            tail_train_config,
+            sg_viz_train_config,
             train_spacegroup_ids=local_sg_ids_family[train_pos],
             val_spacegroup_ids=local_sg_ids_family[val_pos],
             lambda_family=0.0,
@@ -1552,7 +1561,7 @@ def train_tail(config: TailTrainConfig) -> Path:
                     seed=config.seed,
                 )
                 logger.info(
-                    "Training classification tail: mode=%s head_hidden_dim=%d epochs=%d "
+                    "Training classification tail: mode=%s head_hidden_dim=%s epochs=%d "
                     "batch_size=%d device=%s optimizer=%s early_stopping=%s",
                     mode,
                     config.classification.head_hidden_dim,

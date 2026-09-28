@@ -746,6 +746,85 @@ def test_train_tail_hierarchical_supcon_writes_expected_artifacts(tmp_path):
     )
 
 
+def test_train_tail_hierarchical_supcon_passes_sg_visualization_tau_and_distance(
+    tmp_path,
+):
+    # Regression: sg_visualization_tau/distance used to be declared but never
+    # read, so the per-family SG visualizer always trained at
+    # SupConTailTrainConfig's defaults (tau=0.1, euclidean).
+    from dim_red.pipeline import tail_training as tail_training_module
+
+    run_dir = _train_supcon_run(tmp_path)
+    config = TailTrainConfig(
+        run_dir=str(run_dir),
+        tail_kind="hierarchical_supcon",
+        hierarchical_supcon=HierarchicalSupconTailConfig(
+            head_hidden_dim=8,
+            min_samples_per_expert=5,
+            sg_encoder_hidden_dim=[8, 4],
+            sg_latent_dim=3,
+            sg_classifier_hidden_dim=4,
+            sg_visualization_hidden_dim=[4, 2],
+            sg_visualization_hidden_dim_by_family={},
+            sg_visualization_tau=0.37,
+            sg_visualization_distance="cosine",
+        ),
+        train=TailTrainSettings(epochs=1, batch_size=4),
+    )
+
+    real_train_viz = tail_training_module.train_visualization_tail
+    real_train_clf = tail_training_module.train_classification_tail
+    viz_configs = []
+    clf_configs = []
+
+    def spy_train_viz(tail, r_train, r_val, train_config, **kwargs):
+        viz_configs.append(train_config)
+        return real_train_viz(tail, r_train, r_val, train_config, **kwargs)
+
+    def spy_train_clf(tail, r_train, r_val, train_config, **kwargs):
+        clf_configs.append(train_config)
+        return real_train_clf(tail, r_train, r_val, train_config, **kwargs)
+
+    with (
+        patch(
+            "dim_red.pipeline.tail_training.compute_soap",
+            side_effect=_fake_compute_soap(seed=1, n_features=5),
+        ),
+        patch(
+            "dim_red.pipeline.tail_training.train_visualization_tail",
+            side_effect=spy_train_viz,
+        ),
+        patch(
+            "dim_red.pipeline.tail_training.train_classification_tail",
+            side_effect=spy_train_clf,
+        ),
+    ):
+        train_tail(config)
+
+    assert len(viz_configs) == 2  # one SG visualizer per family (Cubic, Hexagonal)
+    for viz_config in viz_configs:
+        assert viz_config.tau == pytest.approx(0.37)
+        assert viz_config.distance == "cosine"
+        # Shared training mechanics are unchanged.
+        assert viz_config.epochs == 1
+        assert viz_config.batch_size == 4
+    # The classifiers (family stage + per-family SG) keep the base config.
+    assert len(clf_configs) == 3
+    for clf_config in clf_configs:
+        assert clf_config.epochs == 1
+
+
+def test_hierarchical_supcon_sg_visualization_defaults_match_tail_train_config():
+    # Keeping the fields' defaults equal to SupConTailTrainConfig's own means
+    # configs that don't set them behave exactly as before the fix above.
+    from dim_red.supcon.tail_training import TailTrainConfig as SupConTailTrainConfig
+
+    hs = HierarchicalSupconTailConfig()
+    base = SupConTailTrainConfig()
+    assert hs.sg_visualization_tau == base.tau
+    assert hs.sg_visualization_distance == base.distance
+
+
 def test_train_tail_hierarchical_supcon_falls_back_for_low_sample_families(tmp_path):
     run_dir = _train_supcon_run(tmp_path)
     config = TailTrainConfig(
