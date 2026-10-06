@@ -24,7 +24,6 @@ a projection tail's.
 """
 
 import logging
-from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import jax
@@ -34,59 +33,23 @@ import optax
 
 from dim_red.supcon.sampling import iter_balanced_batches
 from dim_red.supcon.tails import ClassificationTail, VisualizationTail
-from dim_red.supcon.training import norm_penalty, supcon_loss
+from dim_red.supcon.training import (
+    _BATCHING_STRATEGIES,
+    _DISTANCE_METRICS,
+    TrainConfig,
+    norm_penalty,
+    supcon_loss,
+)
 
 Array = jax.Array
 
 logger = logging.getLogger("dim_red.pipeline")
 
-_BATCHING_STRATEGIES = ("random", "balanced")
-_DISTANCE_METRICS = ("euclidean", "cosine")
-
-
-@dataclass(frozen=True)
-class TailTrainConfig:
-    """Training configuration shared by ``train_classification_tail``/
-    ``train_visualization_tail`` -- same shape/semantics as
-    ``dim_red.supcon.training.TrainConfig``. ``tau``/``distance`` are only
-    meaningful for ``train_visualization_tail``'s SupCon loss;
-    ``train_classification_tail`` ignores them, same treatment other
-    per-model-kind-irrelevant fields get elsewhere in this codebase.
-
-    Attributes:
-        epochs: Number of full passes over the training representations.
-        batch_size: Number of rows per mini-batch.
-        learning_rate: Adam's learning rate.
-        tau: Temperature dividing similarities before the softmax inside
-            ``train_visualization_tail``'s SupCon loss.
-        distance: Which similarity ``train_visualization_tail``'s SupCon
-            loss computes -- ``"euclidean"`` (default) or ``"cosine"``.
-        seed: Seed controlling batch shuffling.
-        device: JAX backend string (for example ``"cpu"`` or ``"gpu"``).
-        early_stopping: If True, stop training once ``val_loss`` hasn't
-            improved by more than ``early_stopping_min_delta`` for
-            ``early_stopping_patience`` consecutive epochs.
-        early_stopping_patience: Consecutive non-improving epochs tolerated
-            before stopping. Ignored unless ``early_stopping`` is True.
-        early_stopping_min_delta: Minimum decrease in ``val_loss`` counted
-            as an improvement. Ignored unless ``early_stopping`` is True.
-        early_stopping_restore_best: If True (default), the returned tail's
-            params are the best-``val_loss`` epoch's rather than
-            necessarily the last epoch trained. Ignored unless
-            ``early_stopping`` is True.
-    """
-
-    epochs: int = 20
-    batch_size: int = 32
-    learning_rate: float = 1e-3
-    tau: float = 0.1
-    distance: str = "euclidean"
-    seed: int = 42
-    device: str = "cpu"
-    early_stopping: bool = False
-    early_stopping_patience: int = 10
-    early_stopping_min_delta: float = 0.0
-    early_stopping_restore_best: bool = True
+# Phase 2 trains with exactly the same loop settings as phase 1 (same fields
+# and defaults), so the config is one class. ``tau``/``distance`` only matter
+# for the SupCon loss (``train_visualization_tail``);
+# ``train_classification_tail`` ignores them.
+TailTrainConfig = TrainConfig
 
 
 def _iter_batches(

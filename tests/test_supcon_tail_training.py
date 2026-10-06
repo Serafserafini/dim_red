@@ -366,3 +366,14 @@ def test_train_visualization_tail_rejects_invalid_distance():
             train_family_ids=family_ids[train_idx],
             val_family_ids=family_ids[val_idx],
         )
+
+
+def test_tail_train_config_is_the_phase1_train_config():
+    import dataclasses
+
+    from dim_red.supcon.training import TrainConfig
+
+    assert TailTrainConfig is TrainConfig
+    replaced = dataclasses.replace(TailTrainConfig(), tau=0.2, epochs=3)
+    assert isinstance(replaced, TrainConfig)
+    assert (replaced.tau, replaced.epochs) == (0.2, 3)

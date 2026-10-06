@@ -74,7 +74,11 @@ _DISTANCE_METRICS = ("euclidean", "cosine")
 
 @dataclass(frozen=True)
 class TrainConfig:
-    """Training configuration for ``SupConEncoder`` optimization.
+    """Training-loop configuration for SupCon, shared by phase 1
+    (``training_first_phase``) and phase 2 (``train_classification_tail``/
+    ``train_visualization_tail`` -- exported there as
+    ``dim_red.supcon.tail_training.TailTrainConfig``). Phase 2's
+    classification tail ignores ``tau``/``distance`` (no SupCon loss).
 
     Deliberately does *not* hold ``lambda_family``/``lambda_spacegroup``
     (unlike ``cgcnn.training.TrainConfig``):

@@ -874,3 +874,14 @@ def test_training_first_phase_mutates_both_body_and_projection_tail_params():
     )
     assert body_changed
     assert tail_changed
+
+
+def test_batching_and_distance_constants_have_a_single_source():
+    from dim_red.pipeline import config
+    from dim_red.supcon import tail_training, training
+
+    assert tail_training._BATCHING_STRATEGIES is training._BATCHING_STRATEGIES
+    assert tail_training._DISTANCE_METRICS is training._DISTANCE_METRICS
+    # pipeline.config must stay importable without jax, so it keeps its own
+    # copy; make sure it can't drift.
+    assert config._BATCHING_STRATEGIES == training._BATCHING_STRATEGIES
