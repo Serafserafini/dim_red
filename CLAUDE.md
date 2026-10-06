@@ -1,7 +1,5 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## Environment
 
 This project must be run inside the conda environment `dmred` (located at `/home/seraftu/miniconda3/envs/dmred`). In a persistent terminal session, run `conda activate dmred` once, verify it's active (`$CONDA_DEFAULT_ENV` should equal `dmred`), then run Python/pip/pytest commands directly without prefixing them with `conda run -n dmred`.
