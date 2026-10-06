@@ -27,6 +27,11 @@ featurization) but replaces SOAP with
 ``dim_red.cgcnn.graph.atoms_list_to_graph_arrays`` and caches a different
 array schema (``_GRAPH_CACHE_ARRAY_KEYS``, keyed by graph hyperparameters
 instead of SOAP ones) -- see ``dim_red.cgcnn``.
+
+All six ``get_or_build_*`` functions are thin wrappers around the single
+``_get_or_build`` sequence, parameterized by a ``_Featurizer`` (SOAP, CGCNN
+graph or MACE) and a ``_StructureSource`` (Materials Project fetch or pyxtal
+generation).
 """
 
 from __future__ import annotations
@@ -36,7 +41,17 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 import numpy as np
 from ase.io import write as write_atoms
@@ -261,85 +276,28 @@ def get_or_build_dataset(
             ``<hash>.extxyz``) live.
         api_key: Materials Project API key (falls back to ``MP_API_KEY``).
         augmentation: Optional ``dim_red.augmentation.AugmentationConfig``
-            (thermal-noise-style jitter and/or vacancy removal), applied to
-            each crystal system's fetched structures before they're added to
-            the dataset. ``None`` (default) disables augmentation.
+            applied to each crystal system's fetched structures. ``None``
+            (default) disables augmentation.
 
     Returns:
         ``(X_std, labels, material_ids, spacegroups, structures_path,
-        feature_mean, feature_std)`` where ``X_std`` has shape
+        feature_mean, feature_std)``: ``X_std`` has shape
         ``(n_samples, n_features)``, ``spacegroups`` holds the MP spacegroup
-        number (1-230) per structure (or ``-1`` when unavailable),
-        ``structures_path`` is the cached extended-XYZ file holding the exact
-        fetched ``Atoms`` (same order as the other arrays), and
-        ``feature_mean``/``feature_std`` are the per-feature standardization
-        statistics ``X_std`` was derived from (``dim_red.utils.fit_standardization``
-        on the raw SOAP matrix) -- cached alongside ``X_std`` so a later
-        ``dim_red.pipeline.single_run.run_single`` call can save them into its
-        own ``embeddings.npz`` without recomputing SOAP, see
-        ``dim_red.pipeline.inference.load_trained_run``.
+        number (``-1`` when unavailable), ``structures_path`` is the cached
+        extended-XYZ file with the exact ``Atoms`` (same order), and
+        ``feature_mean``/``feature_std`` are the standardization statistics
+        ``X_std`` was derived from, cached so
+        ``dim_red.pipeline.inference.load_trained_run`` never needs to
+        recompute SOAP.
     """
-    cache_dir = Path(cache_dir)
-    cache_dir.mkdir(parents=True, exist_ok=True)
     key = _cache_key(crystal_systems, limit_per_system, soap_kwargs, augmentation)
-    cache_path = cache_dir / f"{key}.npz"
-    structures_path = _structures_cache_path(cache_path)
-
-    cached = _load_cached_dataset(cache_path)
-    if cached is not None:
-        logger.info(
-            "Dataset cache hit (%s) for crystal_systems=%s", key, list(crystal_systems)
-        )
-        return (*cached[:4], structures_path, *cached[4:])
-
-    logger.info(
-        "Dataset cache miss (%s); fetching structures for crystal_systems=%s",
+    return _get_or_build(
+        _soap_featurizer(),
+        _fetch_source(crystal_systems, limit_per_system, api_key),
         key,
-        list(crystal_systems),
-    )
-
-    all_atoms = []
-    labels: List[str] = []
-    for cs in crystal_systems:
-        atoms_list = fetch_structures_by_crystal_system(
-            crystal_system=cs, api_key=api_key, limit=limit_per_system
-        )
-        n_fetched = len(atoms_list)
-        if augmentation is not None:
-            atoms_list = augment_structures(atoms_list, augmentation)
-            logger.info(
-                "Fetched %d structures for crystal_system=%s (%d after augmentation)",
-                n_fetched,
-                cs,
-                len(atoms_list),
-            )
-        else:
-            logger.info("Fetched %d structures for crystal_system=%s", n_fetched, cs)
-        all_atoms.extend(atoms_list)
-        labels.extend([cs.capitalize()] * len(atoms_list))
-
-    if not all_atoms:
-        raise ValueError("No structures fetched for the requested crystal systems.")
-
-    material_ids = [a.info.get("material_id", "unknown") for a in all_atoms]
-    spacegroups = [a.info.get("spacegroup", _UNKNOWN_SPACEGROUP) for a in all_atoms]
-
-    _save_structures_cache(cache_path, all_atoms)
-    X_std, feature_mean, feature_std = _compute_soap_and_standardize(
-        all_atoms, soap_kwargs
-    )
-    _save_dataset_cache(
-        cache_path, X_std, labels, material_ids, spacegroups, feature_mean, feature_std
-    )
-
-    return (
-        X_std,
-        labels,
-        material_ids,
-        spacegroups,
-        structures_path,
-        feature_mean,
-        feature_std,
+        soap_kwargs,
+        cache_dir,
+        augmentation,
     )
 
 
@@ -350,81 +308,86 @@ def get_or_build_pyxtal_dataset(
     cache_dir: Union[str, Path],
     augmentation: Optional[AugmentationConfig] = None,
 ) -> Tuple[np.ndarray, List[str], List[str], List[int], Path, np.ndarray, np.ndarray]:
-    """Generate a synthetic structure database with ``dim_red.generate``,
-    compute a global SOAP descriptor per structure, and standardize the
-    result -- reusing a cached copy on disk when available. The ``pyxtal``
-    (and ``jax``-free) counterpart to ``get_or_build_dataset``.
+    """The ``pyxtal`` counterpart to ``get_or_build_dataset``: generate a
+    synthetic structure database with ``dim_red.generate``, compute and
+    standardize SOAP descriptors, reusing a cached copy when available.
 
     Args:
         pyxtal_config: Generation settings (``dim_red.pipeline.config.PyxtalConfig``).
-        seed: The *effective* seed to generate with -- reused as
-            ``dim_red.generate.GenerationConfig.seed``, taking priority over
-            (and ignoring) ``pyxtal_config.seed``; resolving
-            ``pyxtal_config.seed or RunConfig.seed`` is the caller's job
-            (``build_dataset_for_run`` does this).
+        seed: The *effective* seed to generate with, taking priority over
+            ``pyxtal_config.seed`` (resolving ``pyxtal_config.seed or
+            RunConfig.seed`` is the caller's job, see ``build_dataset_for_run``).
         soap_kwargs: Keyword arguments for ``compute_soap`` minus ``average``.
-        cache_dir: Directory where cached datasets (``<hash>.npz``/
-            ``<hash>.extxyz``) live.
+        cache_dir: Directory where cached datasets live.
         augmentation: Optional ``dim_red.augmentation.AugmentationConfig``
-            (thermal-noise-style jitter and/or vacancy removal), applied to
-            the generated structures before SOAP. ``None`` (default) disables
-            augmentation.
+            applied to the generated structures before SOAP.
 
     Returns:
-        Same shape as ``get_or_build_dataset``: ``(X_std, labels,
-        material_ids, spacegroups, structures_path, feature_mean,
-        feature_std)``, with ``labels`` holding each structure's crystal
-        family and ``structures_path`` the cached extended-XYZ file holding
-        the exact generated ``Atoms``.
+        Same 7-element shape as ``get_or_build_dataset``, with ``labels``
+        holding each structure's crystal family.
     """
-    # Lazy: dim_red.generate requires pyxtal, not a hard dim_red dependency.
-    from dim_red.generate import GenerationConfig, generate_structures
-
-    cache_dir = Path(cache_dir)
-    cache_dir.mkdir(parents=True, exist_ok=True)
     key = _pyxtal_cache_key(pyxtal_config, seed, soap_kwargs, augmentation)
-    cache_path = cache_dir / f"{key}.npz"
-    structures_path = _structures_cache_path(cache_path)
-
-    cached = _load_cached_dataset(cache_path)
-    if cached is not None:
-        logger.info("Dataset cache hit (%s) for pyxtal generation", key)
-        return (*cached[:4], structures_path, *cached[4:])
-
-    logger.info("Dataset cache miss (%s); generating structures with pyxtal", key)
-
-    generation_kwargs = dataclasses.asdict(pyxtal_config)
-    generation_kwargs.pop("seed", None)  # the resolved "seed" arg wins
-    if generation_kwargs.get("candidate_num_ions") is None:
-        generation_kwargs.pop("candidate_num_ions")
-    all_atoms = generate_structures(GenerationConfig(seed=seed, **generation_kwargs))
-
-    if not all_atoms:
-        raise ValueError(
-            "pyxtal generated no structures for the requested configuration."
-        )
-
-    n_generated = len(all_atoms)
-    if augmentation is not None:
-        all_atoms = augment_structures(all_atoms, augmentation)
-        logger.info(
-            "Generated %d structures with pyxtal (%d after augmentation)",
-            n_generated,
-            len(all_atoms),
-        )
-
-    labels = [a.info["family"] for a in all_atoms]
-    material_ids = [a.info["material_id"] for a in all_atoms]
-    spacegroups = [a.info["spacegroup"] for a in all_atoms]
-
-    _save_structures_cache(cache_path, all_atoms)
-    X_std, feature_mean, feature_std = _compute_soap_and_standardize(
-        all_atoms, soap_kwargs
+    return _get_or_build(
+        _soap_featurizer(),
+        _pyxtal_source(pyxtal_config, seed),
+        key,
+        soap_kwargs,
+        cache_dir,
+        augmentation,
     )
+
+
+# --- Shared get-or-build sequence ------------------------------------------
+#
+# Every ``get_or_build_*`` function below follows the same steps (compute the
+# cache key, try to load, otherwise obtain structures, augment, cache the
+# structures, featurize, cache the arrays, return); only the featurizer and
+# the structure source differ. Both are small objects looked up through module
+# globals at call time (the lambdas), so tests patching e.g.
+# ``dataset_cache.compute_soap`` or ``_compute_mace_and_standardize`` keep
+# working.
+
+
+@dataclasses.dataclass(frozen=True)
+class _Featurizer:
+    """How one feature kind (SOAP / CGCNN graph / MACE) is computed, cached
+    and returned.
+
+    Attributes:
+        log_prefix: Start of the cache hit/miss log lines (e.g. ``"Dataset"``).
+        load: ``cache_path -> (features, labels, material_ids, spacegroups)``
+            or ``None`` on a cache miss/stale schema. ``features`` is opaque
+            to the shared sequence.
+        compute: ``(atoms_list, kwargs) -> features``.
+        save: ``(cache_path, features, labels, material_ids, spacegroups)``.
+        result: ``(features, labels, material_ids, spacegroups,
+            structures_path) -> the tuple the public function returns``.
+    """
+
+    log_prefix: str
+    load: Callable[[Path], Optional[tuple]]
+    compute: Callable[[list, Dict[str, Any]], Any]
+    save: Callable[..., None]
+    result: Callable[..., tuple]
+
+
+def _soap_load(cache_path: Path) -> Optional[tuple]:
+    cached = _load_cached_dataset(cache_path)
+    if cached is None:
+        return None
+    X, labels, material_ids, spacegroups, mean, std = cached
+    return (X, mean, std), labels, material_ids, spacegroups
+
+
+def _soap_save(cache_path, features, labels, material_ids, spacegroups) -> None:
+    X_std, feature_mean, feature_std = features
     _save_dataset_cache(
         cache_path, X_std, labels, material_ids, spacegroups, feature_mean, feature_std
     )
 
+
+def _soap_result(features, labels, material_ids, spacegroups, structures_path):
+    X_std, feature_mean, feature_std = features
     return (
         X_std,
         labels,
@@ -433,6 +396,183 @@ def get_or_build_pyxtal_dataset(
         structures_path,
         feature_mean,
         feature_std,
+    )
+
+
+def _graph_load(cache_path: Path) -> Optional[tuple]:
+    cached = _load_cached_graph_dataset(cache_path)
+    if cached is None:
+        return None
+    graph_arrays, labels, material_ids, spacegroups = cached
+    return graph_arrays, labels, material_ids, spacegroups
+
+
+def _graph_save(cache_path, features, labels, material_ids, spacegroups) -> None:
+    _save_graph_dataset_cache(cache_path, *features, labels, material_ids, spacegroups)
+
+
+def _graph_result(features, labels, material_ids, spacegroups, structures_path):
+    return tuple(features), labels, material_ids, spacegroups, structures_path
+
+
+def _soap_featurizer() -> _Featurizer:
+    return _Featurizer(
+        log_prefix="Dataset",
+        load=_soap_load,
+        compute=lambda atoms, kw: _compute_soap_and_standardize(atoms, kw),
+        save=_soap_save,
+        result=_soap_result,
+    )
+
+
+def _graph_featurizer() -> _Featurizer:
+    return _Featurizer(
+        log_prefix="CGCNN dataset",
+        load=_graph_load,
+        compute=lambda atoms, kw: _compute_graphs(atoms, kw),
+        save=_graph_save,
+        result=_graph_result,
+    )
+
+
+def _mace_featurizer() -> _Featurizer:
+    return _Featurizer(
+        log_prefix="MACE dataset",
+        load=_soap_load,  # same array schema as SOAP
+        compute=lambda atoms, kw: _compute_mace_and_standardize(atoms, kw),
+        save=_soap_save,
+        result=_soap_result,
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class _StructureSource:
+    """Where a dataset's structures come from.
+
+    Attributes:
+        hit_detail: Tail of the cache-hit log line.
+        miss_detail: Tail of the cache-miss log line.
+        produce: ``augmentation -> (atoms_list, labels, material_ids,
+            spacegroups)``, with augmentation already applied.
+    """
+
+    hit_detail: Tuple[str, tuple]
+    miss_detail: Tuple[str, tuple]
+    produce: Callable[[Optional[AugmentationConfig]], tuple]
+
+
+def _fetch_source(
+    crystal_systems: Sequence[str], limit_per_system: int, api_key: Optional[str]
+) -> _StructureSource:
+    def produce(augmentation):
+        all_atoms = []
+        labels: List[str] = []
+        for cs in crystal_systems:
+            atoms_list = fetch_structures_by_crystal_system(
+                crystal_system=cs, api_key=api_key, limit=limit_per_system
+            )
+            n_fetched = len(atoms_list)
+            if augmentation is not None:
+                atoms_list = augment_structures(atoms_list, augmentation)
+                logger.info(
+                    "Fetched %d structures for crystal_system=%s (%d after augmentation)",
+                    n_fetched,
+                    cs,
+                    len(atoms_list),
+                )
+            else:
+                logger.info(
+                    "Fetched %d structures for crystal_system=%s", n_fetched, cs
+                )
+            all_atoms.extend(atoms_list)
+            labels.extend([cs.capitalize()] * len(atoms_list))
+
+        if not all_atoms:
+            raise ValueError("No structures fetched for the requested crystal systems.")
+
+        material_ids = [a.info.get("material_id", "unknown") for a in all_atoms]
+        spacegroups = [a.info.get("spacegroup", _UNKNOWN_SPACEGROUP) for a in all_atoms]
+        return all_atoms, labels, material_ids, spacegroups
+
+    systems = list(crystal_systems)
+    return _StructureSource(
+        hit_detail=("for crystal_systems=%s", (systems,)),
+        miss_detail=("fetching structures for crystal_systems=%s", (systems,)),
+        produce=produce,
+    )
+
+
+def _pyxtal_source(pyxtal_config: "PyxtalConfig", seed: int) -> _StructureSource:
+    def produce(augmentation):
+        # Lazy: dim_red.generate requires pyxtal, not a hard dim_red dependency.
+        from dim_red.generate import GenerationConfig, generate_structures
+
+        generation_kwargs = dataclasses.asdict(pyxtal_config)
+        generation_kwargs.pop("seed", None)  # the resolved "seed" arg wins
+        if generation_kwargs.get("candidate_num_ions") is None:
+            generation_kwargs.pop("candidate_num_ions")
+        all_atoms = generate_structures(
+            GenerationConfig(seed=seed, **generation_kwargs)
+        )
+
+        if not all_atoms:
+            raise ValueError(
+                "pyxtal generated no structures for the requested configuration."
+            )
+
+        n_generated = len(all_atoms)
+        if augmentation is not None:
+            all_atoms = augment_structures(all_atoms, augmentation)
+            logger.info(
+                "Generated %d structures with pyxtal (%d after augmentation)",
+                n_generated,
+                len(all_atoms),
+            )
+
+        labels = [a.info["family"] for a in all_atoms]
+        material_ids = [a.info["material_id"] for a in all_atoms]
+        spacegroups = [a.info["spacegroup"] for a in all_atoms]
+        return all_atoms, labels, material_ids, spacegroups
+
+    return _StructureSource(
+        hit_detail=("for pyxtal generation", ()),
+        miss_detail=("generating structures with pyxtal", ()),
+        produce=produce,
+    )
+
+
+def _get_or_build(
+    featurizer: _Featurizer,
+    source: _StructureSource,
+    key: str,
+    kwargs: Dict[str, Any],
+    cache_dir: Union[str, Path],
+    augmentation: Optional[AugmentationConfig],
+) -> tuple:
+    """The shared cache-or-build sequence behind every ``get_or_build_*``."""
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / f"{key}.npz"
+    structures_path = _structures_cache_path(cache_path)
+
+    cached = featurizer.load(cache_path)
+    if cached is not None:
+        fmt, args = source.hit_detail
+        logger.info(f"{featurizer.log_prefix} cache hit (%s) " + fmt, key, *args)
+        features, labels, material_ids, spacegroups = cached
+        return featurizer.result(
+            features, labels, material_ids, spacegroups, structures_path
+        )
+
+    fmt, args = source.miss_detail
+    logger.info(f"{featurizer.log_prefix} cache miss (%s); " + fmt, key, *args)
+
+    all_atoms, labels, material_ids, spacegroups = source.produce(augmentation)
+    _save_structures_cache(cache_path, all_atoms)
+    features = featurizer.compute(all_atoms, kwargs)
+    featurizer.save(cache_path, features, labels, material_ids, spacegroups)
+    return featurizer.result(
+        features, labels, material_ids, spacegroups, structures_path
     )
 
 
@@ -668,103 +808,36 @@ def get_or_build_cgcnn_dataset(
     List[int],
     Path,
 ]:
-    """Fetch structures and build CGCNN graph arrays -- reusing a cached copy
-    on disk when available. The graph-based counterpart to
-    ``get_or_build_dataset``; the fetch/augment/cache-structures plumbing is
-    reused unchanged (see module docstring), only the featurization step and
-    cache-array schema differ.
+    """The graph-based counterpart to ``get_or_build_dataset``: fetch
+    structures and build CGCNN graph arrays, reusing a cached copy when
+    available.
 
     Args:
-        crystal_systems: Crystal systems to include (as accepted by
-            ``fetch_structures_by_crystal_system``).
+        crystal_systems: Crystal systems to include.
         graph_kwargs: Keyword arguments for ``atoms_list_to_graph_arrays``
             (``dim_red.pipeline.config.GraphConfig.graph_kwargs()``).
         limit_per_system: Max structures fetched per crystal system.
-        cache_dir: Directory where cached datasets (``<hash>.npz``/
-            ``<hash>.extxyz``) live.
+        cache_dir: Directory where cached datasets live.
         api_key: Materials Project API key (falls back to ``MP_API_KEY``).
         augmentation: Optional ``dim_red.augmentation.AugmentationConfig``,
-            applied before graph construction. ``None`` (default) disables it.
+            applied before graph construction.
 
     Returns:
         ``(graph_arrays, labels, material_ids, spacegroups, structures_path)``
-        -- ``graph_arrays`` is the 5-tuple ``(local_species_idx, nbr_idx,
-        nbr_fea, nbr_mask, atom_mask)``. Note: 5 elements, not 7 like
-        ``get_or_build_dataset`` -- no ``feature_mean``/``feature_std`` (not
-        applicable to graph features).
+        where ``graph_arrays`` is the 5-tuple ``(local_species_idx, nbr_idx,
+        nbr_fea, nbr_mask, atom_mask)`` -- 5 elements, not 7: no
+        ``feature_mean``/``feature_std`` for graph features.
     """
-    cache_dir = Path(cache_dir)
-    cache_dir.mkdir(parents=True, exist_ok=True)
     key = _graph_cache_key(
         crystal_systems, limit_per_system, graph_kwargs, augmentation
     )
-    cache_path = cache_dir / f"{key}.npz"
-    structures_path = _structures_cache_path(cache_path)
-
-    cached = _load_cached_graph_dataset(cache_path)
-    if cached is not None:
-        logger.info(
-            "CGCNN dataset cache hit (%s) for crystal_systems=%s",
-            key,
-            list(crystal_systems),
-        )
-        graph_arrays, labels, material_ids, spacegroups = cached
-        return graph_arrays, labels, material_ids, spacegroups, structures_path
-
-    logger.info(
-        "CGCNN dataset cache miss (%s); fetching structures for crystal_systems=%s",
+    return _get_or_build(
+        _graph_featurizer(),
+        _fetch_source(crystal_systems, limit_per_system, api_key),
         key,
-        list(crystal_systems),
-    )
-
-    all_atoms = []
-    labels: List[str] = []
-    for cs in crystal_systems:
-        atoms_list = fetch_structures_by_crystal_system(
-            crystal_system=cs, api_key=api_key, limit=limit_per_system
-        )
-        n_fetched = len(atoms_list)
-        if augmentation is not None:
-            atoms_list = augment_structures(atoms_list, augmentation)
-            logger.info(
-                "Fetched %d structures for crystal_system=%s (%d after augmentation)",
-                n_fetched,
-                cs,
-                len(atoms_list),
-            )
-        else:
-            logger.info("Fetched %d structures for crystal_system=%s", n_fetched, cs)
-        all_atoms.extend(atoms_list)
-        labels.extend([cs.capitalize()] * len(atoms_list))
-
-    if not all_atoms:
-        raise ValueError("No structures fetched for the requested crystal systems.")
-
-    material_ids = [a.info.get("material_id", "unknown") for a in all_atoms]
-    spacegroups = [a.info.get("spacegroup", _UNKNOWN_SPACEGROUP) for a in all_atoms]
-
-    _save_structures_cache(cache_path, all_atoms)
-    local_species_idx, nbr_idx, nbr_fea, nbr_mask, atom_mask = _compute_graphs(
-        all_atoms, graph_kwargs
-    )
-    _save_graph_dataset_cache(
-        cache_path,
-        local_species_idx,
-        nbr_idx,
-        nbr_fea,
-        nbr_mask,
-        atom_mask,
-        labels,
-        material_ids,
-        spacegroups,
-    )
-
-    return (
-        (local_species_idx, nbr_idx, nbr_fea, nbr_mask, atom_mask),
-        labels,
-        material_ids,
-        spacegroups,
-        structures_path,
+        graph_kwargs,
+        cache_dir,
+        augmentation,
     )
 
 
@@ -781,90 +854,19 @@ def get_or_build_pyxtal_cgcnn_dataset(
     List[int],
     Path,
 ]:
-    """Generate a synthetic structure database with ``dim_red.generate`` and
-    build CGCNN graph arrays -- reusing a cached copy on disk when
-    available. The graph-based, ``pyxtal`` counterpart to
-    ``get_or_build_pyxtal_dataset``.
-
-    Args:
-        pyxtal_config: Generation settings (``dim_red.pipeline.config.PyxtalConfig``).
-        seed: The *effective* seed to generate with -- see
-            ``get_or_build_pyxtal_dataset``'s ``seed`` docs; resolving
-            ``pyxtal_config.seed or RunConfig.seed`` is the caller's job
-            (``build_graph_dataset_for_run`` does this).
-        graph_kwargs: Keyword arguments for ``atoms_list_to_graph_arrays``.
-        cache_dir: Directory where cached datasets (``<hash>.npz``/
-            ``<hash>.extxyz``) live.
-        augmentation: Optional ``dim_red.augmentation.AugmentationConfig``,
-            applied before graph construction. ``None`` (default) disables it.
-
-    Returns:
-        Same shape as ``get_or_build_cgcnn_dataset``: ``(graph_arrays,
-        labels, material_ids, spacegroups, structures_path)``.
+    """The ``pyxtal`` counterpart to ``get_or_build_cgcnn_dataset``; same
+    5-element return, with ``labels`` holding each structure's crystal
+    family. ``seed`` is the *effective* generation seed (see
+    ``get_or_build_pyxtal_dataset``).
     """
-    # Lazy: dim_red.generate requires pyxtal, not a hard dim_red dependency.
-    from dim_red.generate import GenerationConfig, generate_structures
-
-    cache_dir = Path(cache_dir)
-    cache_dir.mkdir(parents=True, exist_ok=True)
     key = _pyxtal_graph_cache_key(pyxtal_config, seed, graph_kwargs, augmentation)
-    cache_path = cache_dir / f"{key}.npz"
-    structures_path = _structures_cache_path(cache_path)
-
-    cached = _load_cached_graph_dataset(cache_path)
-    if cached is not None:
-        logger.info("CGCNN dataset cache hit (%s) for pyxtal generation", key)
-        graph_arrays, labels, material_ids, spacegroups = cached
-        return graph_arrays, labels, material_ids, spacegroups, structures_path
-
-    logger.info("CGCNN dataset cache miss (%s); generating structures with pyxtal", key)
-
-    generation_kwargs = dataclasses.asdict(pyxtal_config)
-    generation_kwargs.pop("seed", None)  # the resolved "seed" arg wins
-    if generation_kwargs.get("candidate_num_ions") is None:
-        generation_kwargs.pop("candidate_num_ions")
-    all_atoms = generate_structures(GenerationConfig(seed=seed, **generation_kwargs))
-
-    if not all_atoms:
-        raise ValueError(
-            "pyxtal generated no structures for the requested configuration."
-        )
-
-    n_generated = len(all_atoms)
-    if augmentation is not None:
-        all_atoms = augment_structures(all_atoms, augmentation)
-        logger.info(
-            "Generated %d structures with pyxtal (%d after augmentation)",
-            n_generated,
-            len(all_atoms),
-        )
-
-    labels = [a.info["family"] for a in all_atoms]
-    material_ids = [a.info["material_id"] for a in all_atoms]
-    spacegroups = [a.info["spacegroup"] for a in all_atoms]
-
-    _save_structures_cache(cache_path, all_atoms)
-    local_species_idx, nbr_idx, nbr_fea, nbr_mask, atom_mask = _compute_graphs(
-        all_atoms, graph_kwargs
-    )
-    _save_graph_dataset_cache(
-        cache_path,
-        local_species_idx,
-        nbr_idx,
-        nbr_fea,
-        nbr_mask,
-        atom_mask,
-        labels,
-        material_ids,
-        spacegroups,
-    )
-
-    return (
-        (local_species_idx, nbr_idx, nbr_fea, nbr_mask, atom_mask),
-        labels,
-        material_ids,
-        spacegroups,
-        structures_path,
+    return _get_or_build(
+        _graph_featurizer(),
+        _pyxtal_source(pyxtal_config, seed),
+        key,
+        graph_kwargs,
+        cache_dir,
+        augmentation,
     )
 
 
@@ -1002,89 +1004,28 @@ def get_or_build_mace_dataset(
     api_key: Optional[str] = None,
     augmentation: Optional[AugmentationConfig] = None,
 ) -> Tuple[np.ndarray, List[str], List[str], List[int], Path, np.ndarray, np.ndarray]:
-    """Fetch structures and compute frozen MACE embeddings -- reusing a
-    cached copy on disk when available. Same 7-element return shape as
-    ``get_or_build_dataset`` (the SOAP path); only the featurization step
-    (``_compute_mace_and_standardize``) and the cache key prefix differ.
+    """The MACE-embedding counterpart to ``get_or_build_dataset``: fetch
+    structures, embed them with a frozen MACE model and standardize,
+    reusing a cached copy when available. Same 7-element return and cache
+    array schema as the SOAP path; only the featurization differs.
 
     Args:
         crystal_systems: Crystal systems to include.
-        mace_kwargs: Keyword arguments for
-            ``dim_red.mace.model.MaceEncoder`` (``dim_red.pipeline.config.MaceConfig.mace_kwargs()``).
+        mace_kwargs: Keyword arguments for ``dim_red.mace.model.MaceEncoder``
+            (``dim_red.pipeline.config.MaceConfig.mace_kwargs()``).
         limit_per_system: Max structures fetched per crystal system.
-        cache_dir: Directory where cached datasets (``<hash>.npz``/
-            ``<hash>.extxyz``) live.
+        cache_dir: Directory where cached datasets live.
         api_key: Materials Project API key (falls back to ``MP_API_KEY``).
-        augmentation: Optional augmentation, applied before MACE featurization.
-
-    Returns:
-        ``(X_std, labels, material_ids, spacegroups, structures_path,
-        feature_mean, feature_std)`` -- same shape/semantics as
-        ``get_or_build_dataset``.
+        augmentation: Optional ``dim_red.augmentation.AugmentationConfig``.
     """
-    cache_dir = Path(cache_dir)
-    cache_dir.mkdir(parents=True, exist_ok=True)
     key = _mace_cache_key(crystal_systems, limit_per_system, mace_kwargs, augmentation)
-    cache_path = cache_dir / f"{key}.npz"
-    structures_path = _structures_cache_path(cache_path)
-
-    cached = _load_cached_dataset(cache_path)
-    if cached is not None:
-        logger.info(
-            "MACE dataset cache hit (%s) for crystal_systems=%s",
-            key,
-            list(crystal_systems),
-        )
-        return (*cached[:4], structures_path, *cached[4:])
-
-    logger.info(
-        "MACE dataset cache miss (%s); fetching structures for crystal_systems=%s",
+    return _get_or_build(
+        _mace_featurizer(),
+        _fetch_source(crystal_systems, limit_per_system, api_key),
         key,
-        list(crystal_systems),
-    )
-
-    all_atoms = []
-    labels: List[str] = []
-    for cs in crystal_systems:
-        atoms_list = fetch_structures_by_crystal_system(
-            crystal_system=cs, api_key=api_key, limit=limit_per_system
-        )
-        n_fetched = len(atoms_list)
-        if augmentation is not None:
-            atoms_list = augment_structures(atoms_list, augmentation)
-            logger.info(
-                "Fetched %d structures for crystal_system=%s (%d after augmentation)",
-                n_fetched,
-                cs,
-                len(atoms_list),
-            )
-        else:
-            logger.info("Fetched %d structures for crystal_system=%s", n_fetched, cs)
-        all_atoms.extend(atoms_list)
-        labels.extend([cs.capitalize()] * len(atoms_list))
-
-    if not all_atoms:
-        raise ValueError("No structures fetched for the requested crystal systems.")
-
-    material_ids = [a.info.get("material_id", "unknown") for a in all_atoms]
-    spacegroups = [a.info.get("spacegroup", _UNKNOWN_SPACEGROUP) for a in all_atoms]
-
-    _save_structures_cache(cache_path, all_atoms)
-    X_std, feature_mean, feature_std = _compute_mace_and_standardize(
-        all_atoms, mace_kwargs
-    )
-    _save_dataset_cache(
-        cache_path, X_std, labels, material_ids, spacegroups, feature_mean, feature_std
-    )
-
-    return (
-        X_std,
-        labels,
-        material_ids,
-        spacegroups,
-        structures_path,
-        feature_mean,
-        feature_std,
+        mace_kwargs,
+        cache_dir,
+        augmentation,
     )
 
 
@@ -1095,77 +1036,17 @@ def get_or_build_pyxtal_mace_dataset(
     cache_dir: Union[str, Path],
     augmentation: Optional[AugmentationConfig] = None,
 ) -> Tuple[np.ndarray, List[str], List[str], List[int], Path, np.ndarray, np.ndarray]:
-    """Generate a synthetic structure database with ``dim_red.generate`` and
-    compute frozen MACE embeddings -- reusing a cached copy on disk when
-    available. The MACE, ``pyxtal`` counterpart to ``get_or_build_mace_dataset``.
-
-    Args:
-        pyxtal_config: Generation settings.
-        seed: The *effective* seed to generate with -- see
-            ``get_or_build_pyxtal_dataset``'s ``seed`` docs.
-        mace_kwargs: Keyword arguments for ``dim_red.mace.model.MaceEncoder``.
-        cache_dir: Directory where cached datasets live.
-        augmentation: Optional augmentation, applied before MACE featurization.
-
-    Returns:
-        Same shape as ``get_or_build_mace_dataset``.
+    """The ``pyxtal`` counterpart to ``get_or_build_mace_dataset``; ``seed``
+    is the *effective* generation seed (see ``get_or_build_pyxtal_dataset``).
     """
-    # Lazy: dim_red.generate requires pyxtal, not a hard dim_red dependency.
-    from dim_red.generate import GenerationConfig, generate_structures
-
-    cache_dir = Path(cache_dir)
-    cache_dir.mkdir(parents=True, exist_ok=True)
     key = _pyxtal_mace_cache_key(pyxtal_config, seed, mace_kwargs, augmentation)
-    cache_path = cache_dir / f"{key}.npz"
-    structures_path = _structures_cache_path(cache_path)
-
-    cached = _load_cached_dataset(cache_path)
-    if cached is not None:
-        logger.info("MACE dataset cache hit (%s) for pyxtal generation", key)
-        return (*cached[:4], structures_path, *cached[4:])
-
-    logger.info("MACE dataset cache miss (%s); generating structures with pyxtal", key)
-
-    generation_kwargs = dataclasses.asdict(pyxtal_config)
-    generation_kwargs.pop("seed", None)  # the resolved "seed" arg wins
-    if generation_kwargs.get("candidate_num_ions") is None:
-        generation_kwargs.pop("candidate_num_ions")
-    all_atoms = generate_structures(GenerationConfig(seed=seed, **generation_kwargs))
-
-    if not all_atoms:
-        raise ValueError(
-            "pyxtal generated no structures for the requested configuration."
-        )
-
-    n_generated = len(all_atoms)
-    if augmentation is not None:
-        all_atoms = augment_structures(all_atoms, augmentation)
-        logger.info(
-            "Generated %d structures with pyxtal (%d after augmentation)",
-            n_generated,
-            len(all_atoms),
-        )
-
-    labels = [a.info["family"] for a in all_atoms]
-    material_ids = [a.info["material_id"] for a in all_atoms]
-    spacegroups = [a.info["spacegroup"] for a in all_atoms]
-
-    _save_structures_cache(cache_path, all_atoms)
-    X_std, feature_mean, feature_std = _compute_mace_and_standardize(
-        all_atoms, mace_kwargs
-    )
-    _save_dataset_cache(
-        cache_path, X_std, labels, material_ids, spacegroups, feature_mean, feature_std
-    )
-
-    return (
-        X_std,
-        labels,
-        material_ids,
-        spacegroups,
-        structures_path,
-        feature_mean,
-        feature_std,
+    return _get_or_build(
+        _mace_featurizer(),
+        _pyxtal_source(pyxtal_config, seed),
+        key,
+        mace_kwargs,
+        cache_dir,
+        augmentation,
     )
 
 
@@ -1176,7 +1057,7 @@ def build_mace_dataset_for_run(
     ``get_or_build_pyxtal_mace_dataset`` per ``config.data_source`` -- the
     MACE-based counterpart to ``build_dataset_for_run``, called by
     ``dim_red.pipeline.single_run.run_single`` only when
-    ``config.model_kind == "mace"``. Same 7-element SOAP-shaped return as
+    ``config.model_kind == "supcon_mace"``. Same 7-element SOAP-shaped return as
     ``build_dataset_for_run`` (unlike ``build_graph_dataset_for_run``'s
     5-element shape) -- MACE's body is frozen, so there is no per-atom graph
     batch to carry forward for training; the final pooled embedding is all

@@ -306,3 +306,16 @@ def test_mace_cache_with_stale_schema_is_rebuilt(tmp_path):
         np.savez(tmp_path / f"{key}.npz", X=FAKE_X)  # drops the other fields
         dc.get_or_build_pyxtal_mace_dataset(**kwargs)
     assert gen.call_count == 2
+
+
+def test_pyxtal_cache_hit_does_not_import_pyxtal(tmp_path):
+    """A cache hit must not need ``dim_red.generate`` (hence pyxtal)."""
+    import sys
+
+    kwargs = dict(pyxtal_config=PYXTAL, seed=0, soap_kwargs=SOAP_KW, cache_dir=tmp_path)
+    with patch("dim_red.generate.generate_structures", side_effect=lambda cfg: GENERATED()), \
+         patch.object(dc, "_compute_soap_and_standardize", return_value=(FAKE_X, FAKE_MEAN, FAKE_STD)):  # fmt: skip
+        dc.get_or_build_pyxtal_dataset(**kwargs)  # miss: fills the cache
+    with patch.dict(sys.modules, {"dim_red.generate": None}):
+        result = dc.get_or_build_pyxtal_dataset(**kwargs)  # hit: must not import it
+    assert len(result) == 7
