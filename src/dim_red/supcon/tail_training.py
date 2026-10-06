@@ -166,9 +166,9 @@ def train_classification_tail(
         Dictionary with per-epoch losses, one entry per epoch actually run
         (shorter than ``config.epochs`` if ``config.early_stopping`` stopped
         training early): ``"train_loss"``/``"val_loss"`` (the cross-entropy)
-        and ``"train_family_ce"``/``"val_family_ce"`` (the same value under
-        the key older loss histories used, which ``dim_red.pipeline.compare``
-        and the saved ``loss_history.csv`` files read).
+        and ``"train_ce"``/``"val_ce"`` (the same value, kept as separate
+        columns of the saved ``loss_history.csv``; older runs wrote
+        ``train_family_ce``/``val_family_ce`` here).
 
     Raises:
         ValueError: If config values are invalid or no matching JAX device is
@@ -186,8 +186,8 @@ def train_classification_tail(
     history: Dict[str, List[float]] = {
         "train_loss": [],
         "val_loss": [],
-        "train_family_ce": [],
-        "val_family_ce": [],
+        "train_ce": [],
+        "val_ce": [],
     }
 
     tx = _make_optimizer(config.learning_rate)
@@ -226,8 +226,8 @@ def train_classification_tail(
         val_loss = _weighted_mean(val_losses, val_ns)
         history["train_loss"].append(train_loss)
         history["val_loss"].append(val_loss)
-        history["train_family_ce"].append(train_loss)
-        history["val_family_ce"].append(val_loss)
+        history["train_ce"].append(train_loss)
+        history["val_ce"].append(val_loss)
 
         if config.early_stopping:
             if val_loss < best_val_loss - config.early_stopping_min_delta:

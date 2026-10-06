@@ -127,8 +127,8 @@ def test_train_tail_classification_writes_expected_artifacts(tmp_path):
         "epoch",
         "train_loss",
         "val_loss",
-        "train_family_ce",
-        "val_family_ce",
+        "train_ce",
+        "val_ce",
     ]
 
     predictions = np.load(tail_dir / "tail_predictions.npz")

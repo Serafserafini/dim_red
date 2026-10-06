@@ -231,6 +231,8 @@ def run_labels(runs: List[RunData]) -> Dict[Path, str]:
 _LOSS_METRIC_ORDER = [
     "train_loss",
     "val_loss",
+    "train_ce",
+    "val_ce",
     "train_family_ce",
     "val_family_ce",
     "train_spacegroup_ce",

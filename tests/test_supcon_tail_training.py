@@ -60,10 +60,10 @@ def test_train_classification_tail_returns_history():
         val_labels=family_ids[val_idx],
     )
 
-    for key in ("train_loss", "val_loss", "train_family_ce", "val_family_ce"):
+    for key in ("train_loss", "val_loss", "train_ce", "val_ce"):
         assert len(history[key]) == 2
         assert all(math.isfinite(v) for v in history[key])
-    for total, ce in zip(history["train_loss"], history["train_family_ce"]):
+    for total, ce in zip(history["train_loss"], history["train_ce"]):
         assert total == pytest.approx(ce, abs=1e-6)
 
 

@@ -832,3 +832,26 @@ def test_classification_accuracies_from_npz_no_split_key_keeps_pooled_only_behav
     npz = _classification_npz(with_spacegroup=False)
     accs = classification_accuracies_from_npz(npz)
     assert accs == {"family": 3 / 4}
+
+
+def test_available_loss_metrics_orders_new_and_legacy_cross_entropy_keys():
+    from types import SimpleNamespace
+
+    run = SimpleNamespace(
+        loss_history={
+            "val_family_ce": [1.0],
+            "val_ce": [1.0],
+            "train_ce": [1.0],
+            "val_loss": [1.0],
+            "train_family_ce": [1.0],
+            "train_loss": [1.0],
+        }
+    )
+    assert available_loss_metrics([run]) == [
+        "train_loss",
+        "val_loss",
+        "train_ce",
+        "val_ce",
+        "train_family_ce",
+        "val_family_ce",
+    ]
