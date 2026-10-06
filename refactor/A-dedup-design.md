@@ -41,13 +41,14 @@ Design:
 Vincoli:
 - Le funzioni di chiave (`_cache_key`, `_pyxtal_cache_key`, `_graph_cache_key`, `_pyxtal_graph_cache_key`, `_mace_cache_key`, `_pyxtal_mace_cache_key`) **non si modificano**: devono dare le stesse chiavi di oggi, quindi le cache esistenti (incluse le 559 MB di `old_runs/_dataset_cache`) restano valide.
 - Messaggi di log invariati.
-- Atteso: `dataset_cache.py` da ~1200 a ~700 righe.
+- Misurato su un prototipo: `dataset_cache.py` passa da 1203 a ~1080 righe (restano le 6 funzioni di chiave e i docstring). Il guadagno vero è una sola sequenza al posto di sei copie, non il numero di righe.
+- Effetto collaterale voluto: `dim_red.generate` (e quindi `pyxtal`) si importa solo quando si deve davvero generare, non più anche su una cache hit.
 
 ### A4. Rename delle chiavi di history della testa di classificazione
 
 - `train_family_ce`/`val_family_ce` → `train_ce`/`val_ce` (CE = cross-entropy; il nome "family" è un residuo della vecchia testa a due teste e nei tail degli esperti è fuorviante: è la CE sui gruppi spaziali).
-- Si cambia dove viene prodotta (`supcon/tail_training.py`) e nei lettori (`pipeline/compare.py` ~241-244, `pipeline/single_run.py` ~248).
-- I lettori accettano **entrambi i nomi**, così i `loss_history.csv` già salvati restano leggibili; i CSV nuovi usano il nome nuovo.
+- Si cambia dove viene prodotta (`supcon/tail_training.py`) e nei test. Verificato: nessun codice in `src/` legge il `loss_history.csv` dei tail di classificazione (le chiavi `family_ce` di `pipeline/single_run.py` e `pipeline/compare.py` riguardano `cgcnn`). Quindi non servono lettori retrocompatibili: i CSV già salvati restano file validi e leggibili con i nomi vecchi, e quelli nuovi usano `train_ce`/`val_ce`.
+- `pipeline/compare.py:_LOSS_METRIC_ORDER` riceve anche `train_ce`/`val_ce` (le chiavi `family_ce` restano per `cgcnn`), così un confronto che includa i nuovi CSV li ordina bene.
 - **Non** si toccano le chiavi `family_ce`/`spacegroup_ce` di `cgcnn` (significato corretto) né le chiavi `*_supcon`.
 - Si esegue per ultimo, dato che ci sono ~31 occorrenze sparse.
 
@@ -55,7 +56,7 @@ Vincoli:
 
 1. **Test di equivalenza della cache (prima di toccare il codice).** Per ciascuna delle 6 combinazioni, su un dataset piccolo (pyxtal, poche strutture; per fetch con `MPRester` mockato), con il codice attuale: salvare chiave, nomi dei file di cache, array e liste restituite come riferimento. Dopo il refactor: chiavi e file identici, array identici (`np.array_equal`), stesso ordine, stessi tipi di ritorno. MACE solo con un `MaceEncoder` finto (non richiede `mace_jax`).
 2. **Test A2:** le due tuple di `pipeline/config.py` e di `supcon/training.py` sono uguali.
-3. **Test A4:** un `loss_history.csv` con le chiavi vecchie e uno con le chiavi nuove vengono letti allo stesso modo da `compare` e `single_run`.
+3. **Test A4:** la history del tail di classificazione ha le chiavi nuove e `available_loss_metrics` ordina sia le chiavi nuove sia quelle vecchie di `cgcnn`.
 4. **Test esistenti per file toccato:** `test_pipeline_dataset_cache`, `test_supcon_tail_training`, `test_supcon_training`, `test_pipeline_compare`, `test_pipeline_single_run`, `test_pipeline_tail_training`, `test_pipeline_tail_config`, `test_pipeline_config`. Mai la suite intera di iniziativa; nessun rilancio dopo una passata di sola formattazione.
 5. **Parità end-to-end** (come il confronto master contro nuovo già fatto): una run supcon con tail di classificazione e visualizzazione, stesso seed, prima e dopo; devono coincidere dataset, history della fase 1, embedding e tail di visualizzazione. Per la classificazione resta valido il confronto numerico, con le sole chiavi di history rinominate.
 6. **Build docs** `sphinx-build -b html -W --keep-going docs` dopo la modifica.
@@ -63,7 +64,7 @@ Vincoli:
 ## Rischi
 
 - Raggruppare male le funzioni di salvataggio/caricamento (schemi diversi: `_CACHE_ARRAY_KEYS` per SOAP e MACE, uno proprio per il grafo) può rompere la lettura delle cache esistenti → il test di equivalenza viene prima di tutto.
-- Il rename delle chiavi di history ha ~31 punti sparsi → ultimo passo, con il test del lettore retrocompatibile.
+- Il rename delle chiavi di history tocca poche righe in `src/` ma alcuni test → ultimo passo.
 - L'alias `TailTrainConfig = TrainConfig` cambia il nome della classe nei messaggi di errore/`repr` → trascurabile, da verificare nei test che controllano il testo.
 
 ## Ordine di lavoro
