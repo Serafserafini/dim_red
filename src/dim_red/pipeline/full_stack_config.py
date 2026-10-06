@@ -46,6 +46,15 @@ EXPERT_NAMES = (
     "cubic",
 )
 STACK_ORDER = (FAMILY,) + EXPERT_NAMES
+_SYSTEM_SPACEGROUP_RANGES = {
+    "triclinic": (1, 2),
+    "monoclinic": (3, 15),
+    "orthorhombic": (16, 74),
+    "tetragonal": (75, 142),
+    "trigonal": (143, 167),
+    "hexagonal": (168, 194),
+    "cubic": (195, 230),
+}
 
 _MODEL_KINDS = ("supcon", "supcon_mace")
 _DISTANCES = ("euclidean", "cosine")
@@ -142,8 +151,18 @@ def _train_config(settings, tau: float, distance: str, seed: int) -> TrainConfig
 
 def _restrict_pyxtal(name: str, pyxtal: dict) -> dict:
     """An expert generates only its own crystal system. Explicit
-    ``spacegroups`` are left alone (the user chose them)."""
-    if name == FAMILY or pyxtal.get("spacegroups") is not None:
+    ``spacegroups`` are kept but must all belong to that system."""
+    if name == FAMILY:
+        return pyxtal
+    spacegroups = pyxtal.get("spacegroups")
+    if spacegroups is not None:
+        lo, hi = _SYSTEM_SPACEGROUP_RANGES[name]
+        bad = [sg for sg in spacegroups if not lo <= int(sg) <= hi]
+        if bad:
+            raise ValueError(
+                f"stack {name!r}: spacegroups {bad} do not belong to the "
+                f"{name} system ({lo}-{hi})"
+            )
         return pyxtal
     system = name.capitalize()
     families = pyxtal.get("families")
@@ -319,6 +338,17 @@ def parse_stack_spec(name: str, block: Dict[str, Any], run_seed: int) -> StackSp
         )
 
     batching_keys = {"strategy", "P", "K", "S"}
+    body_batching = _batching(
+        name, _sub(name, "batching", block, "batching", batching_keys)
+    )
+    viz_batching = _batching(
+        name, _sub(name, "viz.batching", viz, "batching", batching_keys)
+    )
+    if name != FAMILY and "balanced" in (body_batching.strategy, viz_batching.strategy):
+        raise ValueError(
+            f"stack {name!r}: balanced batching needs spacegroup stratification "
+            "and is only available on the family stack"
+        )
     model = StackConfig(
         encoder_hidden_dim=list(encoder["encoder_hidden_dim"]),
         latent_dim=int(encoder["latent_dim"]),
@@ -336,12 +366,8 @@ def parse_stack_spec(name: str, block: Dict[str, Any], run_seed: int) -> StackSp
         viz_dim=viz_dim,
         lambda_norm=float(contrastive.get("lambda_norm", 0.0)),
         viz_lambda_norm=float(viz.get("lambda_norm", 0.0)),
-        body_batching=_batching(
-            name, _sub(name, "batching", block, "batching", batching_keys)
-        ),
-        viz_batching=_batching(
-            name, _sub(name, "viz.batching", viz, "batching", batching_keys)
-        ),
+        body_batching=body_batching,
+        viz_batching=viz_batching,
         seed=seed,
     )
     return StackSpec(

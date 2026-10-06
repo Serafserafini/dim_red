@@ -47,6 +47,7 @@ def test_full_stack_trains_end_to_end_on_tiny_pyxtal(tmp_path):
 
     assert set(bodies) == {"family", "cubic", "tetragonal"}
     for name, history in bodies.items():
+        assert len(history["train_loss"]) > 0, name
         assert np.isfinite(history["train_loss"]).all(), name
     for name, result in heads.items():
         clf = result["classifier"]["train_loss"]
@@ -55,3 +56,4 @@ def test_full_stack_trains_end_to_end_on_tiny_pyxtal(tmp_path):
             fs.run_dir / "stacks" / name / "heads" / "h" / "predictions.npz"
         )
         np.testing.assert_allclose(preds["probs"].sum(axis=1), 1.0, atol=1e-4)
+        assert preds["probs"].shape[0] == len(preds["label_ids"]), name

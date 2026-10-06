@@ -46,6 +46,32 @@ def _golden_column(name, column):
         return [float(row[column]) for row in csv.DictReader(f)]
 
 
+# Old expert body/viz histories used the spacegroup slot for the SupCon term;
+# SingleStack always calls its contrast label "family".
+_EXPERT_COLUMNS = {
+    "train_spacegroup_supcon": "train_family_supcon",
+    "val_spacegroup_supcon": "val_family_supcon",
+}
+
+
+def _assert_history(actual, csv_name, rename=None, rtol=1e-5, atol=1e-6):
+    """Every column of the golden CSV (bar ``epoch``) equals the matching
+    column of ``actual``, compared by value, over all epochs."""
+    with open(g.GOLDEN_DIR / csv_name) as f:
+        columns = [c for c in csv.DictReader(f).fieldnames if c != "epoch"]
+    assert columns
+    for column in columns:
+        key = (rename or {}).get(column, column)
+        assert key in actual, f"{csv_name}: {column!r} -> {key!r} missing"
+        np.testing.assert_allclose(
+            actual[key],
+            _golden_column(csv_name, column),
+            rtol=rtol,
+            atol=atol,
+            err_msg=f"{csv_name}:{column}",
+        )
+
+
 def _train(epochs, tau, distance):
     return TrainConfig(
         epochs=epochs,
@@ -121,13 +147,11 @@ def test_family_stack_matches_old_pipeline():
         _golden_params("family_projection_params.msgpack"),
         True,
     )
-    np.testing.assert_allclose(
-        body_history["train_loss"],
-        _golden_column("family_body_loss_history.csv", "train_loss"),
-        rtol=1e-6,
-    )
+    _assert_history(body_history, "family_body_loss_history.csv", rtol=1e-6, atol=0.0)
 
-    stack.fit_heads(X[tr], X[va], y[tr], y[va], n_classes=len(classes))
+    heads_history = stack.fit_heads(X[tr], X[va], y[tr], y[va], n_classes=len(classes))
+    _assert_history(heads_history["classifier"], "family_classifier_loss_history.csv")
+    _assert_history(heads_history["visualization"], "family_viz_loss_history.csv")
     _assert_params(
         stack.classifier.params,
         _golden_params("family_classifier_params.msgpack"),
@@ -152,7 +176,14 @@ def test_expert_stack_matches_old_hierarchical_supcon(family):
         assert classes == yaml.safe_load(f)["local_spacegroup_classes"]
 
     stack = SingleStack(X.shape[1], _expert_config())
-    stack.fit_body(X[tr], X[va], y[tr], y[va])
+    body_history = stack.fit_body(X[tr], X[va], y[tr], y[va])
+    _assert_history(
+        body_history,
+        f"expert_{family}_body_loss_history.csv",
+        _EXPERT_COLUMNS,
+        rtol=1e-6,
+        atol=0.0,
+    )
     _assert_params(
         stack.encoder.params,
         _golden_params(f"expert_{family}_body_params.msgpack"),
@@ -164,7 +195,15 @@ def test_expert_stack_matches_old_hierarchical_supcon(family):
         True,
     )
 
-    stack.fit_heads(X[tr], X[va], y[tr], y[va], n_classes=len(classes))
+    heads_history = stack.fit_heads(X[tr], X[va], y[tr], y[va], n_classes=len(classes))
+    _assert_history(
+        heads_history["classifier"], f"expert_{family}_classifier_loss_history.csv"
+    )
+    _assert_history(
+        heads_history["visualization"],
+        f"expert_{family}_viz_loss_history.csv",
+        _EXPERT_COLUMNS,
+    )
     _assert_params(
         stack.classifier.params,
         _golden_params(f"expert_{family}_classifier_params.msgpack"),

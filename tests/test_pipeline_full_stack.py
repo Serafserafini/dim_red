@@ -198,8 +198,10 @@ def test_single_class_dataset_is_rejected(tmp_path, monkeypatch):
         "experts": {"defaults": _block(), "cubic": {}},
     }
     fs = FullStack.create(full_stack_config_from_dict(d), cache_dir=tmp_path / "cache")
-    with pytest.raises(ValueError, match="at least 2"):
+    with pytest.raises(ValueError, match="at least 2") as exc:
         fs.fit_body()
+    assert "cubic" in str(exc.value)
+    assert not (fs.run_dir / "stacks" / "cubic").exists()
 
 
 def test_fit_heads_writes_heads_and_does_not_touch_the_body(tmp_path, patched):
@@ -316,30 +318,177 @@ def test_failed_heads_write_leaves_nothing_and_can_be_retried(
     assert (heads / "h" / "heads.yaml").exists()
 
 
-def test_open_with_config_keeps_trained_specs_and_adds_new_stacks(tmp_path, patched):
+def _config_b(tmp_path, model_kind="supcon", **block_over):
+    block = _block(encoder={"encoder_hidden_dim": [8], "latent_dim": 7})
+    block.update(block_over)
+    return full_stack_config_from_dict(
+        {
+            "name": "other",
+            "seed": 99,
+            "model_kind": model_kind,
+            "output_dir": str(tmp_path / "elsewhere"),
+            "experts": {"defaults": block, "cubic": {}, "tetragonal": {}},
+        }
+    )
+
+
+def _recorded(run_dir):
     from dim_red.pipeline.full_stack_config import full_stack_config_from_resolved_dict
 
+    with open(run_dir / "config.yaml") as f:
+        return full_stack_config_from_resolved_dict(yaml.safe_load(f))
+
+
+def test_open_with_config_uses_it_as_working_config_and_records_new_stacks(
+    tmp_path, patched
+):
     fs = FullStack.create(
         _config(tmp_path, experts=("cubic",)), cache_dir=tmp_path / "cache"
     )
     fs.fit_body(stacks=["cubic"])
 
-    b = _block(encoder={"encoder_hidden_dim": [8], "latent_dim": 7})
-    config_b = full_stack_config_from_dict(
-        {
-            "name": "other",
-            "seed": 99,
-            "output_dir": str(tmp_path / "elsewhere"),
-            "experts": {"defaults": b, "cubic": {}, "tetragonal": {}},
-        }
-    )
+    config_b = _config_b(tmp_path)
     reopened = FullStack.open(fs.run_dir, config=config_b)
-    with open(fs.run_dir / "config.yaml") as f:
-        recorded = full_stack_config_from_resolved_dict(yaml.safe_load(f))
+
+    assert reopened.config is config_b
+    assert reopened.config.stacks["cubic"].model.latent_dim == 7
+    recorded = _recorded(fs.run_dir)
     assert recorded.name == "fs" and recorded.seed == 3
-    assert recorded.stacks["cubic"].model.latent_dim == 4
-    assert recorded.stacks["tetragonal"].model.latent_dim == 7
-    assert reopened.config.stacks["cubic"].model.latent_dim == 4
+    assert recorded.stacks["cubic"].model.latent_dim == 4  # trained spec kept
+    assert recorded.stacks["tetragonal"].model.latent_dim == 7  # new stack recorded
 
     again = FullStack.open(fs.run_dir)
     assert {"cubic", "tetragonal"} <= set(again.config.stacks)
+
+
+def test_fit_body_after_open_with_config_selects_the_working_configs_stacks(
+    tmp_path, patched
+):
+    fs = FullStack.create(
+        _config(tmp_path, experts=("cubic",)), cache_dir=tmp_path / "cache"
+    )
+    fs.fit_body(stacks=["cubic"])
+    reopened = FullStack.open(
+        fs.run_dir, config=_config_b(tmp_path), cache_dir=tmp_path / "cache"
+    )
+    with pytest.raises(FileExistsError, match="cubic"):
+        reopened.fit_body()
+    assert not (fs.run_dir / "stacks" / "tetragonal").exists()  # pre-checks first
+
+
+def test_fit_heads_after_open_with_config_uses_the_working_configs_heads(
+    tmp_path, patched
+):
+    fs = FullStack.create(
+        _config(tmp_path, experts=("cubic",)), cache_dir=tmp_path / "cache"
+    )
+    fs.fit_body(stacks=["cubic"])
+    config_b = _config_b(
+        tmp_path,
+        encoder={"encoder_hidden_dim": [8], "latent_dim": 4},
+        classifier={"hidden_dim": 9},
+    )
+    reopened = FullStack.open(fs.run_dir, config=config_b, cache_dir=tmp_path / "cache")
+    reopened.fit_heads("h", stacks=["cubic"])
+    with open(fs.run_dir / "stacks" / "cubic" / "heads" / "h" / "heads.yaml") as f:
+        assert yaml.safe_load(f)["config"]["classifier_hidden_dim"] == 9
+
+
+def test_open_with_a_different_model_kind_is_rejected(tmp_path, patched):
+    fs = FullStack.create(
+        _config(tmp_path, experts=("cubic",)), cache_dir=tmp_path / "cache"
+    )
+    data = {
+        "pyxtal": {"structures_per_spacegroup": 2},
+        "mace": {"checkpoint_path": "x.msgpack"},
+    }
+    config_mace = _config_b(tmp_path, model_kind="supcon_mace", data=data)
+    before = (fs.run_dir / "config.yaml").read_bytes()
+    with pytest.raises(ValueError, match="supcon_mace") as exc:
+        FullStack.open(fs.run_dir, config=config_mace)
+    assert "supcon" in str(exc.value)
+    assert (fs.run_dir / "config.yaml").read_bytes() == before
+
+
+def test_open_without_config_is_read_only(tmp_path, patched):
+    import os
+
+    fs = FullStack.create(
+        _config(tmp_path, experts=("cubic",)), cache_dir=tmp_path / "cache"
+    )
+    path = fs.run_dir / "config.yaml"
+    before = path.read_bytes()
+    FullStack.open(fs.run_dir)
+    assert path.read_bytes() == before
+
+    if os.geteuid() != 0:
+        fs.run_dir.chmod(0o555)
+        try:
+            FullStack.open(fs.run_dir)
+        finally:
+            fs.run_dir.chmod(0o755)
+    assert path.read_bytes() == before
+
+
+def test_run_config_write_is_atomic(tmp_path, patched, monkeypatch):
+    fs = FullStack.create(
+        _config(tmp_path, experts=("cubic",)), cache_dir=tmp_path / "cache"
+    )
+    path = fs.run_dir / "config.yaml"
+    before = path.read_bytes()
+    listing = sorted(p.name for p in fs.run_dir.iterdir())
+
+    def boom(src, dst):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr("dim_red.pipeline.full_stack.os.replace", boom)
+    with pytest.raises(OSError, match="replace failed"):
+        FullStack.open(fs.run_dir, config=_config_b(tmp_path))
+    assert path.read_bytes() == before
+    assert sorted(p.name for p in fs.run_dir.iterdir()) == listing
+
+
+def _boom_for(stack_name, real):
+    def build(spec, model_kind, cache_dir):
+        if spec.name == stack_name:
+            raise RuntimeError("boom")
+        return real(spec, model_kind, cache_dir)
+
+    return build
+
+
+def _assert_names_stack(exc_info, caplog, stack_name, phase):
+    assert any(
+        stack_name in r.getMessage() and phase in r.getMessage()
+        for r in caplog.records
+        if r.levelname == "ERROR"
+    )
+    assert any(stack_name in n for n in getattr(exc_info.value, "__notes__", []))
+
+
+def test_failure_inside_fit_body_names_the_stack(tmp_path, monkeypatch, caplog):
+    real = _fake_builder(tmp_path, [])
+    monkeypatch.setattr(
+        "dim_red.pipeline.full_stack.build_stack_dataset", _boom_for("cubic", real)
+    )
+    fs = FullStack.create(_config(tmp_path), cache_dir=tmp_path / "cache")
+    with caplog.at_level("ERROR", logger="dim_red.pipeline"):
+        with pytest.raises(RuntimeError, match="boom") as exc:
+            fs.fit_body()
+    _assert_names_stack(exc, caplog, "cubic", "fit_body")
+
+
+def test_failure_inside_fit_heads_names_the_stack(
+    tmp_path, patched, monkeypatch, caplog
+):
+    fs = FullStack.create(_config(tmp_path), cache_dir=tmp_path / "cache")
+    fs.fit_body(stacks=["cubic"])
+
+    def boom(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(FullStack, "_write_heads", staticmethod(boom))
+    with caplog.at_level("ERROR", logger="dim_red.pipeline"):
+        with pytest.raises(RuntimeError, match="boom") as exc:
+            fs.fit_heads("h", stacks=["cubic"])
+    _assert_names_stack(exc, caplog, "cubic", "fit_heads")

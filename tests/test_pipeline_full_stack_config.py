@@ -219,3 +219,51 @@ def test_none_contrastive_block_is_accepted():
     d["family"]["contrastive"] = None
     cfg = full_stack_config_from_dict(d)
     assert cfg.stacks[FAMILY].model.body_train.tau == 0.05
+
+
+def _expert_with_pyxtal(name, pyxtal):
+    d = _config()
+    d["experts"][name] = {"data": {"pyxtal": pyxtal}}
+    return d
+
+
+def test_expert_with_out_of_system_spacegroups_is_rejected():
+    d = _expert_with_pyxtal("cubic", {"spacegroups": [195, 75]})
+    with pytest.raises(ValueError, match="cubic") as exc:
+        full_stack_config_from_dict(d)
+    assert "75" in str(exc.value) and "195-230" in str(exc.value)
+
+
+def test_spacegroups_in_expert_defaults_are_checked_per_expert():
+    d = _config()
+    d["experts"]["defaults"]["data"]["pyxtal"]["spacegroups"] = [195, 200]
+    with pytest.raises(ValueError, match="tetragonal"):
+        full_stack_config_from_dict(d)
+
+
+def test_family_stack_accepts_arbitrary_spacegroups():
+    d = _config()
+    d["family"]["data"]["pyxtal"]["spacegroups"] = [1, 75, 195]
+    cfg = full_stack_config_from_dict(d)
+    assert cfg.stacks[FAMILY].data.pyxtal.spacegroups == [1, 75, 195]
+
+
+@pytest.mark.parametrize("where", ["batching", "viz.batching"])
+def test_balanced_batching_on_an_expert_is_rejected(where):
+    d = _config()
+    batching = {"strategy": "balanced", "P": 2, "K": 4}
+    block = d["experts"]["cubic"]
+    if where == "batching":
+        block["batching"] = batching
+    else:
+        block["viz"] = {"batching": batching}
+    with pytest.raises(ValueError, match="only available on the family stack") as exc:
+        full_stack_config_from_dict(d)
+    assert "cubic" in str(exc.value)
+
+
+def test_balanced_batching_on_the_family_stack_still_parses():
+    d = _config()
+    d["family"]["batching"] = {"strategy": "balanced", "P": 2, "K": 4}
+    cfg = full_stack_config_from_dict(d)
+    assert cfg.stacks[FAMILY].model.body_batching.strategy == "balanced"

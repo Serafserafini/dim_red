@@ -87,24 +87,37 @@ class FullStack:
         config: Optional[FullStackConfig] = None,
         cache_dir: Optional[Union[str, Path]] = None,
     ) -> "FullStack":
+        """Open an existing run. Without ``config`` this is read-only: the
+        recorded config becomes the working config. With ``config`` it is the
+        working config (it selects stacks and supplies hyperparameters) and
+        ``<run_dir>/config.yaml`` -- only a record -- gets its new stacks merged
+        in."""
         run_dir = Path(run_dir)
         if config is None:
             with open(run_dir / "config.yaml") as f:
                 config = full_stack_config_from_resolved_dict(yaml.safe_load(f))
+            return cls(run_dir, config, cache_dir)
         full_stack = cls(run_dir, config, cache_dir)
-        full_stack._write_run_config()  # records stacks added through `config`
+        full_stack._write_run_config()
         return full_stack
 
     def _write_run_config(self) -> None:
-        """Writes the resolved config. If one is already recorded, its run-level
-        fields and the specs of already-trained stacks are kept (that is what
-        was trained); stacks not recorded yet, or recorded but untrained, take
-        ``self.config``'s spec. ``self.config`` is replaced by the merged result."""
+        """Records the resolved config in ``config.yaml`` (atomically). If one is
+        already recorded, its run-level fields and the specs of stacks that
+        already have a directory are kept (that is what was trained); other
+        stacks take ``self.config``'s spec. ``self.config`` itself is not
+        changed. Raises if ``model_kind`` differs from the recorded one."""
         path = self.run_dir / "config.yaml"
         resolved = full_stack_config_to_dict(self.config)
         if path.exists():
             with open(path) as f:
                 previous = yaml.safe_load(f) or {}
+            recorded_kind = previous.get("model_kind")
+            if recorded_kind is not None and recorded_kind != self.config.model_kind:
+                raise ValueError(
+                    f"config model_kind {self.config.model_kind!r} differs from "
+                    f"the run's recorded model_kind {recorded_kind!r}"
+                )
             if previous.get("stacks") is not None:
                 merged = dict(resolved["stacks"])
                 for name, spec in previous["stacks"].items():
@@ -125,9 +138,14 @@ class FullStack:
                         )
                     },
                 }
-                self.config = full_stack_config_from_resolved_dict(resolved)
-        with open(path, "w") as f:
-            yaml.safe_dump(resolved, f, sort_keys=False)
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            with open(tmp, "w") as f:
+                yaml.safe_dump(resolved, f, sort_keys=False)
+            os.replace(tmp, path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
 
     # -- helpers ---------------------------------------------------------
     def _select(
@@ -173,8 +191,18 @@ class FullStack:
             )
         histories = {}
         for name in names:
-            histories[name] = self._fit_body_one(name, self.config.stacks[name])
+            try:
+                histories[name] = self._fit_body_one(name, self.config.stacks[name])
+            except Exception as exc:
+                self._note_failure(exc, name, "fit_body")
+                raise
         return histories
+
+    @staticmethod
+    def _note_failure(exc: Exception, name: str, phase: str) -> None:
+        logger.error("stack %r failed in %s: %s", name, phase, exc)
+        if hasattr(exc, "add_note"):
+            exc.add_note(f"while processing stack {name!r}")
 
     def _fit_body_one(self, name: str, spec: StackSpec) -> History:
         dataset = build_stack_dataset(spec, self.config.model_kind, self.cache_dir)
@@ -283,10 +311,14 @@ class FullStack:
                 raise FileExistsError(
                     f"heads {heads_name!r} already exist for stack {name!r}"
                 )
-        return {
-            name: self._fit_heads_one(name, heads_name, cfg.stacks[name])
-            for name in names
-        }
+        result = {}
+        for name in names:
+            try:
+                result[name] = self._fit_heads_one(name, heads_name, cfg.stacks[name])
+            except Exception as exc:
+                self._note_failure(exc, name, "fit_heads")
+                raise
+        return result
 
     def _fit_heads_one(
         self, name: str, heads_name: str, spec: StackSpec
