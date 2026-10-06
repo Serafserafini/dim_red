@@ -59,6 +59,11 @@ from dim_red.analysis.plotting import (
     plot_reliability_diagram,
 )
 from dim_red.dataset import FeatureDatabase
+from dim_red.pipeline._common import (
+    _build_vocab_ids,
+    _make_unique_run_dir,
+    _save_loss_history,
+)
 from dim_red.pipeline.config import (
     RunConfig,
     TailTrainConfig,
@@ -91,49 +96,6 @@ _TAIL_MODEL_KINDS: Dict[str, Tuple[str, ...]] = {
     "visualization": ("supcon", "cgcnn", "supcon_mace"),
     "hierarchical_supcon": ("supcon", "supcon_mace"),
 }
-
-
-def _make_unique_run_dir(output_dir: Path, name: str) -> Path:
-    """Create and return ``output_dir / name``, deduplicating with a
-    ``-<n>`` suffix if that directory already exists -- duplicated from
-    ``dim_red.pipeline.single_run`` (small private helper, same precedent
-    as ``_iter_batches`` being duplicated elsewhere in this codebase).
-    """
-    run_dir = output_dir / name
-    suffix = 1
-    while True:
-        try:
-            run_dir.mkdir(parents=True, exist_ok=False)
-            return run_dir
-        except FileExistsError:
-            suffix += 1
-            run_dir = output_dir / f"{name}-{suffix}"
-
-
-def _build_vocab_ids(values: List) -> Tuple[List, np.ndarray]:
-    """Map arbitrary hashable values to a sorted vocabulary and integer ids.
-    Duplicated from ``dim_red.pipeline.single_run``.
-
-    Returns:
-        ``(vocab, ids)`` where ``vocab[i]`` is the value for class id ``i``.
-    """
-    vocab = sorted(set(values))
-    value_to_id = {v: i for i, v in enumerate(vocab)}
-    ids = np.array([value_to_id[v] for v in values], dtype=np.int64)
-    return vocab, ids
-
-
-def _save_loss_history(path: Path, history: Dict[str, List[float]]) -> None:
-    """Duplicated from ``dim_red.pipeline.single_run``."""
-    fieldnames = ["epoch"] + list(history.keys())
-    n_epochs = len(next(iter(history.values())))
-    with open(path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for epoch in range(n_epochs):
-            row = {"epoch": epoch + 1}
-            row.update({k: v[epoch] for k, v in history.items()})
-            writer.writerow(row)
 
 
 def _sanitize_family_dirname(family: str) -> str:

@@ -1,5 +1,6 @@
 # CLAUDE.md
 
-Guidance for `src/dim_red/analysis/` (moved out of the repo-root `CLAUDE.md` since it's specific to this directory).
+Guidance for `src/dim_red/analysis/`.
 
-`analysis/` glues the rest of `dim_red` into an end-to-end pipeline. `workflow.run_pca_reduction` fetches structures per crystal system → computes SOAP vectors (species auto-detected across all fetched structures) → standardizes → PCA-reduces, returning `(X_reduced, labels, material_ids)`. `plotting.plot_reduced_space` renders a 2D scatter colored by label; `plotting.plot_spacegroup_histogram` renders a spacegroup-count bar chart colored by crystal family. `examples/run_analysis_demo.py` shows the intended top-level usage.
+- `plotting.py`: `plot_reduced_space`/`plot_reduced_space_3d` (scatter colored by label, neutral "Dimension N" axis defaults), `plot_applied_structures` (overlay new points), `plot_spacegroup_histogram` (spacegroup counts colored by crystal family), `plot_confusion_matrix`, `plot_classification_report`, `plot_reliability_diagram`.
+- `metrics.py`: `embedding_quality_metrics` — sklearn-only silhouette / k-means ARI+NMI / kNN accuracy per label set; the scoring function behind `pipeline.benchmark`. Quantifies quality, never picks a "best" run.

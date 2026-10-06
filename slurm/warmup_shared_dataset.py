@@ -1,29 +1,23 @@
 """One-off dataset-cache warm-up for slurm/tune_all_models.sbatch.
 
-vae/autoencoder/supcon's slurm/tuning_sweep_*.yaml base configs share an
-identical pyxtal + soap + augmentation block (only architecture/training
-hyperparameters differ across them), so they hash to the same dataset-cache
-key (dim_red.pipeline.dataset_cache._pyxtal_cache_key) -- but
-tune_all_models.sbatch runs them as three independent, parallel SLURM array
-tasks, each defaulting to its own <output_dir>/_dataset_cache since no
---cache-dir is passed to dimred-sweep. That means the ~35000-structure SOAP
-computation (pure dscribe/CPU work, no jax/GPU involved) gets run and stored
-three separate times instead of once -- most of what was blowing through the
-cluster quota.
+slurm/tuning_sweep_supcon.yaml's base config defines the pyxtal + soap +
+augmentation block, hashed into the dataset-cache key
+(dim_red.pipeline.dataset_cache._pyxtal_cache_key). The ~35000-structure SOAP
+computation (pure dscribe/CPU work, no jax/GPU involved) is better done once
+in a lightweight CPU job than inside the GPU sweep task.
 
 This script builds+caches that shared dataset exactly once, into a single
 directory, from a lightweight prerequisite job (see
-warmup_shared_dataset.sbatch) that runs BEFORE the array -- so all three
-array tasks hit a cache hit and never touch SOAP themselves. cgcnn is
-deliberately not included: it featurizes with graphs, not SOAP, so it has
-nothing to share with the other three and keeps its own separate cache.
+warmup_shared_dataset.sbatch) that runs BEFORE the array -- so the supcon
+sweep task hits a cache and never touches SOAP itself. cgcnn is
+deliberately not included: it featurizes with graphs, not SOAP, and keeps
+its own separate cache.
 
 Usage:
     python slurm/warmup_shared_dataset.py <cache_dir> <sweep_config> [<sweep_config> ...]
 
-Any one of vae/autoencoder/supcon's tuning_sweep_*.yaml works as a
-<sweep_config> since their dataset-defining settings are identical; passing
-more than one is only a safety check -- this script refuses to proceed if
+Any tuning_sweep_*.yaml with the same dataset-defining settings works as a
+<sweep_config>; passing more than one is only a safety check -- this script refuses to proceed if
 they don't all resolve to the same cache key, rather than silently building
 whichever came first and leaving the others to rebuild anyway.
 """

@@ -2,9 +2,9 @@
 # playbook (see src/dim_red/pipeline/CLAUDE.md's "Benchmark" section). This
 # is documentation, not a directly loadable config -- there's no YAML
 # include mechanism in dim_red.pipeline.config, so this exact `pyxtal:`
-# block is copied verbatim into each of the four
-# configs/tuning_sweep_{vae,autoencoder,supcon,cgcnn}.example.yaml files'
-# `base.pyxtal:`. If you change this fragment, update all four.
+# block is copied verbatim into each of the two
+# configs/tuning_sweep_{supcon,cgcnn}.example.yaml files'
+# `base.pyxtal:`. If you change this fragment, update both.
 #
 # pyxtal (not fetch) is used deliberately: it guarantees a known
 # family/spacegroup label for every structure, which supcon's loss and

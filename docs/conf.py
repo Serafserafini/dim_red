@@ -90,7 +90,6 @@ autodoc_mock_imports = [
     "flax",
     "optax",
     "umap",
-    "learned_optimization",
     "pyxtal",
     "mace_jax",
 ]

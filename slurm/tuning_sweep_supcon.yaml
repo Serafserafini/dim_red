@@ -22,8 +22,8 @@
 # is back in the grid (2, euclidean/cosine) on top of encoder_hidden_dim (2),
 # supcon.mode (2), supcon.tau (2) and batching.strategy (2) = 32 runs.
 # encoder.latent_dim deliberately left fixed (not a grid axis here, unlike the
-# other three kinds' configs): supcon already pays extra cost per run over
-# vae/autoencoder/cgcnn (an auto-trained classification tail runs right
+# other kind's config): supcon already pays extra cost per run over
+# cgcnn (an auto-trained classification tail runs right
 # after every body), so it's the one kind kept a notch more conservative
 # rather than pushing to 64 runs.
 

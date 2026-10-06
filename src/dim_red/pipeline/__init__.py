@@ -1,5 +1,5 @@
 """
-Pipeline sub-package: unified fetch -> SOAP -> VAE orchestration, driven by
+Pipeline sub-package: unified fetch -> featurize -> model orchestration, driven by
 YAML configs, with a shared dataset cache and single-run/sweep entrypoints.
 """
 

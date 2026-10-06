@@ -132,8 +132,8 @@ class GraphDatabase:
         """The five parallel arrays, in a fixed order.
 
         Feeds directly into ``dim_red.cgcnn.training``'s batch-iteration
-        helpers, duplicated from ``dim_red.autoencoder.training`` and
-        already rank-agnostic there (they operate generically on any tuple
+        helpers, which are
+        already rank-agnostic (they operate generically on any tuple
         of same-leading-dim arrays), so no changes are needed to accept
         these ranks.
         """

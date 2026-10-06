@@ -8,7 +8,7 @@
 # gets a `family` accuracy in dimred-benchmark's table via its
 # tails/classification/tail_predictions.npz -- supcon has no built-in
 # classifier heads (embeddings.npz never carries family_probs), unlike
-# vae/autoencoder/cgcnn.
+# cgcnn.
 #
 # Selection criterion (see CLAUDE.md): primary = mean of
 # family_silhouette/family_knn_accuracy, weighted higher than for the other

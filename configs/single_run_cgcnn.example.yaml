@@ -3,7 +3,7 @@
 # natively in JAX/Flax -- no torch/torch_geometric/dgl/jraph dependency),
 # trained JOINTLY with classifier head(s) via cross-entropy on family
 # (+ optional spacegroup) labels -- single-phase, mirroring
-# vae/autoencoder's aux_heads pattern, NOT supcon's two-phase
+# the aux_heads pattern, NOT supcon's two-phase
 # contrastive-pretrain-then-freeze-and-train-a-tail design. Unlike SOAP,
 # CGCNN builds its own graph representation directly from a crystal's atoms
 # and bonds -- no soap: block at all for this model. See CLAUDE.md /
@@ -13,7 +13,7 @@
 
 seed: 42
 output_dir: runs
-model: cgcnn # "vae" (default), "autoencoder", "supcon", or "cgcnn"
+model: cgcnn # "supcon" (default), "supcon_mace", or "cgcnn"
 data_source: pyxtal # pyxtal recommended: guarantees a known family/spacegroup
 # label for every generated structure, exactly what aux_heads needs. "fetch"
 # (Materials Project) works too, but MP structures are missing spacegroup

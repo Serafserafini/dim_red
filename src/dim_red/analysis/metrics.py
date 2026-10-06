@@ -34,7 +34,7 @@ def embedding_quality_metrics(
     ``embeddings``'s own coordinates, unlike ``dim_red.pipeline.compare``'s
     plotting suite, which projects non-2D embeddings through UMAP first.
     This is what makes one call comparable across every ``model_kind``
-    (vae/autoencoder/supcon/cgcnn) regardless of ``latent_dim`` or
+    (supcon/supcon_mace/cgcnn) regardless of ``latent_dim`` or
     architecture: cgcnn never has a flat ``features`` array and supcon never
     has built-in classifier heads, but every ``model_kind``'s
     ``embeddings.npz`` unconditionally saves ``embeddings``/``labels``/

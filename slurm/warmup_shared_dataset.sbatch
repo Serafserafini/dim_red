@@ -5,13 +5,11 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --time=04:00:00
 
-# Pre-builds, ONCE, the SOAP dataset cache that vae/autoencoder/supcon's
-# slurm/tuning_sweep_*.yaml configs all share (identical pyxtal + soap +
-# augmentation settings) -- see warmup_shared_dataset.py's docstring for why
-# this matters: without it, tune_all_models.sbatch's three parallel array
-# tasks each build (and store on disk) their own copy of the same
-# ~35000-structure SOAP embeddings, tripling both compute time and disk
-# usage for identical data. This is the single biggest lever on cluster
+# Pre-builds, ONCE, the SOAP dataset cache that slurm/tuning_sweep_supcon.yaml
+# uses (pyxtal + soap + augmentation settings) -- see warmup_shared_dataset.py's docstring for why
+# this matters: without it, tune_all_models.sbatch's supcon task would build
+# the ~35000-structure SOAP embeddings inside the job itself, using up
+# its GPU time budget on CPU-only work. This is the single biggest lever on cluster
 # quota usage for that job.
 #
 # No --gres=gpu here on purpose: dim_red.soap.compute_soap is pure
@@ -70,8 +68,6 @@ cd "${SLURM_SUBMIT_DIR}"
 
 python slurm/warmup_shared_dataset.py \
     runs/_shared_dataset_cache \
-    slurm/tuning_sweep_vae.yaml \
-    slurm/tuning_sweep_autoencoder.yaml \
     slurm/tuning_sweep_supcon.yaml
 
 echo "Warm-up complete: runs/_shared_dataset_cache"

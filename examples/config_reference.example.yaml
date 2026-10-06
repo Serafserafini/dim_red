@@ -1,22 +1,20 @@
-# Reference config: every field the fetch/pyxtal -> SOAP/graph ->
-# vae/autoencoder/supcon/cgcnn pipeline accepts (dim_red.pipeline.config.RunConfig
+# Reference config: every field the fetch/pyxtal -> SOAP/graph/MACE ->
+# supcon/supcon_mace/cgcnn pipeline accepts (dim_red.pipeline.config.RunConfig
 # and its nested blocks), each set to its own default value, with a comment on
 # what it does and (where relevant) which other setting it depends on or is
 # ignored by.
 #
 # This file documents the full schema -- it is NOT meant to be run as-is:
 # "fetch"/"pyxtal" are mutually exclusive (pick one via "data_source"), and
-# "aux_heads"/"supcon"/"batching"/"graph" only apply to some values of "model".
-# For a runnable starting point, copy one of the other configs/*.example.yaml
-# files instead (single_run.example.yaml for fetch+vae, single_run_pyxtal.example.yaml
-# for pyxtal+vae, single_run_supcon.example.yaml for pyxtal+supcon,
-# single_run_autoencoder.example.yaml for fetch+autoencoder,
-# single_run_cgcnn.example.yaml for pyxtal+cgcnn) and only change what you
-# need -- every field omitted from a real config falls back to the default
-# shown here.
+# "aux_heads"/"supcon"/"batching"/"graph"/"mace" only apply to some values of
+# "model". For a runnable starting point, copy one of the other
+# configs/*.example.yaml files instead (single_run_pyxtal.example.yaml for
+# pyxtal+supcon with defaults, single_run_supcon_best_combo.example.yaml for
+# the reference architecture, single_run_cgcnn.example.yaml for pyxtal+cgcnn)
+# and only change what you need -- every field omitted from a real config
+# falls back to the default shown here (unless marked REQUIRED).
 #
 # Run with: dimred-run <your_config.yaml>
-# or:       dimred-run <your_config.yaml>
 
 # --- Top level ------------------------------------------------------------
 
@@ -25,13 +23,13 @@ seed: 42 # global RNG seed (train/val split, model init, ...); also the
 output_dir: runs # where this run's directory is created
 name: null # optional custom run-directory name; null -> auto-derived from
   # the swept/non-default hyperparameters (see pipeline.single_run.make_run_name)
-model: vae # "vae" (default) | "autoencoder" | "supcon" | "cgcnn" -- which
-  # model dim_red.pipeline.single_run.run_single trains; "vae"/"autoencoder"/
-  # "supcon" read their encoder architecture from "vae:" below (SOAP-vector
-  # input); "cgcnn" reads its graph-construction + architecture
-  # hyperparameters from "graph:" instead (only "encoder.latent_dim" is still
-  # read) and its input is built directly from crystal structures, no SOAP
-  # at all -- see "soap:"/"graph:" below
+model: supcon # "supcon" (default) | "supcon_mace" | "cgcnn" -- which model
+  # dim_red.pipeline.single_run.run_single trains; "supcon" reads SOAP vectors
+  # and its encoder architecture from "encoder:" below; "supcon_mace" runs the
+  # same SupCon recipe on frozen MACE embeddings ("mace:" below, no SOAP);
+  # "cgcnn" reads its graph-construction + architecture hyperparameters from
+  # "graph:" instead (only "encoder.latent_dim" is still read) and its input
+  # is built directly from crystal structures, no SOAP at all
 data_source: fetch # "fetch" (default, Materials Project) | "pyxtal"
   # (synthetic, symmetry-valid structures via dim_red.generate) -- exactly
   # one of "fetch:"/"pyxtal:" below is required, matching this
@@ -80,9 +78,9 @@ augmentation: null # example block, all fields at their default:
   # supercell_radius: null  # Angstroms; null -> skip supercell expansion (see CLAUDE.md)
   # seed: null              # null -> falls back to the top-level "seed" above
 
-# --- SOAP featurization -- model: vae/autoencoder/supcon only --------------
-# Ignored for model: cgcnn (which reads "graph:" below instead and never
-# computes SOAP at all).
+# --- SOAP featurization -- model: supcon only -----------------------------
+# Ignored for model: cgcnn/supcon_mace (which read "graph:"/"mace:" instead
+# and never compute SOAP).
 
 soap:
   r_cut: 5.0
@@ -92,22 +90,20 @@ soap:
   element_agnostic: false
   species: null # auto-detected across all fetched/generated structures
 
-# --- Encoder/decoder architecture (vae/autoencoder/supcon/cgcnn) -----------
+# --- Encoder architecture (supcon/supcon_mace/cgcnn) -------------------------
 # For model: cgcnn, only "latent_dim" is read (the body's output width,
 # saved to embeddings.npz, reused by every downstream tail) -- the rest of
-# this block is ignored, same treatment "supcon" already gives
-# decoder_hidden_dim/mirror.
+# this block is ignored. (This block used to be called "vae:"; that name is
+# still read when loading old configs.)
 
 encoder:
   encoder_hidden_dim: [] # REQUIRED, no default -- e.g. [128, 64]; ignored for model: cgcnn
-    # for model: supcon/cgcnn (no decoder)
-  latent_dim: 0 # REQUIRED, no default -- e.g. 2
-    # model: supcon/cgcnn
+  latent_dim: 0 # REQUIRED, no default -- e.g. 32
 
 # --- model: cgcnn only: graph construction + architecture ------------------
 # Used INSTEAD of "soap:" for model: cgcnn -- a graph-convolutional body
 # reading crystal structures directly (dim_red.cgcnn.graph), not SOAP
-# vectors. Ignored for model: vae/autoencoder/supcon.
+# vectors. Ignored for model: supcon/supcon_mace.
 
 graph:
   radius: 8.0 # cutoff radius (Angstroms) for periodic-boundary-aware
@@ -131,37 +127,49 @@ graph:
   h_fea_len: 128 # hidden width of the post-pooling fully-connected block
   n_h: 1 # number of post-pooling hidden layers
 
-# --- model: vae / autoencoder / cgcnn only ----------------------------------
-# Optional auxiliary classification heads on the latent z for vae/autoencoder
-# (added on top of the reconstruction objective); for cgcnn this is instead
-# the model's ONLY training objective (no reconstruction/contrastive
-# fallback exists), so "mode: none" is rejected at config-parse time when
-# model: cgcnn. Ignored for model: supcon (use "supcon:" below instead).
+# --- model: mace embeddings (supcon_mace only) -------------------------------
+# Frozen, pretrained MACE model whose pooled per-structure embeddings replace
+# SOAP; requires the optional mace_jax package. No latent_dim: the width is
+# whatever the checkpoint produces.
+
+mace:
+  checkpoint_path: "" # REQUIRED for model: supcon_mace -- converted checkpoint (with or without .npz)
+  r_max: 6.0 # cutoff radius; must match the checkpoint's own
+  pooling: mean # "mean" | "sum" over atoms
+
+# --- model: cgcnn only -------------------------------------------------------
+# Auxiliary classification heads on the latent z: for cgcnn this is the
+# model's ONLY training objective, so "mode: none" is rejected at
+# config-parse time when model: cgcnn. Ignored for supcon/supcon_mace (their
+# classifiers are trained afterwards as tails, see "tails:" below).
 
 aux_heads:
-  mode: none # "none" (default, plain vae/autoencoder; INVALID for model: cgcnn) |
+  mode: none # "none" (default; INVALID for model: cgcnn) |
     # "family_only" | "family_and_spacegroup" (spacegroup head masked by family)
   lambda_family: 1.0 # weight of the family cross-entropy term; ignored when mode: none
   lambda_spacegroup: 1.0 # weight of the spacegroup term; ignored unless mode: family_and_spacegroup
   head_hidden_dim: 16 # hidden width of each head's single hidden layer
 
-# --- model: supcon only ------------------------------------------------
-# Supervised Contrastive loss on the encoder's latent z. Ignored for
-# model: vae/autoencoder (use "aux_heads:" above instead).
+# --- model: supcon / supcon_mace ----------------------------------------------
+# Supervised Contrastive loss computed on a projection tail's output
+# (Khosla et al. 2020), not on the encoder's own representation. Defaults are
+# the reference "best_combo" setup. Ignored for model: cgcnn.
 
 supcon:
-  mode: family_and_spacegroup # "family_only" | "spacegroup_only" |
-    # "family_and_spacegroup" (default) -- which label level(s) to contrast on
+  mode: family_only # "family_only" (default) | "spacegroup_only" |
+    # "family_and_spacegroup" -- which label level(s) to contrast on
   lambda_family: 1.0 # weight of the family-level term; ignored when mode: spacegroup_only
   lambda_spacegroup: 1.0 # weight of the spacegroup-level term; ignored when mode: family_only
-  tau: 0.1 # temperature dividing similarities before the softmax
-  distance: euclidean # "euclidean" (default, negative squared distance,
-    # unbounded scale) | "cosine" (L2-normalized, bounded to [-1, 1])
+  tau: 0.05 # temperature dividing similarities before the softmax
+  distance: cosine # "cosine" (default, L2-normalized, bounded to [-1, 1]) |
+    # "euclidean" (negative squared distance, unbounded scale)
   lambda_norm: 0.0 # weight of an optional embedding-norm regularizer; not
     # gated by mode; 0.0 (default) disables it
+  projection_dim: 128 # output width of the projection tail (kept wide on purpose)
+  projection_hidden_dim: null # null -> single hidden layer matching encoder.latent_dim
 
-# --- model: supcon only: training-batch sampling ---------------------------
-# Ignored for model: vae/autoencoder (which always shuffle). Validation
+# --- model: supcon/supcon_mace: training-batch sampling ---------------------
+# Ignored for model: cgcnn (which always shuffles). Validation
 # batches always stay random regardless of "strategy".
 
 batching:
@@ -181,7 +189,7 @@ train:
   learning_rate: 0.001 # Adam's learning rate
   val_ratio: 0.2
   device: cpu # "cpu" | "gpu" -- raises if no matching JAX device exists
-  early_stopping: # same mechanism for vae/autoencoder/supcon/cgcnn: stop once
+  early_stopping: # same mechanism for supcon/cgcnn and the tails: stop once
     # val_loss hasn't improved by more than min_delta for "patience" epochs
     enabled: false
     patience: 10
@@ -189,20 +197,14 @@ train:
     restore_best_weights: true # keep the best-val_loss epoch's params, not necessarily the last
 
 # --- auto-train tails --------------------------------------------------------
-# Automatically train a classification, visualization, and/or hierarchical
-# tail on this run's frozen body right after phase-1 training finishes -- the
-# same dim_red.pipeline.tail_training.train_tail entry point dimred-train-tail
-# uses, invoked automatically instead of as a separate manual command.
-# classification/hierarchical are ignored for model not in ("supcon",
-# "cgcnn", "mace") -- a vae/autoencoder body already has its own
-# classification heads (aux_heads above) and no separate tail-training
-# workflow makes sense for either of those two tail kinds. For cgcnn, a
-# classification tail is redundant with its own built-in heads above but
-# harmless (useful for ablation). visualization, however, is offered for
-# *every* model_kind, including vae/autoencoder -- genuinely useful since
-# encoder.latent_dim need not be 2, and aux_heads has no visualization
-# equivalent of its own. Omit this block entirely (default: null) to
-# disable, current behavior unchanged.
+# Automatically train a classification and/or visualization tail on this
+# run's frozen body right after phase-1 training finishes -- the same
+# dim_red.pipeline.tail_training.train_tail entry point dimred-train-tail
+# uses. classification is ignored for model not in ("supcon", "cgcnn",
+# "supcon_mace"); visualization is offered for every model_kind. Per-family
+# "hierarchical_supcon" experts are trained separately with
+# dimred-train-tail (see configs/tail_train_hierarchical_supcon_*.example.yaml).
+# Omit this block entirely (default: null) to disable.
 
 tails: null # example block, all fields at their default:
   # classification: null # set to auto-train a classification tail, e.g.:
@@ -215,7 +217,7 @@ tails: null # example block, all fields at their default:
   #   tau: 0.1
   #   distance: euclidean # "euclidean" | "cosine"
   #   lambda_norm: 0.0
-  #   hidden_dim: null # null -> single hidden layer matching the body's own width
+  #   hidden_dim: null # null -> single hidden layer matching the body's own width (int or list)
   #   batching: # same shape as the top-level "batching:" block above
   #     strategy: random
   #     balanced_params: {P: null, K: null, S: null}

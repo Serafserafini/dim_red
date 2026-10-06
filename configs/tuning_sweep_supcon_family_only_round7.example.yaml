@@ -1,6 +1,5 @@
 # Round 7 ("training_budget") of configs/tuning_sweep_supcon_family_only_geom_rich.example.yaml
-# (round 3) -- see configs/tuning_sweep_vae_family_only_round7.example.yaml's
-# header comment for the full rationale: same dataset/SOAP as round 3
+# (round 3): same dataset/SOAP as round 3
 # (SAME dataset cache key, no new warmup needed), train.batch_size raised
 # 32 -> 128, train.epochs raised 100 -> 200, early_stopping stays enabled
 # with a larger patience (20). tails.train (phase-2 classification tail)

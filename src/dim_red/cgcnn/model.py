@@ -16,20 +16,19 @@ CLAUDE.md and ``dim_red.cgcnn.graph``):
   real batch-statistics BatchNorm needs mutable ``batch_stats``, a
   ``train``/``eval`` flag threaded through every call, and ``nn.vmap`` with
   an ``axis_name`` for correct cross-sample statistics -- machinery no other
-  model wrapper in this codebase (``VAE``/``Autoencoder``/``SupConEncoder``)
+  model wrapper in this codebase (e.g. ``SupConEncoder``)
   has, all exposing a single pure ``params`` pytree instead. ``LayerNorm``
   (per-sample, no mutable state) preserves the gating/residual formula while
   keeping ``CGCNNEncoder`` exactly as simple as its siblings.
 
-Mirrors ``dim_red.autoencoder.model``'s public API shape
-(``encode``/``classify_family``/``classify_spacegroup``, ``*_with_params``
-variants, optional family/spacegroup auxiliary heads) so it slots into
+Exposes ``encode``/``classify_family``/``classify_spacegroup`` with
+``*_with_params`` variants and optional family/spacegroup auxiliary heads, so it slots into
 ``dim_red.pipeline.single_run``/``dim_red.pipeline.inference`` the same way
 -- the only structural difference is that ``encode``/``encode_with_params``
 take a 5-array graph batch instead of a single flat ``(batch, features)``
-array. ``ClassifierHead``/``apply_family_mask`` are verbatim duplicates of
-``dim_red.autoencoder.model``'s (not imported), matching this codebase's
-no-cross-package-dependency convention (``dim_red.supcon`` does the same).
+array. ``ClassifierHead``/``apply_family_mask`` are defined here rather than
+imported from another package, matching this codebase's
+no-cross-package-dependency convention.
 """
 
 from typing import Optional, Tuple
@@ -98,7 +97,7 @@ class ConvLayer(nn.Module):
 class CGCNNBodyModule(nn.Module):
     """Embedding -> stacked :class:`ConvLayer`\\ s -> masked mean pooling ->
     post-pooling MLP -> final ``latent_dim`` output. Plays the role of
-    ``EncoderModule`` in ``vae``/``autoencoder``/``supcon`` -- graph input
+    ``EncoderModule`` in ``supcon`` -- graph input
     instead of a flat feature vector.
     """
 
@@ -154,10 +153,7 @@ class CGCNNBodyModule(nn.Module):
 
 
 class ClassifierHead(nn.Module):
-    """Small MLP classifying representations into discrete classes.
-
-    Verbatim duplicate of ``dim_red.autoencoder.model.ClassifierHead``.
-    """
+    """Small MLP classifying representations into discrete classes."""
 
     hidden_dim: int
     n_classes: int
@@ -177,9 +173,8 @@ def apply_family_mask(
 ) -> Array:
     """Condition spacegroup logits on a family weighting via additive log-space masking.
 
-    Verbatim duplicate of ``dim_red.autoencoder.model.apply_family_mask``
-    (and ``dim_red.vae.model``'s) -- kept independent so this package has no
-    dependency on ``vae``/``autoencoder``/``supcon``.
+    Kept independent of ``supcon`` so this package has no cross-package
+    dependency.
     """
     plausibility = family_weights @ family_spacegroup_mask
     return spacegroup_logits + jnp.log(plausibility + eps)
@@ -293,8 +288,8 @@ class CGCNNEncoderModule(nn.Module):
 
 class CGCNNEncoder:
     """High-level wrapper managing Flax module creation and parameters for
-    the CGCNN body + optional classifier heads -- mirrors
-    ``dim_red.autoencoder.model.Autoencoder``'s shape (mutable ``params``,
+    the CGCNN body + optional classifier heads -- has
+    the usual wrapper shape (mutable ``params``,
     ``encode``/``classify_family``/``classify_spacegroup``,
     ``*_with_params`` variants), except ``encode``/``encode_with_params``
     take a graph batch (a 5-array tuple) instead of a flat

@@ -1,58 +1,45 @@
-# dim_red - Codebase & Suite di Test
+# dim_red
 
-Codebase Python per l'implementazione e la valutazione di algoritmi di Riduzione della Dimensionalità (Dimensionality Reduction), strutturata secondo le best practice industriali con layout `src/` e test automatizzati con `pytest`.
+Toolkit per ridurre la dimensionalità di strutture cristalline e allenare rappresentazioni latenti che separano famiglie cristalline e gruppi spaziali. Layout `src/`, test con `pytest`, documentazione Sphinx in `docs/`.
 
-## 📁 Struttura del Progetto
+## Cosa contiene
 
-```text
-dim_red/
-├── .gitignore             # File ignorati da Git
-├── pyproject.toml         # Configurazione del pacchetto e di pytest
-├── requirements.txt       # Dipendenze di progetto
-├── README.md              # Documentazione
-├── src/                   # Codice sorgente del pacchetto
-│   └── dim_red/
-│       ├── __init__.py    # Inizializzazione pacchetto
-│       ├── pca.py         # Implementazione dell'algoritmo PCA
-│       └── utils.py       # Funzioni utility (es. standardizzazione)
-└── tests/                 # Suite dei test unitari e d'integrazione
-    ├── __init__.py
-    ├── conftest.py        # Fixture e setup di test per pytest
-    ├── test_pca.py        # Test per PCA
-    └── test_utils.py      # Test per le utility
-```
+- **Dati**: `fetch.py` (Materials Project), `generate.py` (strutture simmetriche sintetiche con `pyxtal`), `augmentation.py` (jitter posizionale, vacanze, supercelle).
+- **Featurizzazione**: `soap.py` (SOAP via `dscribe`), `cgcnn/graph.py` (grafo di legami), `mace/` (embedding di un MACE pre-addestrato e congelato).
+- **Riduzione classica**: `pca.py`, `umap.py`, `utils.py` (standardizzazione).
+- **Modelli** (`model_kind`): `supcon` (Supervised Contrastive su SOAP), `supcon_mace` (stessa ricetta sugli embedding MACE), `cgcnn` (rete a grafo con classificazione congiunta).
+- **Fase 2 (tail)**: `classification`, `visualization`, `hierarchical_supcon` (esperti per famiglia) sopra un corpo congelato.
+- **`pipeline/`**: orchestrazione guidata da YAML (`RunConfig`), sweep, confronto, benchmark, inferenza su nuove strutture.
+- **`analysis/`**: grafici e metriche di qualità degli embedding.
 
-## 🚀 Installazione e Setup
-
-### 1. Creazione ambiente virtuale (consigliato)
+## Installazione
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+pip install -e ".[dev]"      # soap, fetch, umap, train (jax), pyxtal, analysis, pipeline + pytest
+pip install -e ".[mace]"     # opzionale, solo per model_kind: supcon_mace
 ```
 
-### 2. Installazione dipendenze
+Il progetto è sviluppato nell'ambiente conda `dmred`.
+
+## Uso
+
+Comandi installati (`pyproject.toml`):
+
+| Comando | Cosa fa |
+|---|---|
+| `dimred-run <config.yaml>` | una run singola (dataset → modello → artefatti) |
+| `dimred-sweep <config.yaml>` | grid search |
+| `dimred-rerun <run_dir>` | rilancia una run salvata |
+| `dimred-compare <dir>` | grafici di confronto di una sweep |
+| `dimred-train-tail <config.yaml>` | allena un tail di fase 2 su una run |
+| `dimred-apply <structures.extxyz> <run_dir>` | applica una run a nuove strutture |
+| `dimred-benchmark <runs>... --output <csv>` | tabella di qualità tra run/model_kind |
+
+Config di esempio in `configs/`, riferimento completo dei campi in `examples/config_reference.example.yaml`, descrizione di ogni blocco in `docs/` (`sphinx-build docs docs/_build`).
+
+## Test
 
 ```bash
-pip install -r requirements.txt
-```
-
-In alternativa, per installare il pacchetto in modalità editabile con dipendenze di sviluppo:
-
-```bash
-pip install -e .[dev]
-```
-
-## 🧪 Esecuzione dei Test
-
-Per eseguire tutti i test unitari presenti nella cartella `tests/`:
-
-```bash
-pytest
-```
-
-Per eseguire i test in modalità prolissa (verbose):
-
-```bash
-pytest -v
+pytest tests/test_pca.py        # un file
+pytest                          # tutta la suite
 ```

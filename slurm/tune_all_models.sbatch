@@ -4,9 +4,9 @@
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:1
 #SBATCH --time=2-00:00:00
-#SBATCH --array=0-3
+#SBATCH --array=0-1
 
-# One independent GPU job per model_kind (vae/autoencoder/supcon/cgcnn), via
+# One independent GPU job per model_kind (supcon/cgcnn), via
 # SLURM_ARRAY_TASK_ID -- each gets its own GPU and its own full 2-day
 # budget, so a slow sweep for one kind can never eat into another's time.
 # Each task: dimred-sweep on that kind's slurm/tuning_sweep_<kind>.yaml,
@@ -15,22 +15,18 @@
 # in it -- family classification accuracy and 2D phase-separation lead every
 # row) is waiting for each kind once the job finishes.
 #
-# vae/autoencoder/supcon's tuning_sweep_*.yaml configs share an identical
-# pyxtal + soap + augmentation block, so their dataset cache key is
-# identical too -- they're pointed at one shared --cache-dir (below) so the
-# ~35000-structure SOAP computation runs once instead of three times.
-# REQUIRES that shared cache to already be built and complete before this
-# array starts (np.savez isn't atomic, so concurrent array tasks racing a
-# cache miss could read a half-written file) -- run warmup_shared_dataset.sbatch
+# supcon's tuning_sweep_supcon.yaml is pointed at a shared --cache-dir
+# (below) so the ~35000-structure SOAP computation runs in a separate CPU
+# job instead of inside the GPU task. REQUIRES that cache to already be
+# built and complete before this array starts -- run warmup_shared_dataset.sbatch
 # first and chain this job on it:
 #   WARMUP_ID=$(sbatch --parsable slurm/warmup_shared_dataset.sbatch)
 #   sbatch --dependency=afterok:${WARMUP_ID} slurm/tune_all_models.sbatch
-# cgcnn (task 3) is unaffected -- it featurizes with graphs, not SOAP, so it
+# cgcnn (task 1) is unaffected -- it featurizes with graphs, not SOAP, so it
 # keeps its own default cache dir (runs/tuning_cgcnn/_dataset_cache).
 #
-# To rebuild/refresh a cross-model table combining all four afterwards:
-#   dimred-benchmark runs/tuning_vae/<date>-<n> runs/tuning_autoencoder/<date>-<n> \
-#       runs/tuning_supcon/<date>-<n> runs/tuning_cgcnn/<date>-<n> \
+# To rebuild/refresh a cross-model table combining both afterwards:
+#   dimred-benchmark runs/tuning_supcon/<date>-<n> runs/tuning_cgcnn/<date>-<n> \
 #       --output runs/final_benchmark.csv
 
 set -euo pipefail
@@ -83,18 +79,18 @@ fi
 
 cd "${SLURM_SUBMIT_DIR}"
 
-MODEL_KINDS=(vae autoencoder supcon cgcnn)
+MODEL_KINDS=(supcon cgcnn)
 MODEL_KIND="${MODEL_KINDS[$SLURM_ARRAY_TASK_ID]}"
 SWEEP_CONFIG="slurm/tuning_sweep_${MODEL_KIND}.yaml"
 
 echo "Task ${SLURM_ARRAY_TASK_ID}: tuning model_kind=${MODEL_KIND} (${SWEEP_CONFIG})"
 if [ "${MODEL_KIND}" = "cgcnn" ]; then
     # No shared cache for cgcnn: it builds graph features, not SOAP, so
-    # there's nothing to share with the other three kinds. Default
+    # there's nothing to share with supcon. Default
     # (runs/tuning_cgcnn/_dataset_cache) is fine.
     dimred-sweep "${SWEEP_CONFIG}"
 else
-    # vae/autoencoder/supcon share one dataset cache -- see the file-level
+    # supcon uses the shared dataset cache -- see the file-level
     # comment above. Must already be warmed up by warmup_shared_dataset.sbatch.
     dimred-sweep "${SWEEP_CONFIG}" --cache-dir runs/_shared_dataset_cache
 fi

@@ -36,10 +36,10 @@ if [ "${CONDA_DEFAULT_ENV:-}" != "dmred" ]; then
     exit 1
 fi
 
-# take the model kind from command line argument (e.g. `sbatch --export=MODEL_KIND=vae slurm/compare_single_model.sbatch`)
+# take the model kind from command line argument (e.g. `sbatch --export=RUN_DIR=<run_dir> slurm/compare.sbatch`)
 RUN_DIR="${RUN_DIR:-}"
 
 echo "Building compare plots for run_dir=${RUN_DIR}"
-dimred-compare "${RUN_DIR}" 
+dimred-compare "${RUN_DIR}"
 
 echo "Compare plots finished: ${RUN_DIR}"

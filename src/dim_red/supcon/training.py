@@ -3,16 +3,15 @@ Training utilities for the SupCon (Supervised Contrastive) body + projection
 tail (phase 1 -- see ``dim_red.supcon.tail_training`` for phase 2, training a
 classification/visualization tail on the frozen body afterwards).
 
-Mirrors ``dim_red.autoencoder.training``'s overall shape (``TrainConfig``,
-VeLO as the optimizer backend, the same ``has_family``/``has_spacegroup``
-compile-time-branch pattern) but the objective is entirely different: no
+Adam is the optimizer, with ``has_family``/``has_spacegroup`` as
+compile-time branches. The objective: no
 reconstruction, no classifier heads -- a Supervised Contrastive loss
 computed against family and/or spacegroup labels, on the *projection tail's*
 output (Khosla et al. 2020's ``z = Proj(Enc(x))``), not directly on the
 body's own representation ``r`` -- see ``training_first_phase``.
 
-Validation deliberately does **not** reuse the padding+``vmap``-over-epoch
-trick used by ``vae.training``/``autoencoder.training``: that trick zero-pads
+Validation deliberately does **not** use a padding+``vmap``-over-epoch
+trick (as ``cgcnn.training`` does): that trick zero-pads
 the last batch and relies on every per-sample loss term being independent of
 the other rows in its batch (true for MSE/cross-entropy, computed per row).
 SupCon is *pairwise* within a batch -- a zero-padded dummy row would become a
@@ -33,7 +32,7 @@ see ``training_first_phase``'s docstring.
 Optional early stopping (``TrainConfig.early_stopping``, disabled by
 default) monitors ``val_loss`` and stops once it hasn't improved for
 ``early_stopping_patience`` consecutive epochs -- same mechanism (and same
-``TrainConfig`` field names) as ``vae.training``/``autoencoder.training``.
+``TrainConfig`` field names) as ``cgcnn.training``.
 
 An optional embedding-norm regularizer (``training_first_phase``'s ``lambda_norm``
 argument, ``0.0`` -- disabled -- by default) adds ``lambda_norm *
@@ -78,7 +77,7 @@ class TrainConfig:
     """Training configuration for ``SupConEncoder`` optimization.
 
     Deliberately does *not* hold ``lambda_family``/``lambda_spacegroup``
-    (unlike ``vae.training.TrainConfig``/``autoencoder.training.TrainConfig``):
+    (unlike ``cgcnn.training.TrainConfig``):
     those live in ``dim_red.pipeline.config.SupConConfig`` instead and are
     passed to ``training_first_phase`` as explicit arguments, since ``mode``
     (which label level(s) are active) lives there too and the two are best
@@ -297,8 +296,7 @@ def _make_train_step(
     ``has_family``/``has_spacegroup`` are plain Python bools (not traced
     values): the branches they guard are resolved at trace time, so the
     inactive term's ``supcon_loss`` call is compiled away entirely -- same
-    pattern already used by ``vae.training``/``autoencoder.training`` for
-    their auxiliary heads. ``norm_penalty`` (see that function) is always
+    pattern ``cgcnn.training`` uses for its auxiliary heads. ``norm_penalty`` (see that function) is always
     computed and returned regardless of ``lambda_norm`` -- like
     ``lambda_family``/``lambda_spacegroup``, a weight of ``0.0`` simply
     contributes nothing to ``total`` (compiled away at trace time via
@@ -422,7 +420,7 @@ def training_first_phase(
             ``val_spacegroup_ids``, activates the spacegroup-level SupCon
             term (weighted by ``lambda_spacegroup``). Independent of the
             family term -- no co-occurrence mask needed, unlike the
-            aux-head spacegroup classifier in ``vae``/``autoencoder``.
+            aux-head spacegroup classifier in ``cgcnn``.
         val_spacegroup_ids: Integer spacegroup class ids aligned with ``val_db``.
         lambda_family: Weight of the family-level term.
         lambda_spacegroup: Weight of the spacegroup-level term.

@@ -119,7 +119,7 @@ def _default_flat_config() -> dict:
 
 def _diff_from_defaults(config: RunConfig, defaults: dict) -> dict:
     """``{dotted_path: value}`` for every leaf of ``config`` that differs
-    from ``defaults`` (or has no entry there at all, e.g. ``vae.*``) --
+    from ``defaults`` (or has no entry there at all, e.g. ``encoder.*``) --
     fields left at their default aren't included, so only what this run
     actually customized shows up.
     """
@@ -134,7 +134,7 @@ def _diff_from_defaults(config: RunConfig, defaults: dict) -> dict:
 def _summarize_field(values: List[str]) -> str:
     """A single display value if every run in the sweep agrees, otherwise a
     ``varies: ...`` listing -- happens when the field itself is a swept axis
-    (e.g. ``vae.encoder_hidden_dim``), in which case the actual per-value
+    (e.g. ``encoder.encoder_hidden_dim``), in which case the actual per-value
     breakdown is already visible in the "Sweep axes" line.
     """
     unique = sorted(set(values))

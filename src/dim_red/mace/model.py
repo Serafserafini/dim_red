@@ -2,8 +2,7 @@
 Frozen, pretrained MACE feature extractor (wraps ``mace_jax``, an official
 JAX/Flax port of MACE -- https://github.com/ACEsuit/mace-jax).
 
-Unlike every other body in this codebase (``vae``/``autoencoder``/``supcon``/
-``cgcnn``), ``MaceEncoder`` never trains: it loads a pretrained foundation
+Unlike every other body in this codebase (``supcon``/``cgcnn``), ``MaceEncoder`` never trains: it loads a pretrained foundation
 model's weights (converted from a Torch checkpoint via ``mace_jax``'s own
 ``mace-jax-from-torch`` CLI, entirely outside this codebase and this
 package's runtime -- see ``src/dim_red/mace/CLAUDE.md``) and only ever runs a

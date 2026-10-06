@@ -13,7 +13,7 @@
 
 seed: 42
 output_dir: runs
-model: supcon # "vae" (default), "autoencoder", or "supcon"
+model: supcon # "supcon" (default), "supcon_mace", or "cgcnn"
 data_source: pyxtal # "fetch" (Materials Project) or "pyxtal" -- pyxtal used
 # here since it always generates known family/spacegroup labels for every
 # structure, exactly what the SupCon loss needs.
@@ -97,7 +97,7 @@ train:
   learning_rate: 0.001 # Adam's learning rate
   val_ratio: 0.2
   device: cpu
-  # Optional early stopping (same mechanism for vae/autoencoder/supcon):
+  # Optional early stopping (same mechanism for supcon/cgcnn):
   # stop once val_loss hasn't improved by more than min_delta for `patience`
   # consecutive epochs. Disabled by default (enabled: false, shown here).
   early_stopping:
