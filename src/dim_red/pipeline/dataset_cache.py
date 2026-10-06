@@ -63,6 +63,7 @@ from dim_red.soap import compute_soap
 from dim_red.utils import apply_standardization, fit_standardization
 
 if TYPE_CHECKING:
+    from dim_red.pipeline.config import AugmentationConfig as PipelineAugmentationConfig
     from dim_red.pipeline.config import PyxtalConfig, RunConfig
 
 logger = logging.getLogger("dim_red.pipeline")
@@ -576,33 +577,35 @@ def _get_or_build(
     )
 
 
-def _resolve_augmentation(config: "RunConfig") -> Optional[AugmentationConfig]:
-    """Converts ``RunConfig.augmentation`` (``dim_red.pipeline.config``'s
-    own, ``dim_red.augmentation``-independent dataclass -- see that class's
-    docstring) into the real ``dim_red.augmentation.AugmentationConfig`` that
+def resolve_augmentation(
+    augmentation: Optional["PipelineAugmentationConfig"], default_seed: int
+) -> Optional[AugmentationConfig]:
+    """Converts the pipeline's own ``AugmentationConfig`` (see
+    ``dim_red.pipeline.config``, independent of ``dim_red.augmentation``) into
+    the real ``dim_red.augmentation.AugmentationConfig`` that
     ``get_or_build_dataset``/``get_or_build_pyxtal_dataset`` actually use.
-    ``None`` when augmentation is disabled. Resolves ``seed`` the same way
-    ``build_dataset_for_run`` already does for ``config.pyxtal.seed``: falls
-    back to ``config.seed`` when ``config.augmentation.seed`` is ``None``.
-    """
-    if config.augmentation is None:
+    ``None`` when augmentation is disabled; ``seed`` falls back to
+    ``default_seed`` when ``augmentation.seed`` is ``None``."""
+    if augmentation is None:
         return None
-    seed = (
-        config.augmentation.seed
-        if config.augmentation.seed is not None
-        else config.seed
-    )
+    seed = augmentation.seed if augmentation.seed is not None else default_seed
     return AugmentationConfig(
-        n_augmented=config.augmentation.n_augmented,
-        keep_original=config.augmentation.keep_original,
-        jitter_probability=config.augmentation.jitter_probability,
-        jitter_std=config.augmentation.jitter_std,
-        vacancy_probability=config.augmentation.vacancy_probability,
-        vacancy_atom_probability=config.augmentation.vacancy_atom_probability,
-        max_vacancies=config.augmentation.max_vacancies,
-        supercell_radius=config.augmentation.supercell_radius,
+        n_augmented=augmentation.n_augmented,
+        keep_original=augmentation.keep_original,
+        jitter_probability=augmentation.jitter_probability,
+        jitter_std=augmentation.jitter_std,
+        vacancy_probability=augmentation.vacancy_probability,
+        vacancy_atom_probability=augmentation.vacancy_atom_probability,
+        max_vacancies=augmentation.max_vacancies,
+        supercell_radius=augmentation.supercell_radius,
         seed=seed,
     )
+
+
+def _resolve_augmentation(config: "RunConfig") -> Optional[AugmentationConfig]:
+    """``resolve_augmentation`` applied to ``RunConfig.augmentation`` with
+    ``RunConfig.seed`` as the fallback seed."""
+    return resolve_augmentation(config.augmentation, config.seed)
 
 
 def build_dataset_for_run(
