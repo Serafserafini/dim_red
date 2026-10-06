@@ -16,6 +16,7 @@ Layout (``<run_dir>``)::
 """
 
 import logging
+import os
 import shutil
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Union
@@ -32,6 +33,7 @@ from dim_red.pipeline._common import (
 )
 from dim_red.pipeline.full_stack_config import (
     FAMILY,
+    STACK_ORDER,
     FullStackConfig,
     StackSpec,
     full_stack_config_from_resolved_dict,
@@ -94,16 +96,36 @@ class FullStack:
         return full_stack
 
     def _write_run_config(self) -> None:
-        """Writes the resolved config, keeping stacks already recorded by
-        earlier calls (a run can gain stacks over time)."""
+        """Writes the resolved config. If one is already recorded, its run-level
+        fields and the specs of already-trained stacks are kept (that is what
+        was trained); stacks not recorded yet, or recorded but untrained, take
+        ``self.config``'s spec. ``self.config`` is replaced by the merged result."""
         path = self.run_dir / "config.yaml"
         resolved = full_stack_config_to_dict(self.config)
         if path.exists():
             with open(path) as f:
                 previous = yaml.safe_load(f) or {}
-            merged = dict(previous.get("stacks", {}))
-            merged.update(resolved["stacks"])
-            resolved["stacks"] = merged
+            if previous.get("stacks") is not None:
+                merged = dict(resolved["stacks"])
+                for name, spec in previous["stacks"].items():
+                    if name not in merged or self._stack_dir(name).exists():
+                        merged[name] = spec
+                resolved = {
+                    **{
+                        k: previous[k]
+                        for k in ("name", "seed", "model_kind", "output_dir")
+                    },
+                    "stacks": {
+                        n: merged[n]
+                        for n in sorted(
+                            merged,
+                            key=lambda n: (
+                                STACK_ORDER.index(n) if n in STACK_ORDER else 99
+                            ),
+                        )
+                    },
+                }
+                self.config = full_stack_config_from_resolved_dict(resolved)
         with open(path, "w") as f:
             yaml.safe_dump(resolved, f, sort_keys=False)
 
@@ -157,7 +179,7 @@ class FullStack:
     def _fit_body_one(self, name: str, spec: StackSpec) -> History:
         dataset = build_stack_dataset(spec, self.config.model_kind, self.cache_dir)
         classes, y = _build_vocab_ids(_labels_for(name, dataset))
-        sg_classes, sg_ids = _build_vocab_ids([int(s) for s in dataset.spacegroups])
+        _, sg_ids = _build_vocab_ids([int(s) for s in dataset.spacegroups])
         train_idx, val_idx = _split_indices_grouped(
             dataset.material_ids, spec.val_ratio, spec.seed
         )
@@ -180,8 +202,34 @@ class FullStack:
             len(history["train_loss"]),
         )
 
-        stack_dir = self._stack_dir(name)
+        final_dir = self._stack_dir(name)
+        stack_dir = final_dir.parent / f".{name}.tmp"
+        shutil.rmtree(stack_dir, ignore_errors=True)
         stack_dir.mkdir(parents=True)
+        try:
+            self._write_body(
+                stack_dir,
+                name,
+                spec,
+                stack,
+                history,
+                dataset,
+                X,
+                y,
+                sg_ids,
+                val_idx,
+                classes,
+            )
+            os.replace(stack_dir, final_dir)
+        except BaseException:
+            shutil.rmtree(stack_dir, ignore_errors=True)
+            raise
+        return history
+
+    @staticmethod
+    def _write_body(
+        stack_dir, name, spec, stack, history, dataset, X, y, sg_ids, val_idx, classes
+    ) -> None:
         stack.save_body(stack_dir / "body")
         _save_loss_history(stack_dir / "body" / "loss_history.csv", history)
         shutil.copy(dataset.structures_path, stack_dir / "dataset.extxyz")
@@ -211,7 +259,6 @@ class FullStack:
             )
         with open(stack_dir / "config.yaml", "w") as f:
             yaml.safe_dump(stack_spec_to_dict(spec), f, sort_keys=False)
-        return history
 
     # -- phase 2 ---------------------------------------------------------
     def fit_heads(
@@ -245,7 +292,8 @@ class FullStack:
         self, name: str, heads_name: str, spec: StackSpec
     ) -> Dict[str, History]:
         stack_dir = self._stack_dir(name)
-        emb = np.load(stack_dir / "embeddings.npz")
+        with np.load(stack_dir / "embeddings.npz") as npz:
+            emb = {k: npz[k] for k in npz.files}
         with open(stack_dir / "classes.yaml") as f:
             classes = yaml.safe_load(f)["classes"]
         split = emb["split"]
@@ -264,7 +312,24 @@ class FullStack:
             config=spec.model,
         )
 
-        heads_dir = stack_dir / "heads" / heads_name
+        final_dir = stack_dir / "heads" / heads_name
+        heads_dir = final_dir.parent / f".{heads_name}.tmp"
+        shutil.rmtree(heads_dir, ignore_errors=True)
+        heads_dir.mkdir(parents=True)
+        try:
+            self._write_heads(
+                heads_dir, name, heads_name, classes, stack, histories, emb, split, y, X
+            )
+            os.replace(heads_dir, final_dir)
+        except BaseException:
+            shutil.rmtree(heads_dir, ignore_errors=True)
+            raise
+        return histories
+
+    @staticmethod
+    def _write_heads(
+        heads_dir, name, heads_name, classes, stack, histories, emb, split, y, X
+    ) -> None:
         stack.save_heads(heads_dir)
         _save_loss_history(
             heads_dir / "classifier_loss_history.csv", histories["classifier"]
@@ -295,7 +360,6 @@ class FullStack:
                 save_path=str(heads_dir / "viz_plot.png"),
                 legend=False,
             )
-        return histories
 
     # -- loading ---------------------------------------------------------
     def load_stack(self, name: str, heads_name: Optional[str] = None) -> SingleStack:

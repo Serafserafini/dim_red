@@ -270,3 +270,76 @@ def test_load_stack_returns_a_usable_single_stack(tmp_path, patched):
     X = np.load(fs.run_dir / "stacks" / "cubic" / "embeddings.npz")["features"]
     assert stack.predict_proba(X).shape == (len(X), 2)
     assert stack.encode(X).shape == (len(X), 4)
+
+
+def _fail_once(monkeypatch, target, attr):
+    real = getattr(target, attr)
+    state = {"n": 0}
+
+    def flaky(*a, **k):
+        if state["n"] == 0:
+            state["n"] += 1
+            raise OSError("disk full")
+        return real(*a, **k)
+
+    monkeypatch.setattr(target, attr, flaky)
+    return lambda: monkeypatch.setattr(target, attr, real)
+
+
+def test_failed_body_write_leaves_nothing_and_can_be_retried(
+    tmp_path, patched, monkeypatch
+):
+    fs = FullStack.create(_config(tmp_path), cache_dir=tmp_path / "cache")
+    undo = _fail_once(monkeypatch, np, "savez")
+    with pytest.raises(OSError, match="disk full"):
+        fs.fit_body(stacks=["cubic"])
+    undo()
+    assert not (fs.run_dir / "stacks" / "cubic").exists()
+    assert not (fs.run_dir / "stacks" / ".cubic.tmp").exists()
+    fs.fit_body(stacks=["cubic"])
+    assert (fs.run_dir / "stacks" / "cubic" / "body" / "stack.yaml").exists()
+
+
+def test_failed_heads_write_leaves_nothing_and_can_be_retried(
+    tmp_path, patched, monkeypatch
+):
+    fs = FullStack.create(_config(tmp_path), cache_dir=tmp_path / "cache")
+    fs.fit_body(stacks=["cubic"])
+    undo = _fail_once(monkeypatch, np, "savez")
+    with pytest.raises(OSError, match="disk full"):
+        fs.fit_heads("h", stacks=["cubic"])
+    undo()
+    heads = fs.run_dir / "stacks" / "cubic" / "heads"
+    assert not (heads / "h").exists()
+    assert not (heads / ".h.tmp").exists()
+    fs.fit_heads("h", stacks=["cubic"])
+    assert (heads / "h" / "heads.yaml").exists()
+
+
+def test_open_with_config_keeps_trained_specs_and_adds_new_stacks(tmp_path, patched):
+    from dim_red.pipeline.full_stack_config import full_stack_config_from_resolved_dict
+
+    fs = FullStack.create(
+        _config(tmp_path, experts=("cubic",)), cache_dir=tmp_path / "cache"
+    )
+    fs.fit_body(stacks=["cubic"])
+
+    b = _block(encoder={"encoder_hidden_dim": [8], "latent_dim": 7})
+    config_b = full_stack_config_from_dict(
+        {
+            "name": "other",
+            "seed": 99,
+            "output_dir": str(tmp_path / "elsewhere"),
+            "experts": {"defaults": b, "cubic": {}, "tetragonal": {}},
+        }
+    )
+    reopened = FullStack.open(fs.run_dir, config=config_b)
+    with open(fs.run_dir / "config.yaml") as f:
+        recorded = full_stack_config_from_resolved_dict(yaml.safe_load(f))
+    assert recorded.name == "fs" and recorded.seed == 3
+    assert recorded.stacks["cubic"].model.latent_dim == 4
+    assert recorded.stacks["tetragonal"].model.latent_dim == 7
+    assert reopened.config.stacks["cubic"].model.latent_dim == 4
+
+    again = FullStack.open(fs.run_dir)
+    assert {"cubic", "tetragonal"} <= set(again.config.stacks)
