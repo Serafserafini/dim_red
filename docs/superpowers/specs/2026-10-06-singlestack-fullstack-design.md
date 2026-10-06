@@ -30,7 +30,7 @@ Differenze ammesse tra gli stack: label, dati di training, numero e larghezza de
 - **D7** — Nessuna label nel YAML: la decide il ruolo (family → sistema, esperto → spacegroup). `SingleStack` riceve le label come array.
 - **D8** — Config degli esperti: blocco `experts.defaults` + override per esperto, risolto in una `StackConfig` completa prima del training.
 - **D9** — Il fallback "esperto assente → predici lo spacegroup più frequente" sparisce. Troppo pochi dati o meno di 2 spacegroup in un esperto selezionato = errore esplicito.
-- **D10** — Non si garantisce la riproducibilità dei risultati dei round passati (dataset e seed per stack nuovi). Nessun test di equivalenza vecchio-contro-nuovo.
+- **D10** — I risultati dei run completi dei round passati non sono riproducibili (dataset e seed per stack nuovi). L'allenamento di `SingleStack` invece **è** verificato per equivalenza esatta con il vecchio codice a parità di input (array, split, seed, config): vedi sezione *Test*.
 - **D11** — Le tre routine di training (`training_first_phase`, `train_classification_tail`, `train_visualization_tail`) e le classi `ProjectionTail`/`VisualizationTail` **non cambiano** (unificarle è un lavoro a parte).
 
 ## Unità
@@ -117,9 +117,19 @@ Una sola funzione di scrittura per tutti gli stack. `heads/<nome>/` sostituisce 
 
 ## Test
 
-Solo quelli legati ai file toccati, mai la suite intera di iniziativa.
+Solo quelli legati ai file toccati, mai la suite intera di iniziativa. Tre livelli per verificare di non aver rotto l'allenamento rispetto alla versione precedente.
 
-- `SingleStack` su array piccoli: `fit_body` riduce la loss; `fit_heads` non cambia i parametri dell'encoder; `save`/`load` ridanno gli stessi output; a pari seed `fit_body` coincide con una chiamata diretta a `training_first_phase`.
+1. **Equivalenza esatta di `SingleStack` (veloce).** Array piccoli fissi (feature, label, split) + seed + config. `fit_body` e `fit_heads` devono dare gli stessi pesi e la stessa history del vecchio flusso (`np.array_equal`; tolleranza minima solo se jax risulta non deterministico). Tre riferimenti:
+   - livello famiglia: sequenza di `run_single` + `train_tail` (classification, visualization);
+   - esperto: `_train_hierarchical_supcon` su un sottoinsieme di una famiglia, con le stesse feature;
+   - a pari seed `fit_body` coincide con una chiamata diretta a `training_first_phase`.
+2. **Riferimenti golden salvati prima di cancellare (passo 0).** Finché il vecchio codice esiste, lo si esegue una volta su un dataset pyxtal minuscolo e si salvano pesi, history e metriche in `tests/golden/`. I test di livello 1 confrontano contro questi file, così restano validi dopo la rimozione al passo 4. Gli input (array, split, seed) sono salvati insieme ai golden.
+3. **Training end-to-end (lento, marker `slow`, lanciato solo su richiesta).** `FullStack` completo su una config pyxtal piccola (pochi spacegroup e strutture, 2-3 epoche) con un sottoinsieme di esperti: la loss scende, l'accuracy supera il caso, gli artefatti esistono, `predict` gira. Non confronta con i vecchi run.
+
+Il confronto di qualità con la config round 7 (accuratezza famiglia, separazione 2D, val-only contro val-only, test held-out) **non** fa parte dei test; eventualmente uno script a parte, in seguito.
+
+Altri test:
+- `SingleStack`: `fit_heads` non cambia i parametri dell'encoder; `save`/`load` ridanno gli stessi output.
 - `FullStack` su pyxtal minuscolo: dataset distinti per stack, layout su disco, `fit_heads` ripetuto sullo stesso corpo, sottoinsieme di esperti, errore su cartella già esistente, errore su dati insufficienti, `predict` con esperto mancante.
 - Config: merge `defaults` + override, validazione, espansione dei percorsi nelle sweep.
 - Lettore legacy: fixture del vecchio layout letta da `inference`, `compare`, `benchmark`.
@@ -127,7 +137,8 @@ Solo quelli legati ai file toccati, mai la suite intera di iniziativa.
 
 ## Ordine di lavoro (un commit per passo)
 
-1. `SingleStack` + test.
+0. **Golden**: eseguire il vecchio codice su un dataset minuscolo e salvare input e riferimenti in `tests/golden/` (prima di qualunque modifica).
+1. `SingleStack` + test (livello 1 contro i golden).
 2. `FullStackConfig`, `FullStack`, layout su disco + test.
 3. Lettore legacy in `inference`, `compare`, `benchmark` + test.
 4. Collegamento di `dimred-run`/`sweep`/`train-tail` a `FullStack`; rimozione dei vecchi percorsi di training supcon.
@@ -138,7 +149,7 @@ Solo quelli legati ai file toccati, mai la suite intera di iniziativa.
 - **Superficie ampia** (~25 YAML, script, notebook, ~15 file di test): il passo 5 è lungo ma meccanico.
 - **Logica non emersa nella mappatura** dentro `run_single`/`train_tail` (rami condivisi con `cgcnn`): si rilegge prima di rimuovere.
 - **Dataset indipendenti**: costo di generazione fino a 8× per una run completa (mitigato dalla cache per config identiche).
-- **Niente confronto con i round passati** a parità di config (D10): le metriche nuove vanno confrontate solo tra run nuovi.
+- **Niente confronto dei run completi con i round passati** (D10): l'equivalenza è verificata per componente (golden), le metriche dei run nuovi si confrontano solo tra loro.
 
 ## Fuori perimetro
 
