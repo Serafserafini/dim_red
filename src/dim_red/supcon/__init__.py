@@ -26,6 +26,9 @@ __all__ = [
     "TailTrainConfig",
     "train_classification_tail",
     "train_visualization_tail",
+    "Batching",
+    "StackConfig",
+    "SingleStack",
 ]
 
 
@@ -55,4 +58,7 @@ def __getattr__(name: str):
     }:
         tail_training = import_module("dim_red.supcon.tail_training")
         return getattr(tail_training, name)
+    if name in {"Batching", "StackConfig", "SingleStack"}:
+        stack = import_module("dim_red.supcon.stack")
+        return getattr(stack, name)
     raise AttributeError(f"module 'dim_red.supcon' has no attribute '{name}'")
