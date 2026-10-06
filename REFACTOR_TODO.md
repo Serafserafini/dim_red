@@ -1,5 +1,6 @@
 # Refactor futuro (lista di cose da fare)
 
+Refactor A (dedup sicure) completato: vedi `refactor/A-dedup-design.md` e `refactor/A-dedup-plan.md`.
 Note di lavoro nate dalla rassegna funzione-per-funzione del 2026-10-01/05.
 **Non è un piano di pulizia**: la pulizia (eliminare codice morto/superato) si fa prima, separatamente. Questi punti sono da affrontare *dopo*, con i test al verde, uno per volta.
 
@@ -53,9 +54,6 @@ Il `CLAUDE.md` le documenta come intenzionali (pacchetti indipendenti), ma sono 
 - `_make_optimizer` ×5, early stopping ×4, `_iter_batches` / `_weighted_mean` ×3
 - [ ] Se `vae`/`autoencoder`/`cgcnn` restano, valutare un piccolo modulo comune (`dim_red/_common/`) per il solo codice davvero identico. Dipende dalla rassegna di quei pacchetti.
 
-- `supcon.training.TrainConfig` e `supcon.tail_training.TailTrainConfig` hanno **gli stessi 12 campi** (usati in ~100 punti tra config, pipeline, test, esempi). [deciso: tenere ora, unificare nel refactor] Anche `pipeline.config.TrainSettings` / `TailTrainSettings` sono probabilmente gemelle: da verificare.
-- Chiavi di history `train_family_ce` / `val_family_ce` (colonne dei `loss_history.csv` delle tail di classificazione): nome ereditato dalla testa "family" a due teste. Rinominarle in `train_ce`/`val_ce` insieme a un lettore (`compare.py:241-244`, `single_run.py:248`) che accetti entrambi i nomi, per non perdere i CSV già salvati.
-- `_BATCHING_STRATEGIES` / `_DISTANCE_METRICS` definite in 2 file `supcon/` + `_BATCHING_STRATEGIES` anche in `pipeline/config.py`.
 - `VAEDatabase` (`vae/database.py`) è il contenitore dati usato anche da supcon/autoencoder/(cgcnn?): spostarlo in un modulo neutro (es. `dim_red/dataset.py`) così `supcon` non dipende da `vae`.
 
 ## 4. [ipotesi] File troppo grandi
@@ -66,13 +64,11 @@ Il `CLAUDE.md` le documenta come intenzionali (pacchetti indipendenti), ma sono 
 
 ## 5. [ipotesi] Config e compatibilità
 
-- [ ] Oggi i campi rimossi vengono ignorati con eccezioni caso per caso (`normalize_distances`, `jitter_std_relative`, ...). Meglio un meccanismo unico e dichiarato (elenco di chiavi deprecate, un solo warning) invece di tolleranze sparse.
 - [ ] Le dataclass gemelle `pipeline.config.PyxtalConfig` / `AugmentationConfig` specchiano a mano quelle di `dim_red.generate` / `dim_red.augmentation` (voluto, per non importare mp_api/pymatgen). Valutare se un'unica sorgente può generare l'altra.
 
 ## 5b. [ipotesi] Script slurm
 
 - Ogni `.sbatch` ripete ~20 righe identiche (retry su nodi `.novalocal` + attivazione dell'ambiente conda `dmred` + controllo `CONDA_DEFAULT_ENV`). Estrarle in un unico `slurm/_common.sh` incluso con `source`, così un fix (es. la lista dei nodi da escludere) si fa in un punto solo.
-- `_dataset_cache`: 6 funzioni `get_or_build_*` quasi identiche in `pipeline/dataset_cache.py` (3 featurizzatori × fetch/pyxtal) → una funzione con featurizzatore e sorgente come parametri.
 - Funzioni identiche duplicate in `pipeline/single_run.py` e `pipeline/tail_training.py`: `_make_unique_run_dir`, `_build_vocab_ids`, `_build_family_spacegroup_mask`, `_save_loss_history` → un solo modulo condiviso (modifica a basso rischio, si può fare anche prima del refactor grosso).
 - `run_single` (~730 righe) e `train_tail` (~400) sono funzioni monolitiche: spezzare per fase (dataset → split → modello → training → embedding → artefatti → auto-tail).
 
