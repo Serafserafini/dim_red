@@ -17,3 +17,24 @@ def sample_data():
     x4 = np.random.randn(50)
     x5 = np.random.randn(50) * 0.5
     return np.column_stack([x1, x2, x3, x4, x5])
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--runslow", action="store_true", default=False, help="run tests marked slow"
+    )
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers", "slow: end-to-end tests that really train (need --runslow)"
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    if config.getoption("--runslow"):
+        return
+    skip_slow = pytest.mark.skip(reason="need --runslow to run")
+    for item in items:
+        if "slow" in item.keywords:
+            item.add_marker(skip_slow)
