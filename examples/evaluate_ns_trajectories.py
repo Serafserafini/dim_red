@@ -63,6 +63,8 @@ DEFAULT_RUN_DIR = (
     "runs/experiment_pipeline_best_combo/"
     "model-supcon_hd-256-128_pyxtal-cub-hex-mon-ort-tet-tri-tri_nsp1_supcon-family_only_tau0.05_lf1"
 )
+# Per-family tuned visualizers: <dir>/<family>/<tag>/visualization_tail_params.msgpack,
+# as written by examples/tune_sg_visualization_hidden_dims.py (--out-dir).
 DEFAULT_SG_VIZ_TUNE_DIR = "runs/experiment_viz_tune_orthorhombic_tetragonal"
 HIERARCHICAL_SUBDIR = "hierarchical_supcon_best_combo"
 FAMILY_VIZ_SUBDIR = "visualization_family_only_euclidean"
