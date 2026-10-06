@@ -169,3 +169,53 @@ def test_load_from_yaml_file(tmp_path):
     path.write_text(yaml.safe_dump(_config()))
     cfg = load_full_stack_config(path)
     assert set(cfg.stacks) == {"family", "cubic", "tetragonal"}
+
+
+def _bad(path, value, key):
+    d = _config()
+    target = d["family"]
+    for k in path:
+        target = target.setdefault(k, {})
+    target.update(value)
+    with pytest.raises(ValueError, match=key):
+        full_stack_config_from_dict(d)
+
+
+def test_typo_in_data_pyxtal_is_rejected():
+    _bad(
+        ["data", "pyxtal"], {"structure_per_spacegroup": 2}, "structure_per_spacegroup"
+    )
+
+
+def test_typo_in_train_is_rejected():
+    _bad(["train"], {"epoch": 3}, "epoch")
+
+
+def test_typo_in_train_early_stopping_is_rejected():
+    _bad(["train", "early_stopping"], {"patients": 3}, "patients")
+
+
+def test_typo_in_contrastive_is_rejected():
+    _bad(["contrastive"], {"taus": 0.1}, "taus")
+
+
+def test_typo_in_batching_is_rejected():
+    _bad(["batching"], {"k": 4}, "'k'")
+
+
+def test_val_ratio_out_of_range_is_rejected():
+    _bad(["train"], {"val_ratio": 1.5}, "val_ratio")
+
+
+def test_min_train_rows_below_one_is_rejected():
+    d = _config()
+    d["family"]["min_train_rows"] = 0
+    with pytest.raises(ValueError, match="min_train_rows"):
+        full_stack_config_from_dict(d)
+
+
+def test_none_contrastive_block_is_accepted():
+    d = _config()
+    d["family"]["contrastive"] = None
+    cfg = full_stack_config_from_dict(d)
+    assert cfg.stacks[FAMILY].model.body_train.tau == 0.05

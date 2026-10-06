@@ -17,6 +17,7 @@ from typing import Any, Dict, Optional, Union
 
 from dim_red.pipeline.config import (
     AugmentationConfig,
+    EarlyStoppingConfig,
     MaceConfig,
     PyxtalConfig,
     SoapConfig,
@@ -154,13 +155,46 @@ def _restrict_pyxtal(name: str, pyxtal: dict) -> dict:
     return {**pyxtal, "families": [system]}
 
 
-def parse_stack_spec(name: str, block: Dict[str, Any], run_seed: int) -> StackSpec:
-    unknown = set(block) - _BLOCK_KEYS
+def _check_known_keys(name: str, where: str, d: Dict[str, Any], valid) -> None:
+    unknown = set(d) - set(valid)
     if unknown:
         raise ValueError(
-            f"stack {name!r}: unknown keys {sorted(unknown)}; valid keys: "
-            f"{sorted(_BLOCK_KEYS)}"
+            f"stack {name!r}: unknown keys {sorted(unknown)} in {where}; "
+            f"valid keys: {sorted(valid)}"
         )
+
+
+def _field_names(cls) -> set:
+    return {f.name for f in dataclasses.fields(cls)}
+
+
+def _sub(name: str, where: str, block: Dict[str, Any], key: str, valid) -> dict:
+    """``block[key]`` as a checked dict (``None``/absent -> ``{}``)."""
+    d = block.get(key)
+    d = {} if d is None else d
+    if not isinstance(d, dict):
+        raise ValueError(f"stack {name!r}: {where} must be a mapping, got {d!r}")
+    _check_known_keys(name, where, d, valid)
+    return d
+
+
+def _data_dict(name: str, where: str, data_block: dict, key: str, cls) -> dict:
+    return _sub(name, where, data_block, key, _field_names(cls))
+
+
+def _checked_train(name: str, where: str, d: Dict[str, Any], cls) -> Dict[str, Any]:
+    d = {} if d is None else d
+    _check_known_keys(name, where, d, _field_names(cls))
+    es = d.get("early_stopping")
+    es = {} if es is None else es
+    _check_known_keys(
+        name, f"{where}.early_stopping", es, _field_names(EarlyStoppingConfig)
+    )
+    return d
+
+
+def parse_stack_spec(name: str, block: Dict[str, Any], run_seed: int) -> StackSpec:
+    _check_known_keys(name, "the stack block", block, _BLOCK_KEYS)
     seed = int(block.get("seed", run_seed + STACK_ORDER.index(name)))
 
     data_block = block.get("data")
@@ -169,49 +203,122 @@ def parse_stack_spec(name: str, block: Dict[str, Any], run_seed: int) -> StackSp
             f"stack {name!r}: 'data' must contain a 'pyxtal' block "
             "(FullStack supports data_source pyxtal only)"
         )
+    _check_known_keys(
+        name, "data", data_block, {"pyxtal", "augmentation", "soap", "mace"}
+    )
+    pyxtal_dict = _data_dict(name, "data.pyxtal", data_block, "pyxtal", PyxtalConfig)
     pyxtal = _dataclass_from_dict(
-        PyxtalConfig, _restrict_pyxtal(name, dict(data_block["pyxtal"]))
+        PyxtalConfig, _restrict_pyxtal(name, dict(pyxtal_dict))
     )
     if pyxtal.seed is None:
         pyxtal = dataclasses.replace(pyxtal, seed=seed)
     augmentation = (
-        _dataclass_from_dict(AugmentationConfig, data_block["augmentation"])
+        _dataclass_from_dict(
+            AugmentationConfig,
+            _data_dict(
+                name,
+                "data.augmentation",
+                data_block,
+                "augmentation",
+                AugmentationConfig,
+            ),
+        )
         if data_block.get("augmentation") is not None
         else None
     )
     data = StackDataConfig(
         pyxtal=pyxtal,
         augmentation=augmentation,
-        soap=_dataclass_from_dict(SoapConfig, data_block.get("soap", {})),
-        mace=_dataclass_from_dict(MaceConfig, data_block.get("mace", {})),
+        soap=_dataclass_from_dict(
+            SoapConfig, _data_dict(name, "data.soap", data_block, "soap", SoapConfig)
+        ),
+        mace=_dataclass_from_dict(
+            MaceConfig, _data_dict(name, "data.mace", data_block, "mace", MaceConfig)
+        ),
     )
 
-    encoder = block.get("encoder") or {}
+    encoder = _sub(
+        name, "encoder", block, "encoder", {"encoder_hidden_dim", "latent_dim"}
+    )
     missing = {"encoder_hidden_dim", "latent_dim"} - set(encoder)
     if missing:
         raise ValueError(f"stack {name!r}: encoder block needs {sorted(missing)}")
-    projection = block.get("projection", {})
-    contrastive = block.get("contrastive", {})
+    projection = _sub(
+        name,
+        "projection",
+        block,
+        "projection",
+        {"projection_dim", "projection_hidden_dim"},
+    )
+    contrastive = _sub(
+        name, "contrastive", block, "contrastive", {"tau", "distance", "lambda_norm"}
+    )
     distance = _check_distance(
         name, "contrastive", contrastive.get("distance", "cosine")
     )
-    classifier = block.get("classifier", {})
-    viz = block.get("viz", {})
+    classifier = _sub(name, "classifier", block, "classifier", {"hidden_dim", "train"})
+    viz = _sub(
+        name,
+        "viz",
+        block,
+        "viz",
+        {
+            "hidden_dim",
+            "viz_dim",
+            "tau",
+            "distance",
+            "lambda_norm",
+            "train",
+            "batching",
+        },
+    )
     viz_distance = _check_distance(name, "viz", viz.get("distance", "euclidean"))
     viz_dim = int(viz.get("viz_dim", 2))
     if viz_dim not in (2, 3):
         raise ValueError(f"stack {name!r}: viz.viz_dim must be 2 or 3, got {viz_dim}")
 
-    train_dict = block.get("train", {})
+    train_dict = _checked_train(name, "train", block.get("train"), TrainSettings)
     head_default = {k: v for k, v in train_dict.items() if k != "val_ratio"}
+    classifier_train = classifier.get("train")
+    viz_train = viz.get("train")
     body_settings = _parse_train_settings(TrainSettings, train_dict)
     classifier_settings = _parse_train_settings(
-        TailTrainSettings, classifier.get("train", head_default)
+        TailTrainSettings,
+        (
+            head_default
+            if classifier_train is None
+            else _checked_train(
+                name, "classifier.train", classifier_train, TailTrainSettings
+            )
+        ),
     )
     viz_settings = _parse_train_settings(
-        TailTrainSettings, viz.get("train", head_default)
+        TailTrainSettings,
+        (
+            head_default
+            if viz_train is None
+            else _checked_train(name, "viz.train", viz_train, TailTrainSettings)
+        ),
     )
 
+    val_ratio = body_settings.val_ratio
+    if not 0 < val_ratio < 1:
+        raise ValueError(
+            f"stack {name!r}: train.val_ratio must satisfy 0 < val_ratio < 1, "
+            f"got {val_ratio!r}"
+        )
+    min_train_rows = block.get("min_train_rows", 10)
+    if (
+        isinstance(min_train_rows, bool)
+        or not isinstance(min_train_rows, int)
+        or min_train_rows < 1
+    ):
+        raise ValueError(
+            f"stack {name!r}: min_train_rows must be an integer >= 1, "
+            f"got {min_train_rows!r}"
+        )
+
+    batching_keys = {"strategy", "P", "K", "S"}
     model = StackConfig(
         encoder_hidden_dim=list(encoder["encoder_hidden_dim"]),
         latent_dim=int(encoder["latent_dim"]),
@@ -229,17 +336,21 @@ def parse_stack_spec(name: str, block: Dict[str, Any], run_seed: int) -> StackSp
         viz_dim=viz_dim,
         lambda_norm=float(contrastive.get("lambda_norm", 0.0)),
         viz_lambda_norm=float(viz.get("lambda_norm", 0.0)),
-        body_batching=_batching(name, block.get("batching", {})),
-        viz_batching=_batching(name, viz.get("batching", {})),
+        body_batching=_batching(
+            name, _sub(name, "batching", block, "batching", batching_keys)
+        ),
+        viz_batching=_batching(
+            name, _sub(name, "viz.batching", viz, "batching", batching_keys)
+        ),
         seed=seed,
     )
     return StackSpec(
         name=name,
         data=data,
         model=model,
-        val_ratio=body_settings.val_ratio,
+        val_ratio=val_ratio,
         seed=seed,
-        min_train_rows=int(block.get("min_train_rows", 10)),
+        min_train_rows=min_train_rows,
     )
 
 
