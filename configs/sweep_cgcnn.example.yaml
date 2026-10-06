@@ -3,7 +3,7 @@
 # graph-convolution depth/width and the spacegroup loss weight, so this
 # single sweep compares model capacity and loss balance side by side at
 # parity of every other hyperparameter.
-# Run with: python -m dim_red.pipeline.cli --config configs/sweep_cgcnn.example.yaml --sweep
+# Run with: dimred-sweep configs/sweep_cgcnn.example.yaml
 # or:       dimred-sweep configs/sweep_cgcnn.example.yaml
 
 base:
@@ -19,9 +19,9 @@ base:
     n_species: 2
     seed: 42
 
-  # Only vae.latent_dim is read for model: cgcnn -- see
+  # Only encoder.latent_dim is read for model: cgcnn -- see
   # configs/single_run_cgcnn.example.yaml's comments.
-  vae:
+  encoder:
     encoder_hidden_dim: [1]
     latent_dim: 32
 
@@ -43,19 +43,16 @@ base:
     epochs: 30
     batch_size: 16
     learning_rate: 0.001
-    optimizer: adam
     val_ratio: 0.2
     device: cpu
 
   # tails:
   #   classification:
-  #     mode: family_and_spacegroup
   #   visualization:
   #     viz_dim: 2
   #   train:
   #     epochs: 20
   #     batch_size: 32
-  #     optimizer: adam
 
 # 3 conv depths x 2 atom_fea_len widths x 2 spacegroup-loss weights = 12
 # runs. Since only pyxtal/graph settings affect the dataset cache key, all

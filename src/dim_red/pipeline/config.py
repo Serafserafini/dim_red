@@ -1,6 +1,6 @@
 """
-Configuration schema and YAML loaders for the unified fetch -> SOAP -> VAE
-pipeline, covering both single-run configs and grid-sweep configs.
+Configuration schema and YAML loaders for the unified structures -> features
+-> model pipeline, covering both single-run configs and grid-sweep configs.
 """
 
 from __future__ import annotations
@@ -20,16 +20,15 @@ logger = logging.getLogger("dim_red.pipeline")
 _AUX_HEADS_MODES = ("none", "family_only", "family_and_spacegroup")
 _SUPCON_MODES = ("family_only", "spacegroup_only", "family_and_spacegroup")
 _SUPCON_DISTANCES = ("euclidean", "cosine")
-_MODEL_KINDS = ("vae", "autoencoder", "supcon", "cgcnn", "mace", "supcon_mace")
+_MODEL_KINDS = ("supcon", "cgcnn", "supcon_mace")
 _DATA_SOURCES = ("fetch", "pyxtal")
-_OPTIMIZER_KINDS = ("adam", "velo")
 
 
 @dataclass(frozen=True)
 class SoapConfig:
     """SOAP hyperparameters shared by every run (average is fixed to "outer"
     by the pipeline itself, since a single global descriptor per structure is
-    what the VAE consumes).
+    what the models consume).
     """
 
     r_cut: float = 5.0
@@ -59,13 +58,12 @@ class GraphConfig:
     ``SoapConfig`` establishes.
 
     ``latent_dim`` is deliberately NOT a field here -- it's read from the
-    shared ``vae:`` block (``vae.latent_dim``) instead, the same "shared
-    field, model-kind-specific subset" precedent ``supcon`` already sets
-    (it reads ``vae.encoder_hidden_dim``/``vae.latent_dim`` and ignores
-    ``vae.decoder_hidden_dim``/``vae.mirror``). For ``model_kind: cgcnn``,
-    every other ``vae:`` field is ignored -- only ``vae.latent_dim`` is read
-    (the body's output width, saved to ``embeddings.npz``, reused by every
-    downstream tail).
+    shared ``encoder:`` block (``encoder.latent_dim``) instead, the same
+    "shared field, model-kind-specific subset" precedent ``supcon`` already
+    sets (it reads ``encoder.encoder_hidden_dim``/``encoder.latent_dim``).
+    For ``model_kind: cgcnn``, every other ``encoder:`` field is ignored --
+    only ``encoder.latent_dim`` is read (the body's output width, saved to
+    ``embeddings.npz``, reused by every downstream tail).
 
     ``max_species`` doubles as both a graph-construction parameter (bounds
     ``dim_red.cgcnn.graph.atoms_list_to_graph_arrays``' species-remapping,
@@ -163,16 +161,14 @@ class GraphConfig:
 
 @dataclass(frozen=True)
 class MaceConfig:
-    """Config for ``RunConfig.model_kind == "mace"``: a frozen, pretrained
-    MACE (equivariant message-passing, 3-body/angular interactions) feature
-    extractor -- used *instead of* ``soap``/``graph`` for that model kind.
-    Unlike ``GraphConfig`` (which sizes a body trained from scratch),
-    ``mace`` never trains a body: ``checkpoint_path`` points to an already
-    -pretrained, already-converted checkpoint, and its architecture (and
-    therefore its output width) is whatever that checkpoint says, not
-    something this config chooses. There is deliberately no ``latent_dim``
-    field here, unlike ``GraphConfig``'s reuse of ``vae.latent_dim`` -- the
-    embedding width is read directly off the loaded checkpoint at run time.
+    """Config for ``RunConfig.model_kind == "supcon_mace"``: a frozen,
+    pretrained MACE (equivariant message-passing, 3-body/angular
+    interactions) feature extractor -- used *instead of* ``soap`` for that
+    model kind. ``mace`` never trains: ``checkpoint_path`` points to an
+    already-pretrained, already-converted checkpoint, and its architecture
+    (and therefore its output width) is whatever that checkpoint says, not
+    something this config chooses. The SupCon body trained on top of its
+    embeddings is sized by ``encoder:`` as usual.
 
     See ``dim_red.mace.model.MaceEncoder``/``dim_red.mace.model.load_frozen_checkpoint``.
 
@@ -181,7 +177,7 @@ class MaceConfig:
             pretrained Torch foundation model (e.g. MACE-MP-0) via
             ``mace_jax``'s own ``mace-jax-from-torch`` CLI, run once outside
             this codebase -- see ``src/dim_red/mace/CLAUDE.md``. Required
-            (non-empty) whenever ``model_kind == "mace"``.
+            (non-empty) whenever ``model_kind == "supcon_mace"``.
         r_max: Cutoff radius (Angstroms) for neighbor search -- MUST match
             the cutoff the checkpoint was pretrained with.
         pooling: ``"mean"`` (default) or ``"sum"`` -- how per-atom features
@@ -354,31 +350,29 @@ class AugmentationConfig:
 
 
 @dataclass(frozen=True)
-class VAEArchConfig:
-    """Encoder/decoder architecture: this is sweep axis A (hidden-layer
-    configuration). Shared by both model kinds (``RunConfig.model_kind``) --
-    a VAE and a plain Autoencoder built from the same ``encoder_hidden_dim``/
-    ``latent_dim``/``decoder_hidden_dim``/``mirror`` differ only in how the
-    latent code is produced (sampled vs. deterministic) and trained, not in
-    this architecture shape. Kept as ``vae`` in configs/dotted-paths for
-    backward compatibility with existing sweep configs.
+class EncoderConfig:
+    """Encoder architecture: this is sweep axis A (hidden-layer
+    configuration). Read by every ``RunConfig.model_kind`` that has an MLP
+    encoder (``supcon``/``supcon_mace``); ``cgcnn`` builds its own graph
+    encoder from ``GraphConfig`` and reads only ``latent_dim`` from here.
+
+    In YAML this block is ``encoder:``; the old name ``vae:`` is still read
+    (and merged) so older configs and saved ``config.yaml`` files keep
+    loading.
     """
 
     encoder_hidden_dim: List[int]
     latent_dim: int
-    decoder_hidden_dim: Optional[List[int]] = None
-    mirror: bool = True
 
 
 @dataclass(frozen=True)
 class EarlyStoppingConfig:
-    """Early-stopping settings, shared uniformly across all three model
-    kinds (``vae``/``autoencoder``/``supcon``) since every training loop's
-    history always has a ``"val_loss"`` key -- the monitored metric here,
-    not configurable in this first pass.
+    """Early-stopping settings, shared uniformly across every model kind
+    since every training loop's history always has a ``"val_loss"`` key --
+    the monitored metric here, not configurable in this first pass.
 
-    Mirrors ``vae.training.TrainConfig``/``autoencoder.training.TrainConfig``/
-    ``supcon.training.TrainConfig``'s ``early_stopping*`` fields one-to-one;
+    Mirrors ``supcon.training.TrainConfig``/``cgcnn.training.TrainConfig``'s
+    ``early_stopping*`` fields one-to-one;
     ``pipeline.single_run.run_single`` reads this block and populates those
     fields on whichever ``TrainConfig`` the active ``model_kind`` uses.
 
@@ -410,48 +404,29 @@ class EarlyStoppingConfig:
 class TrainSettings:
     """Training hyperparameters, plus the train/val split ratio.
 
-    ``beta`` is ignored when ``RunConfig.model_kind == "autoencoder"`` (no
-    KL term to weight -- see ``dim_red.autoencoder.training.TrainConfig``).
-
-    Attributes:
-        optimizer: ``"adam"`` (default) -- a plain, fast ``optax.adam(learning_rate)``
-            -- or ``"velo"`` -- ``learned_optimization``'s pretrained VeLO
-            meta-learned optimizer, whose ``num_steps``-dependent setup and
-            pretrained-hypernetwork checkpoint load cost real, fixed time
-            (several seconds or more, plus a network call attempting to
-            resolve Google Cloud credentials that can hang far longer on
-            some networks) before training even starts. Same field/semantics
-            across ``vae``/``autoencoder``/``supcon`` phase-1 training and
-            (via ``TailTrainSettings.optimizer``) phase-2 tail training.
+    ``learning_rate`` is Adam's learning rate (the only optimizer).
     """
 
     epochs: int = 20
     batch_size: int = 32
     learning_rate: float = 1e-3
-    optimizer: str = "adam"
-    beta: float = 1.0
     val_ratio: float = 0.2
     device: str = "cpu"
     early_stopping: EarlyStoppingConfig = field(default_factory=EarlyStoppingConfig)
 
-    def __post_init__(self):
-        if self.optimizer not in _OPTIMIZER_KINDS:
-            raise ValueError(
-                f"train.optimizer must be one of {_OPTIMIZER_KINDS}, got "
-                f"{self.optimizer!r}"
-            )
-
 
 @dataclass(frozen=True)
 class AuxHeadsConfig:
-    """Optional auxiliary classification heads on the VAE latent ``z``.
+    """Classification heads trained jointly with the body (``cgcnn`` only --
+    it is that model kind's only training objective; ``supcon``/
+    ``supcon_mace`` ignore this block).
 
     Attributes:
-        mode: One of ``"none"`` (plain VAE, default -- current behavior,
-            unchanged), ``"family_only"`` (adds a small family-
-            classification head), or ``"family_and_spacegroup"`` (adds
-            both heads, with the spacegroup head conditioned on family via
-            masking -- see ``dim_red.vae.model.apply_family_mask``).
+        mode: One of ``"none"`` (default; invalid for ``cgcnn``),
+            ``"family_only"`` (a small family-classification head), or
+            ``"family_and_spacegroup"`` (both heads, with the spacegroup
+            head conditioned on family via masking -- see
+            ``dim_red.cgcnn.model.apply_family_mask``).
         lambda_family: Weight of the family cross-entropy term. Ignored
             when ``mode == "none"``.
         lambda_spacegroup: Weight of the (family-masked) spacegroup
@@ -521,7 +496,7 @@ class SupConConfig:
             largely redundant with ``distance == "cosine"``.
         projection_dim: Size of the space the SupCon loss is actually
             computed in (Khosla et al. 2020 default: 128) -- separate from
-            ``vae.latent_dim``, which stays the body's own representation
+            ``encoder.latent_dim``, which stays the body's own representation
             width (saved to ``embeddings.npz``, reused by every downstream
             tail). The projection tail is discarded after phase 1 in the
             original paper; this codebase still saves its trained params
@@ -583,7 +558,7 @@ _BATCHING_STRATEGIES = ("random", "balanced")
 
 @dataclass(frozen=True)
 class BatchingConfig:
-    """How ``dim_red.supcon.training.train_supcon`` forms training
+    """How ``dim_red.supcon.training.training_first_phase`` forms training
     mini-batches. Only meaningful for ``RunConfig.model_kind == "supcon"``
     (ignored otherwise, same treatment as ``aux_heads``/``supcon`` being
     ignored for the model kinds they don't apply to).
@@ -623,56 +598,25 @@ class RunConfig:
     """Fully resolved configuration for a single dataset -> SOAP -> model run.
 
     Attributes:
-        model_kind: Which model to train: ``"vae"`` (default, a
-            variational autoencoder trained with a KL term/``beta``),
-            ``"autoencoder"`` (a deterministic autoencoder, no KL/``beta``),
-            ``"supcon"`` (an encoder-only model with no decoder/KL, trained
-            with a Supervised Contrastive loss on family/spacegroup labels
-            instead of reconstruction -- see ``dim_red.supcon``), or
-            ``"cgcnn"`` (a graph-convolutional encoder-only body, trained
-            jointly with classifier head(s) via cross-entropy on
-            family/spacegroup labels -- no decoder/KL/contrastive loss at
-            all, single-phase, like ``"vae"``/``"autoencoder"``'s
-            ``aux_heads`` pattern applied to a graph-convolutional body
-            instead of a flat-feature encoder, always requires
-            ``aux_heads.mode != "none"``; see ``dim_red.cgcnn``), or
-            ``"mace"`` (a frozen, pretrained equivariant body -- see
-            ``dim_red.mace``; captures 3-body/angular interactions via
-            higher-order equivariant message passing, unlike ``"cgcnn"``'s
-            pairwise-only graph. Has no training phase of its own at all:
-            embeddings come from a forward pass through an already-pretrained
-            foundation-model checkpoint, so ``aux_heads``/``train`` (beyond
-            ``device``) don't apply to it -- classification only happens via
-            a ``tails`` classification tail, see below). ``"vae"``/
-            ``"autoencoder"``/``"supcon"`` read their encoder architecture
-            from ``vae`` (``encoder_hidden_dim``, ``latent_dim`` --
-            ``decoder_hidden_dim``/``mirror`` are ignored by ``"supcon"``,
-            same treatment ``"autoencoder"`` gives ``beta``); ``"cgcnn"``
-            reads its graph-construction + architecture hyperparameters from
-            ``graph`` instead (only ``vae.latent_dim`` is still read);
-            ``"mace"`` reads its checkpoint path/cutoff from ``mace`` instead
-            -- its embedding width is whatever the loaded checkpoint says,
-            not a config choice, so ``vae.latent_dim`` isn't read at all for
-            it. ``"supcon_mace"`` is ``"supcon"``'s training recipe (body +
-            ``ProjectionTail``, contrastive loss, everything read from
-            ``supcon``/``vae``/``batching`` exactly like ``"supcon"``) fed
-            ``"mace"``'s frozen embedding instead of a standardized SOAP
-            descriptor as its raw input features -- i.e. the encoder+
-            projection stack is *trained* (unlike plain ``"mace"``, which
-            never trains anything), just on top of MACE's pretrained
-            representation instead of SOAP, so it still needs
-            ``mace.checkpoint_path`` set (same requirement as ``"mace"``)
-            despite also training a body. This gets the supervised-
-            contrastive optimization plain ``"mace"`` lacks (that embedding
-            is never adapted to separate family/spacegroup at all) while
-            starting from a pretrained-on-real-materials representation
-            instead of SOAP's purely geometric one. ``"vae"``/
-            ``"autoencoder"``/``"cgcnn"`` read their aux-head settings from
-            ``aux_heads``; ``"supcon"``/``"supcon_mace"`` read their loss
-            settings from ``supcon`` instead (``aux_heads`` is ignored for
-            them), and their training-batch sampling strategy from
-            ``batching`` (ignored for ``"vae"``/``"autoencoder"``/
-            ``"cgcnn"``, which always use a plain shuffle). See
+        model_kind: Which model to train: ``"supcon"`` (default; an
+            encoder-only model trained with a Supervised Contrastive loss on
+            family/spacegroup labels, jointly with a projection tail -- see
+            ``dim_red.supcon``), ``"supcon_mace"`` (the same training recipe,
+            fed the embeddings of a frozen, pretrained MACE model -- see
+            ``dim_red.mace`` -- instead of a standardized SOAP descriptor, so
+            it requires ``mace.checkpoint_path``), or ``"cgcnn"`` (a
+            graph-convolutional encoder trained jointly with classifier
+            head(s) via cross-entropy on family/spacegroup labels, in a
+            single phase; always requires ``aux_heads.mode != "none"``; see
+            ``dim_red.cgcnn``). ``"supcon"``/``"supcon_mace"`` read their
+            encoder architecture from ``encoder`` (``encoder_hidden_dim``,
+            ``latent_dim``); ``"cgcnn"`` reads its graph-construction +
+            architecture hyperparameters from ``graph`` instead (only
+            ``encoder.latent_dim`` is still read). ``"supcon"``/
+            ``"supcon_mace"`` read their loss settings from ``supcon`` (and
+            their training-batch sampling strategy from ``batching``);
+            ``"cgcnn"`` reads its classification-head settings from
+            ``aux_heads`` and always uses a plain shuffle. See
             ``dim_red.pipeline.single_run.run_single``.
         data_source: How the dataset (before SOAP) is built: ``"fetch"``
             (default -- the ``fetch`` config block queries Materials
@@ -688,31 +632,18 @@ class RunConfig:
             after the dataset is built, before SOAP. ``None`` (default)
             disables it, current behavior unchanged. Applies regardless of
             ``data_source``. See ``AugmentationConfig``.
-        tails: Optionally auto-train a classification, visualization, and/or
-            hierarchical tail (``dim_red.pipeline.tail_training.train_tail``)
-            right after
+        tails: Optionally auto-train a classification and/or visualization
+            tail (``dim_red.pipeline.tail_training.train_tail``) right after
             this run's body finishes phase-1 training -- the same entry
             point ``dimred-train-tail`` uses manually, just invoked
-            automatically. ``None`` (default) disables it, current behavior
-            unchanged. ``classification``/``hierarchical`` are ignored for
-            ``model_kind not in ("supcon", "cgcnn", "mace")`` (a
-            vae/autoencoder body already has its own classification heads
-            via ``aux_heads``, so those two tail kinds would be pure
-            duplication for it), same treatment ``aux_heads``/``supcon``/
-            ``batching`` get for the model kinds they don't apply to -- for
-            ``"mace"`` this ``tails`` block is the *only* way to get a
-            classifier out of a mace run at all, since the frozen body has
-            no heads of its own. ``visualization``, however, applies to
-            *every* model_kind, including ``"vae"``/``"autoencoder"`` -- a
-            learned, class-separating low-dimensional projection has no
-            built-in equivalent there (``aux_heads`` only ever produces a
-            classifier, never a visualization), so it isn't redundant the
-            way a classification/hierarchical tail would be. See
-            ``AutoTailsConfig``, ``dim_red.pipeline.tail_training._TAIL_MODEL_KINDS``.
+            automatically. ``None`` (default) disables it. ``classification``
+            is ignored for model kinds that can't have one (see
+            ``dim_red.pipeline.tail_training._TAIL_MODEL_KINDS``); ``visualization``
+            applies to every model_kind. See ``AutoTailsConfig``.
     """
 
     soap: SoapConfig
-    vae: VAEArchConfig
+    encoder: EncoderConfig
     train: TrainSettings
     aux_heads: AuxHeadsConfig = field(default_factory=AuxHeadsConfig)
     supcon: SupConConfig = field(default_factory=SupConConfig)
@@ -722,7 +653,7 @@ class RunConfig:
     seed: int = 42
     output_dir: str = "runs"
     name: Optional[str] = None
-    model_kind: str = "vae"
+    model_kind: str = "supcon"
     data_source: str = "fetch"
     fetch: Optional[FetchConfig] = None
     pyxtal: Optional[PyxtalConfig] = None
@@ -745,24 +676,13 @@ class RunConfig:
         if self.model_kind == "cgcnn" and self.aux_heads.mode == "none":
             raise ValueError(
                 "model_kind='cgcnn' requires aux_heads.mode != 'none' "
-                "(family classification is CGCNN's only training objective, "
-                "unlike vae/autoencoder which can train an unsupervised "
-                "reconstruction objective alone)"
+                "(family classification is CGCNN's only training objective)"
             )
-        if self.model_kind in ("mace", "supcon_mace") and not self.mace.checkpoint_path:
-            reason = (
-                "a frozen body has no training objective at all -- there is "
-                "nothing to build its architecture/weights from besides an "
-                "already-pretrained, already-converted checkpoint"
-                if self.model_kind == "mace"
-                else "its raw input features come from a frozen MACE forward "
-                "pass (the body trained on top of them is supcon_mace's own "
-                "SupConEncoder+ProjectionTail, but that needs MACE's "
-                "embedding to train on in the first place)"
-            )
+        if self.model_kind == "supcon_mace" and not self.mace.checkpoint_path:
             raise ValueError(
-                f"model_kind={self.model_kind!r} requires mace.checkpoint_path "
-                f"to be set ({reason})"
+                "model_kind='supcon_mace' requires mace.checkpoint_path to be "
+                "set (its raw input features come from a frozen MACE forward "
+                "pass)"
             )
 
 
@@ -774,7 +694,7 @@ class SweepConfig:
 
     Any ``RunConfig`` field can be swept this way -- not just a fixed set of
     named axes -- since each grid key is just a path into that same nested
-    dict, e.g. ``"vae.encoder_hidden_dim"``, ``"train.learning_rate"``,
+    dict, e.g. ``"encoder.encoder_hidden_dim"``, ``"train.learning_rate"``,
     ``"aux_heads.lambda_family"``, ``"fetch.crystal_systems"``, or a
     top-level field like ``"seed"``.
     """
@@ -794,7 +714,16 @@ class SweepConfig:
 # Keys that older configs / saved ``config.yaml`` files may still carry for
 # features that no longer exist. Ignored silently (debug log only) so existing
 # runs stay loadable without a warning for every one of them.
-_DEPRECATED_KEYS = frozenset({"normalize_distances", "jitter_std_relative"})
+_DEPRECATED_KEYS = frozenset(
+    {
+        "normalize_distances",
+        "jitter_std_relative",
+        "optimizer",  # train/tails.train: VeLO removed, Adam only
+        "beta",  # train: VAE-only KL weight
+        "decoder_hidden_dim",  # encoder/vae: no decoders any more
+        "mirror",
+    }
+)
 
 
 def _dataclass_from_dict(cls, d: Dict[str, Any]):
@@ -835,12 +764,24 @@ def _parse_classification_tail_config(
     d: Dict[str, Any]
 ) -> Optional["ClassificationTailConfig"]:
     """Parse a ``classification:`` block, shared by ``RunConfig.tails`` and
-    ``TailTrainConfig``."""
-    return (
-        _dataclass_from_dict(ClassificationTailConfig, d["classification"])
-        if "classification" in d
-        else None
-    )
+    ``TailTrainConfig``.
+
+    Raises:
+        ValueError: If the block still asks for the removed single-stage
+            ``mode: family_and_spacegroup`` (silently training a family-only
+            classifier instead would not be what the config says).
+    """
+    if "classification" not in d:
+        return None
+    block = d["classification"] or {}
+    if block.get("mode") == "family_and_spacegroup":
+        raise ValueError(
+            "classification.mode='family_and_spacegroup' (a single head with "
+            "a family-masked spacegroup head) was removed; classify spacegroup "
+            "with tail_kind='hierarchical_supcon' (a per-family expert for "
+            "each family) instead."
+        )
+    return _dataclass_from_dict(ClassificationTailConfig, block)
 
 
 def _parse_visualization_tail_config(
@@ -865,53 +806,16 @@ def _parse_visualization_tail_config(
     return dataclasses.replace(visualization, batching=batching)
 
 
-def _parse_hierarchical_tail_config(
-    d: Dict[str, Any]
-) -> Optional["HierarchicalTailConfig"]:
-    """Parse a ``hierarchical:`` block, shared by ``RunConfig.tails`` and
-    ``TailTrainConfig``."""
-    return (
-        _dataclass_from_dict(HierarchicalTailConfig, d["hierarchical"])
-        if "hierarchical" in d
-        else None
-    )
-
-
 def _parse_hierarchical_supcon_tail_config(
     d: Dict[str, Any]
 ) -> Optional["HierarchicalSupconTailConfig"]:
     """Parse a ``hierarchical_supcon:`` block -- ``TailTrainConfig``-only
-    (unlike ``hierarchical``, this experimental tail_kind isn't offered
-    through ``RunConfig.tails``)."""
+    (this tail_kind isn't offered through ``RunConfig.tails``)."""
     return (
         _dataclass_from_dict(HierarchicalSupconTailConfig, d["hierarchical_supcon"])
         if "hierarchical_supcon" in d
         else None
     )
-
-
-def _parse_hierarchical_visualization_config(
-    d: Dict[str, Any]
-) -> Optional["HierarchicalVisualizationConfig"]:
-    """Parse a ``hierarchical_visualization:`` block (including its nested
-    ``batching:`` sub-block) -- ``TailTrainConfig``-only, unlike the other
-    tail-kind parsers above (this tail kind attaches to an already-trained
-    hierarchical tail, so ``RunConfig.tails`` never auto-trains it)."""
-    hv_dict = d.get("hierarchical_visualization")
-    if hv_dict is None:
-        return None
-    batching_dict = hv_dict.get("batching", {})
-    batching = BatchingConfig(
-        strategy=str(batching_dict.get("strategy", "random")),
-        balanced_params=_dataclass_from_dict(
-            BalancedBatchingParams, batching_dict.get("balanced_params", {})
-        ),
-    )
-    hv = _dataclass_from_dict(
-        HierarchicalVisualizationConfig,
-        {k: v for k, v in hv_dict.items() if k != "batching"},
-    )
-    return dataclasses.replace(hv, batching=batching)
 
 
 def load_yaml(path: Union[str, Path]) -> Dict[str, Any]:
@@ -922,7 +826,11 @@ def load_yaml(path: Union[str, Path]) -> Dict[str, Any]:
 def run_config_from_dict(d: Dict[str, Any]) -> RunConfig:
     data_source = str(d.get("data_source", "fetch"))
     soap = _dataclass_from_dict(SoapConfig, d.get("soap", {}))
-    vae = _dataclass_from_dict(VAEArchConfig, d.get("vae", {}))
+    # ``vae:`` is the pre-rename name of this block; merge it under ``encoder:``
+    # so older configs, saved config.yaml files and sweep axes keep working.
+    encoder = _dataclass_from_dict(
+        EncoderConfig, {**d.get("vae", {}), **d.get("encoder", {})}
+    )
     train = _parse_train_settings(TrainSettings, d.get("train", {}))
     aux_heads = _dataclass_from_dict(AuxHeadsConfig, d.get("aux_heads", {}))
     supcon = _dataclass_from_dict(SupConConfig, d.get("supcon", {}))
@@ -944,11 +852,15 @@ def run_config_from_dict(d: Dict[str, Any]) -> RunConfig:
         else None
     )
     tails_dict = d.get("tails")
+    if tails_dict is not None and "hierarchical" in tails_dict:
+        raise ValueError(
+            "tails.hierarchical was removed; train a hierarchical_supcon tail "
+            "with dimred-train-tail instead."
+        )
     tails_config = (
         AutoTailsConfig(
             classification=_parse_classification_tail_config(tails_dict),
             visualization=_parse_visualization_tail_config(tails_dict),
-            hierarchical=_parse_hierarchical_tail_config(tails_dict),
             train=_parse_train_settings(TailTrainSettings, tails_dict.get("train", {})),
         )
         if tails_dict is not None
@@ -976,7 +888,7 @@ def run_config_from_dict(d: Dict[str, Any]) -> RunConfig:
 
     return RunConfig(
         soap=soap,
-        vae=vae,
+        encoder=encoder,
         train=train,
         aux_heads=aux_heads,
         supcon=supcon,
@@ -986,7 +898,7 @@ def run_config_from_dict(d: Dict[str, Any]) -> RunConfig:
         seed=int(d.get("seed", 42)),
         output_dir=str(d.get("output_dir", "runs")),
         name=d.get("name"),
-        model_kind=str(d.get("model", "vae")),
+        model_kind=str(d.get("model", "supcon")),
         data_source=data_source,
         fetch=fetch_config,
         pyxtal=pyxtal_config,
@@ -1010,7 +922,7 @@ def run_config_to_dict(config: RunConfig) -> Dict[str, Any]:
         "model": config.model_kind,
         "data_source": config.data_source,
         "soap": dataclasses.asdict(config.soap),
-        "vae": dataclasses.asdict(config.vae),
+        "encoder": dataclasses.asdict(config.encoder),
         "train": dataclasses.asdict(config.train),
         "aux_heads": dataclasses.asdict(config.aux_heads),
         "supcon": dataclasses.asdict(config.supcon),
@@ -1032,8 +944,6 @@ def run_config_to_dict(config: RunConfig) -> Dict[str, Any]:
             )
         if config.tails.visualization is not None:
             tails_dict["visualization"] = dataclasses.asdict(config.tails.visualization)
-        if config.tails.hierarchical is not None:
-            tails_dict["hierarchical"] = dataclasses.asdict(config.tails.hierarchical)
         result["tails"] = tails_dict
     return result
 
@@ -1052,7 +962,7 @@ def load_sweep_config(path: Union[str, Path]) -> SweepConfig:
 
 
 def _set_dotted(d: Dict[str, Any], path: str, value: Any) -> None:
-    """Set a nested dict's value at dotted ``path`` (e.g. ``"vae.latent_dim"``),
+    """Set a nested dict's value at dotted ``path`` (e.g. ``"encoder.latent_dim"``),
     creating intermediate dicts as needed. Mirrors the nested shape
     ``run_config_from_dict`` reads, so any grid key can override any single-run
     config field.
@@ -1106,47 +1016,23 @@ def expand_sweep(sweep: SweepConfig) -> List[RunConfig]:
 # dataset from scratch, so it gets its own top-level YAML shape and loader
 # rather than being nested under RunConfig.
 
-_TAIL_KINDS = (
-    "classification",
-    "visualization",
-    "hierarchical",
-    "hierarchical_visualization",
-    "hierarchical_supcon",
-)
-_CLASSIFICATION_TAIL_MODES = ("family_only", "family_and_spacegroup")
-_EXPERT_INPUT_KINDS = ("body", "soap")
+_TAIL_KINDS = ("classification", "visualization", "hierarchical_supcon")
 
 
 @dataclass(frozen=True)
 class ClassificationTailConfig:
     """Config for ``TailTrainConfig.tail_kind == "classification"``: trains
-    a ``dim_red.supcon.tails.ClassificationTail`` on a frozen supcon run's
-    saved representations, via cross-entropy. Mirrors ``AuxHeadsConfig``'s
-    3-value ``mode`` restriction (not ``SupConConfig``'s) -- the spacegroup
-    head here is family-masked via ``dim_red.supcon.tails.apply_family_mask``,
-    so an unconditioned ``"spacegroup_only"`` isn't meaningful, same
-    restriction ``AuxHeadsConfig.mode`` already has and for the same reason.
+    a family classifier (a ``dim_red.supcon.tails.ClassificationTail``) on a
+    frozen run's saved representations, via cross-entropy.
+
+    Spacegroup classification is not done here: it is handled by one expert
+    per family, see ``HierarchicalSupconTailConfig``.
 
     Attributes:
-        mode: ``"family_only"`` or ``"family_and_spacegroup"`` (default).
-        lambda_family: Weight of the family cross-entropy term.
-        lambda_spacegroup: Weight of the (family-masked) spacegroup
-            cross-entropy term. Ignored unless ``mode ==
-            "family_and_spacegroup"``.
-        head_hidden_dim: Hidden width of each head's single hidden layer.
+        head_hidden_dim: Hidden width of the head's single hidden layer.
     """
 
-    mode: str = "family_and_spacegroup"
-    lambda_family: float = 1.0
-    lambda_spacegroup: float = 1.0
     head_hidden_dim: int = 16
-
-    def __post_init__(self):
-        if self.mode not in _CLASSIFICATION_TAIL_MODES:
-            raise ValueError(
-                f"classification.mode must be one of "
-                f"{_CLASSIFICATION_TAIL_MODES}, got {self.mode!r}"
-            )
 
 
 @dataclass(frozen=True)
@@ -1209,226 +1095,24 @@ class VisualizationTailConfig:
 
 
 @dataclass(frozen=True)
-class HierarchicalTailConfig:
-    """Config for ``TailTrainConfig.tail_kind == "hierarchical"``: a
-    genuinely two-stage classifier, as opposed to
-    ``ClassificationTailConfig``'s single family-masked spacegroup head.
-    Stage 1 is a ``dim_red.supcon.tails.ClassificationTail`` (family-only
-    mode) predicting family; stage 2 is one independent, separately-trained
-    ``ClassificationTail`` (also family-only mode -- its "family" slot is
-    reused to mean "spacegroup, local to this one family") *per family*,
-    trained only on that family's own rows and only over the spacegroups
-    actually observed within it. Routing at prediction time uses stage 1's
-    predicted family to pick which expert runs -- see
-    ``dim_red.pipeline.tail_training``.
-
-    Attributes:
-        head_hidden_dim: Hidden width of each head's single hidden layer --
-            shared by the family stage and every per-family expert (no
-            per-family tuning in this first pass).
-        min_samples_per_expert: A family with fewer than this many training
-            rows, or fewer than 2 distinct spacegroups observed within it,
-            gets no dedicated expert at all -- it falls back to always
-            predicting that family's single most frequent training-set
-            spacegroup instead (see ``family_expert_status.yaml``).
-        expert_input: Which representation the stage-2 experts train on --
-            ``"soap"`` (default since 2026-09-17 -- see below) recomputes
-            each structure's native (pre-body) standardized SOAP
-            descriptor and trains every expert on that; ``"body"`` instead
-            uses the same frozen body embeddings as stage 1
-            (``embeddings.npz["embeddings"]``). Motivation: a body's
-            ``latent_dim`` is typically much narrower than the native SOAP
-            dimensionality (e.g. 8 vs 252) and was optimized for *family*
-            discrimination only (``supcon.mode: family_only``/no
-            spacegroup term) -- it compresses away exactly the finer
-            geometric detail (screw axes vs. plain rotations, glide vs.
-            mirror planes) a spacegroup expert needs, even though that
-            detail is still present in the native descriptor. Verified
-            empirically on this project's family_only investigation
-            (round 13): switching stage 2 from body to native SOAP more
-            than doubled overall spacegroup accuracy (0.25 -> 0.57
-            oracle-routed), uniformly across every family -- this is a
-            **deliberate default-behavior change**, not a marginal tweak,
-            hence the flip; ``"body"`` remains available for that exact
-            ablation comparison, or when native SOAP truly isn't wanted.
-            Stage 1 (family) always uses the body embeddings regardless of
-            this setting -- it already performs well, and the point is
-            only about whether *stage 2* benefits from bypassing the
-            body's bottleneck. ``"soap"`` requires the target run's
-            ``dataset.extxyz`` to still exist (recomputes SOAP from it,
-            using the run's own saved ``feature_mean``/``feature_std`` to
-            standardize) and its ``model_kind`` to be ``"supcon"`` -- not
-            ``"cgcnn"`` (graph features, no SOAP at all) or ``"mace"`` (a
-            frozen foundation-model embedding, not SOAP either), even
-            though both of those still carry a default-valued
-            ``RunConfig.soap`` block their own pipeline never reads; a
-            hierarchical tail on a cgcnn/mace run must set
-            ``expert_input: body`` explicitly, or this raises a clear
-            ``ValueError`` naming the offending ``model_kind`` rather than
-            silently doing the wrong thing.
-        expert_head_hidden_dim: Hidden-layer widths for stage-2 experts
-            specifically -- ``None`` (default) falls back to
-            ``head_hidden_dim`` (a single hidden layer, same as stage 1);
-            a list gives every expert one hidden layer per entry instead
-            (e.g. ``[128, 64]`` to match a frozen body's own encoder
-            depth), independent of stage 1's own architecture (stage 1
-            always uses ``head_hidden_dim``, never this field -- it
-            already performs well, so there's no reason to also grow it
-            when just widening the experts). Motivation: like
-            ``expert_input``, this exists because the default single
-            hidden layer sized ``head_hidden_dim`` (16 by default) may be
-            an unnecessary bottleneck for a spacegroup expert once it's
-            already seeing the rich native SOAP input (``expert_input:
-            "soap"``) -- giving it comparable capacity to the body's own
-            encoder lets it actually use that richer input.
-    """
-
-    head_hidden_dim: int = 16
-    min_samples_per_expert: int = 10
-    expert_input: str = "soap"
-    expert_head_hidden_dim: Optional[List[int]] = None
-
-    def __post_init__(self):
-        if self.head_hidden_dim <= 0:
-            raise ValueError("hierarchical.head_hidden_dim must be a positive integer")
-        if self.min_samples_per_expert <= 0:
-            raise ValueError(
-                "hierarchical.min_samples_per_expert must be a positive integer"
-            )
-        if self.expert_input not in _EXPERT_INPUT_KINDS:
-            raise ValueError(
-                f"hierarchical.expert_input must be one of {_EXPERT_INPUT_KINDS}, "
-                f"got {self.expert_input!r}"
-            )
-        if self.expert_head_hidden_dim is not None and (
-            not self.expert_head_hidden_dim
-            or any(d <= 0 for d in self.expert_head_hidden_dim)
-        ):
-            raise ValueError(
-                "hierarchical.expert_head_hidden_dim, if set, must be a "
-                "non-empty list of positive integers"
-            )
-
-
-@dataclass(frozen=True)
-class HierarchicalVisualizationConfig:
-    """Config for ``TailTrainConfig.tail_kind == "hierarchical_visualization"``:
-    trains one ``dim_red.supcon.tails.VisualizationTail`` *per family*,
-    attached on top of an ALREADY-TRAINED hierarchical tail's own per-family
-    spacegroup experts (frozen, never retrained here) -- mirrors the
-    existing body -> tail freezing pattern one level deeper: expert -> tail.
-
-    Two ways to feed each family's viz tail, via ``input_source``:
-    ``"expert"`` (default) chains it to the expert's own last hidden layer
-    activation (``ClassificationTail.family_hidden``) -- one level deeper
-    than the usual body -> tail pattern, see the module-level docstring
-    above; ``"body"`` instead attaches it directly to the frozen body's own
-    embedding, in parallel with the expert rather than chained to it --
-    the exact same relationship the family-level classifier and the
-    family-level visualization tail already have to the body (both read
-    the same body embedding, neither feeds the other). Either way, the
-    supervised-contrastive loss always contrasts on spacegroup only
-    (family is constant within a single family's subset, so a family term
-    would be meaningless here -- unlike ``VisualizationTailConfig.mode``,
-    there is no mode choice). Families with no dedicated expert in the
-    referenced hierarchical tail (fallback -- see that tail's own
-    ``family_expert_status.yaml``) are skipped either way -- kept as the
-    gate even for ``input_source: "body"`` (which doesn't otherwise need
-    the expert at all) so both options run on the exact same set of
-    families, for a fair comparison.
-
-    Attributes:
-        hierarchical_output_subdir: The ``output_subdir`` of an
-            already-trained ``tail_kind: "hierarchical"`` tail, under the
-            same ``run_dir/tails/`` this config's own run_dir points at --
-            still required even when ``input_source: "body"``, purely to
-            resolve which families have a dedicated expert (see above).
-        input_source: ``"expert"`` (default) or ``"body"`` -- see above.
-        viz_dim: 2 or 3.
-        tau: Temperature dividing similarities before the softmax.
-        distance: ``"euclidean"`` (default) or ``"cosine"``.
-        lambda_norm: Weight of the embedding-norm regularizer, applied to
-            this tail's own output. ``0.0`` (default) disables it.
-        hidden_dim: Widths of hidden layers in the visualization MLP.
-            ``None`` (default) resolves to a single hidden layer matching
-            the input width (the expert's own hidden width, or the body's
-            embedding width, depending on ``input_source``).
-        batching: Same ``BatchingConfig`` shape as
-            ``VisualizationTailConfig.batching`` -- "balanced" here
-            stratifies by spacegroup within the family (there is no family
-            dimension left to also stratify by).
-    """
-
-    hierarchical_output_subdir: str
-    input_source: str = "expert"
-    viz_dim: int = 2
-    tau: float = 0.1
-    distance: str = "euclidean"
-    lambda_norm: float = 0.0
-    hidden_dim: Optional[List[int]] = None
-    batching: BatchingConfig = field(default_factory=BatchingConfig)
-
-    def __post_init__(self):
-        if not self.hierarchical_output_subdir:
-            raise ValueError(
-                "hierarchical_visualization.hierarchical_output_subdir must be set "
-                "(the output_subdir of an already-trained hierarchical tail)"
-            )
-        if self.input_source not in ("expert", "body"):
-            raise ValueError(
-                "hierarchical_visualization.input_source must be one of "
-                f"('expert', 'body'), got {self.input_source!r}"
-            )
-        if self.viz_dim not in (2, 3):
-            raise ValueError(
-                f"hierarchical_visualization.viz_dim must be 2 or 3, got "
-                f"{self.viz_dim!r}"
-            )
-        if self.distance not in _SUPCON_DISTANCES:
-            raise ValueError(
-                f"hierarchical_visualization.distance must be one of "
-                f"{_SUPCON_DISTANCES}, got {self.distance!r}"
-            )
-        if self.hidden_dim is not None and (
-            not self.hidden_dim or any(d <= 0 for d in self.hidden_dim)
-        ):
-            raise ValueError(
-                "hierarchical_visualization.hidden_dim, if set, must be a "
-                "non-empty list of positive integers"
-            )
-
-
-@dataclass(frozen=True)
 class HierarchicalSupconTailConfig:
-    """Config for ``TailTrainConfig.tail_kind == "hierarchical_supcon"``: an
-    experimental variant of ``"hierarchical"`` where stage 2's per-family
-    spacegroup expert is itself restructured to mirror the family-level
-    SupCon body -> classifier -> visualizer pattern one level down, instead
-    of being a single classifier trained directly on native SOAP.
+    """Config for ``TailTrainConfig.tail_kind == "hierarchical_supcon"``: a
+    two-stage classifier whose stage 2 mirrors the family-level SupCon
+    stack (encoder + projection -> classifier + visualizer) one level down,
+    once per crystal family.
 
-    Also usable against a ``model_kind: mace`` run (not just ``supcon``):
-    since a frozen MACE embedding already stands in for the family-level
-    encoder+projection (``model_kind: mace`` never trains anything), stage
-    2's per-family "SupCon SG" body/projection-training step is skipped
-    entirely in that case -- the run's own frozen embedding, restricted to
-    each family's rows, is used directly as that family's representation
-    for the classifier/visualizer steps instead. ``sg_encoder_hidden_dim``/
-    ``sg_latent_dim``/``sg_tau``/``sg_distance``/``sg_lambda_norm``/
-    ``sg_projection_dim``/``sg_projection_hidden_dim`` (all below) are then
-    unused. See ``dim_red.pipeline.tail_training._train_hierarchical_supcon``.
-
-    Stage 1 (family) is unchanged from ``"hierarchical"``: one
-    ``ClassificationTail`` on the frozen body's own embedding, hidden width
-    ``head_hidden_dim``.
+    Stage 1 (family): one ``ClassificationTail`` on the frozen body's own
+    embedding, hidden width ``head_hidden_dim``.
 
     Stage 2, per family:
 
     1. A fresh ``dim_red.supcon.model.SupConEncoder`` + ``ProjectionTail``
        (called "SupCon SG" in this project's notes/discussions) is trained
-       from scratch on that family's own native SOAP subset (train + val,
-       the same split used everywhere else in this pipeline) via
-       ``dim_red.supcon.training.train_supcon`` -- architecturally
-       identical to how the real family-level SupCon body is trained
+       from scratch on that family's own native feature subset (native SOAP
+       for ``supcon``, native MACE embedding for ``supcon_mace``; train +
+       val, the same split used everywhere else in this pipeline) via
+       ``dim_red.supcon.training.training_first_phase`` -- architecturally identical
+       to how the real family-level SupCon body is trained
        (``sg_encoder_hidden_dim``/``sg_latent_dim`` default to ``[256,
        128]``/``32``, matching ``best_combo`` (round 15's best-known
        reference body, see
@@ -1437,40 +1121,30 @@ class HierarchicalSupconTailConfig:
        via ``train_spacegroup_ids``, with ``lambda_family=0``/
        ``lambda_spacegroup=1`` -- the family term is left inactive since
        family is constant within one family's own subset, so there's
-       nothing to contrast there; note this uses the spacegroup slot
-       directly rather than reusing the family slot, unlike
-       ``HierarchicalTailConfig``'s classifier-only expert, since
-       ``train_supcon`` already has two genuinely independent terms with
-       no head/masking machinery to route around).
+       nothing to contrast there).
     2. That SG body is frozen; a ``ClassificationTail`` (single hidden
        layer, width ``sg_classifier_hidden_dim``) is trained on its
        ``sg_latent_dim``-dim embedding via cross-entropy, predicting the
-       local spacegroup id (its "family" head slot reused to mean that,
-       same convention ``HierarchicalTailConfig``'s expert already uses).
+       local spacegroup id.
     3. A ``VisualizationTail`` (hidden widths
        ``sg_visualization_hidden_dim``, output 2D) is trained on the same
-       frozen SG embedding, contrasting on the local spacegroup id --
-       this tail_kind produces its own per-family visualization directly,
-       no separate ``hierarchical_visualization`` pass needed on top of it.
+       frozen SG embedding, contrasting on the local spacegroup id, so this
+       tail_kind produces its own per-family visualization directly.
 
     Families below ``min_samples_per_expert`` training rows (or with fewer
-    than 2 distinct spacegroups observed) get no SG expert at all -- same
-    fallback (always predict that family's single most frequent
-    training-set spacegroup) as ``HierarchicalTailConfig``, recorded the
-    same way in ``family_expert_status.yaml``.
+    than 2 distinct spacegroups observed) get no SG expert at all -- they
+    fall back to always predicting that family's single most frequent
+    training-set spacegroup, recorded in ``family_expert_status.yaml``.
 
-    Always requires ``model_kind == "supcon"`` (native SOAP must exist to
-    recompute -- see ``_compute_native_soap_features``); there is no
-    ``expert_input`` choice here, unlike ``HierarchicalTailConfig``, since
-    the whole point of this tail_kind is that stage 2 is itself a SupCon
-    body trained on native SOAP, not a classifier trained on some other
-    representation.
+    Requires ``model_kind`` in ``("supcon", "supcon_mace")`` (the native
+    features must exist to recompute -- see ``_compute_native_soap_features``/
+    ``_compute_native_mace_features``).
 
     Attributes:
         head_hidden_dim: Stage-1 family classifier's hidden width. ``32``
             (default) matches ``best_combo`` (round 15).
-        min_samples_per_expert: Same fallback threshold as
-            ``HierarchicalTailConfig``.
+        min_samples_per_expert: Minimum training rows (and 2+ observed
+            spacegroups) a family needs to get its own expert.
         sg_encoder_hidden_dim: SupCon SG's own encoder hidden widths.
             ``[256, 128]`` (default) matches ``best_combo``.
         sg_latent_dim: SupCon SG's own output embedding width. ``32``
@@ -1640,71 +1314,45 @@ class HierarchicalSupconTailConfig:
 @dataclass(frozen=True)
 class TailTrainSettings:
     """Training-loop mechanics for phase 2, mirroring the relevant subset of
-    ``RunConfig.train`` (``TrainSettings``) -- no ``beta``/``val_ratio``:
-    phase 2 reuses phase 1's exact train/val split (see
+    ``RunConfig.train`` (``TrainSettings``) -- no ``val_ratio``: phase 2
+    reuses phase 1's exact train/val split (see
     ``dim_red.pipeline.tail_training``) rather than resplitting.
-
-    ``optimizer`` is the same field/semantics as ``TrainSettings.optimizer``
-    -- ``"adam"`` (default) or ``"velo"`` -- and matters even more here than
-    in phase 1, since phase-2 tails are tiny single-hidden-layer MLPs where
-    VeLO's fixed setup cost dominates the actual training time.
     """
 
     epochs: int = 20
     batch_size: int = 32
     learning_rate: float = 1e-3
-    optimizer: str = "adam"
     device: str = "cpu"
     early_stopping: EarlyStoppingConfig = field(default_factory=EarlyStoppingConfig)
-
-    def __post_init__(self):
-        if self.optimizer not in _OPTIMIZER_KINDS:
-            raise ValueError(
-                f"train.optimizer must be one of {_OPTIMIZER_KINDS}, got "
-                f"{self.optimizer!r}"
-            )
 
 
 @dataclass(frozen=True)
 class AutoTailsConfig:
     """Config for ``RunConfig.tails``: automatically train one or more tails
-    on a completed run's frozen body, right after phase-1 finishes (for
-    ``model_kind == "mace"``, "phase 1" is just the frozen forward pass that
-    produces ``embeddings.npz`` -- there is no training involved) -- the
+    on a completed run's frozen body, right after phase-1 finishes -- the
     same ``dim_red.pipeline.tail_training.train_tail`` entry point
     ``dimred-train-tail`` uses, just invoked automatically instead of as a
     separate manual command.
 
     Which ``model_kind``s each tail applies to differs per tail kind (see
-    ``dim_red.pipeline.tail_training._TAIL_MODEL_KINDS``):
-    ``classification``/``hierarchical`` are ignored for ``model_kind not in
-    ("supcon", "cgcnn", "mace")`` (redundant with vae/autoencoder's own
-    ``aux_heads`` classification heads), same treatment
+    ``dim_red.pipeline.tail_training._TAIL_MODEL_KINDS``): ``classification``
+    is ignored for model kinds that can't have one, same treatment
     ``aux_heads``/``supcon``/``batching`` already get for the model kinds
-    they don't apply to; ``visualization`` applies to *every* model_kind
-    instead, since none of them have a built-in equivalent to a learned,
-    class-separating low-dimensional projection.
+    they don't apply to; ``visualization`` applies to *every* model_kind.
 
     Attributes:
         classification: Auto-train a classification tail when set (``None``
-            default disables it). Ignored for ``model_kind not in
-            ("supcon", "cgcnn", "mace")``.
+            default disables it).
         visualization: Auto-train a visualization tail when set (``None``
             default disables it) -- for *any* model_kind. A run/sweep can
             set both to get a classification tail AND a visualization tail
             out of a single ``dimred-run``/``dimred-sweep`` invocation.
-        hierarchical: Auto-train a hierarchical (family stage + per-family
-            spacegroup experts) tail when set (``None`` default disables
-            it) -- can be combined with ``classification``/``visualization``
-            in the same run/sweep. Ignored for ``model_kind not in
-            ("supcon", "cgcnn", "mace")``.
         train: Training-loop mechanics shared by whichever tail(s) are
             enabled -- same shape as ``TailTrainConfig.train``.
     """
 
     classification: Optional[ClassificationTailConfig] = None
     visualization: Optional[VisualizationTailConfig] = None
-    hierarchical: Optional[HierarchicalTailConfig] = None
     train: TailTrainSettings = field(default_factory=TailTrainSettings)
 
 
@@ -1712,17 +1360,14 @@ class AutoTailsConfig:
 class TailTrainConfig:
     """Fully resolved configuration for phase 2: freeze an already-trained
     run's body and train exactly one tail (classification, visualization, or
-    hierarchical) on top of it -- see ``dim_red.pipeline.tail_training``.
+    hierarchical_supcon) on top of it -- see ``dim_red.pipeline.tail_training``.
     Which ``model_kind``s a given ``tail_kind`` accepts is documented on
-    ``dim_red.pipeline.tail_training._TAIL_MODEL_KINDS``: ``visualization``
-    works for any model_kind, ``classification``/``hierarchical`` require
-    ``model: supcon``/``cgcnn``/``mace``.
+    ``dim_red.pipeline.tail_training._TAIL_MODEL_KINDS``.
 
     Attributes:
         tail_kind: ``"classification"``, ``"visualization"``, or
-            ``"hierarchical"`` -- which tail to train. Exactly one of
-            ``classification``/``visualization``/``hierarchical`` must be
-            set, matching this.
+            ``"hierarchical_supcon"`` -- which tail to train. The matching
+            config block must be set.
         run_dir: Path to a completed run directory whose ``model_kind`` is
             allowed for ``tail_kind`` (must contain at least
             ``config.yaml``/``embeddings.npz`` --
@@ -1730,20 +1375,15 @@ class TailTrainConfig:
             set; ``dataset.extxyz``/``model_params.msgpack`` aren't needed
             for tail training at all). ``None`` (default) leaves it unset
             in the config itself -- the
-            ``dimred-train-tail <config> <run_dir>`` console script (and its
-            ``python -m dim_red.pipeline.cli --train-tail <config>
-            --train-tail-run <run_dir>`` flag-based form) always takes the
-            run directory as a separate argument and overrides whatever is
-            here, so a single tail-training config can be reused across many
+            ``dimred-train-tail <config> <run_dir>`` console script always
+            takes the run directory as a separate argument and overrides
+            whatever is here, so a single tail-training config can be reused across many
             runs without editing it each time; set this directly only for
             programmatic use of ``dim_red.pipeline.tail_training.train_tail``
             without going through the CLI. ``train_tail`` raises if it's
             still ``None`` by the time training actually starts.
         classification: Required when ``tail_kind == "classification"``.
         visualization: Required when ``tail_kind == "visualization"``.
-        hierarchical: Required when ``tail_kind == "hierarchical"``.
-        hierarchical_visualization: Required when ``tail_kind ==
-            "hierarchical_visualization"``.
         hierarchical_supcon: Required when ``tail_kind ==
             "hierarchical_supcon"``.
         train: Training-loop mechanics.
@@ -1757,8 +1397,6 @@ class TailTrainConfig:
     run_dir: Optional[str] = None
     classification: Optional[ClassificationTailConfig] = None
     visualization: Optional[VisualizationTailConfig] = None
-    hierarchical: Optional[HierarchicalTailConfig] = None
-    hierarchical_visualization: Optional[HierarchicalVisualizationConfig] = None
     hierarchical_supcon: Optional[HierarchicalSupconTailConfig] = None
     train: TailTrainSettings = field(default_factory=TailTrainSettings)
     seed: int = 42
@@ -1777,18 +1415,6 @@ class TailTrainConfig:
             raise ValueError(
                 "tail_kind='visualization' requires a 'visualization' config block."
             )
-        if self.tail_kind == "hierarchical" and self.hierarchical is None:
-            raise ValueError(
-                "tail_kind='hierarchical' requires a 'hierarchical' config block."
-            )
-        if (
-            self.tail_kind == "hierarchical_visualization"
-            and self.hierarchical_visualization is None
-        ):
-            raise ValueError(
-                "tail_kind='hierarchical_visualization' requires a "
-                "'hierarchical_visualization' config block."
-            )
         if self.tail_kind == "hierarchical_supcon" and self.hierarchical_supcon is None:
             raise ValueError(
                 "tail_kind='hierarchical_supcon' requires a "
@@ -1803,8 +1429,6 @@ def tail_train_config_from_dict(d: Dict[str, Any]) -> TailTrainConfig:
     train = _parse_train_settings(TailTrainSettings, d.get("train", {}))
     classification = _parse_classification_tail_config(d)
     visualization = _parse_visualization_tail_config(d)
-    hierarchical = _parse_hierarchical_tail_config(d)
-    hierarchical_visualization = _parse_hierarchical_visualization_config(d)
     hierarchical_supcon = _parse_hierarchical_supcon_tail_config(d)
 
     run_dir = d.get("run_dir")
@@ -1813,8 +1437,6 @@ def tail_train_config_from_dict(d: Dict[str, Any]) -> TailTrainConfig:
         tail_kind=tail_kind,
         classification=classification,
         visualization=visualization,
-        hierarchical=hierarchical,
-        hierarchical_visualization=hierarchical_visualization,
         hierarchical_supcon=hierarchical_supcon,
         train=train,
         seed=int(d.get("seed", 42)),
@@ -1842,12 +1464,6 @@ def tail_train_config_to_dict(config: TailTrainConfig) -> Dict[str, Any]:
         result["classification"] = dataclasses.asdict(config.classification)
     if config.visualization is not None:
         result["visualization"] = dataclasses.asdict(config.visualization)
-    if config.hierarchical is not None:
-        result["hierarchical"] = dataclasses.asdict(config.hierarchical)
-    if config.hierarchical_visualization is not None:
-        result["hierarchical_visualization"] = dataclasses.asdict(
-            config.hierarchical_visualization
-        )
     if config.hierarchical_supcon is not None:
         result["hierarchical_supcon"] = dataclasses.asdict(config.hierarchical_supcon)
     return result

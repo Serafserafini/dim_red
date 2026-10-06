@@ -1,27 +1,23 @@
 # Example config for phase 2 of the tail-training workflow: freezes an
 # already-trained run's body -- "model: supcon" (see
-# configs/single_run_supcon.example.yaml), "model: cgcnn", "model: mace", OR
-# (unlike a classification/hierarchical tail) "model: vae"/"model:
-# autoencoder" too -- and trains a small visualization tail on top of its
+# configs/single_run_supcon.example.yaml), "model: supcon_mace" or "model:
+# cgcnn" -- and trains a small visualization tail on top of its
 # already-saved representations (embeddings.npz), down to 2 or 3 dimensions,
 # using the *same* Supervised Contrastive loss as supcon's phase-1
 # projection tail -- so the low-dimensional projection still respects
 # family/spacegroup neighborhood structure, unlike a purely unsupervised
-# post-hoc projection (e.g. UMAP/PCA). A visualization tail is offered for
-# every model_kind because none of them have a built-in equivalent to it
-# (vae/autoencoder's aux_heads only ever produce a classifier, never a
-# visualization) -- see src/dim_red/pipeline/CLAUDE.md's
+# post-hoc projection (e.g. UMAP/PCA) -- see src/dim_red/pipeline/CLAUDE.md's
 # `_TAIL_MODEL_KINDS`. No SOAP recompute, no body forward pass -- freely
 # rerunnable with a different tail config against the same trained body.
 # The run directory (a completed run of one of the model_kinds above --
 # needs at least config.yaml and embeddings.npz) is passed on the
 # command line, not in this file, so the same tail config can be reused
 # across many runs without editing it each time:
-# Run with: python -m dim_red.pipeline.cli --train-tail configs/tail_train_visualization.example.yaml --train-tail-run runs/<date>-<n>/<run-name>
-# or:       dimred-train-tail configs/tail_train_visualization.example.yaml runs/<date>-<n>/<run-name>
+# Run with: dimred-train-tail configs/tail_train_visualization.example.yaml runs/<date>-<n>/<run-name>
 
-tail_kind: visualization # "classification" or "visualization" -- see
-# configs/tail_train_classification.example.yaml for the former.
+tail_kind: visualization # "classification", "visualization" or
+# "hierarchical_supcon" -- see configs/tail_train_classification.example.yaml
+# for the first.
 
 visualization:
   viz_dim: 2 # 2 or 3 -- plotted with dim_red.analysis.plotting.plot_reduced_space
@@ -29,7 +25,7 @@ visualization:
   # Which label level(s) to contrast on: "family_only", "spacegroup_only",
   # or "family_and_spacegroup" (default, shown here) -- same 3-value set as
   # phase 1's supcon.mode (independent terms, no family -> spacegroup
-  # masking, unlike the classification tail's mode).
+  # masking).
   mode: family_and_spacegroup
   lambda_family: 1.0
   lambda_spacegroup: 1.0
@@ -67,10 +63,7 @@ seed: 42 # seed for the tail's own parameter initialization
 train:
   epochs: 20
   batch_size: 32
-  learning_rate: 0.001 # Adam's learning rate (used when optimizer: adam,
-    # the default); unused when optimizer: velo
-  optimizer: adam # "adam" (default, fast) or "velo" (learned_optimization's
-    # pretrained VeLO meta-learned optimizer -- much slower to start, see CLAUDE.md)
+  learning_rate: 0.001 # Adam's learning rate
   device: cpu
   # Same early-stopping mechanism as the rest of the pipeline (monitors
   # val_loss, using phase 1's exact train/val split).

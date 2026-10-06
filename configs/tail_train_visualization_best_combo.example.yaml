@@ -27,7 +27,6 @@ seed: 42
 train:
   epochs: 200
   batch_size: 128
-  optimizer: adam
   device: gpu
   early_stopping:
     enabled: true

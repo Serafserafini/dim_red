@@ -4,7 +4,7 @@ Due schemi alternativi per usare le etichette (famiglia cristallina, spacegroup)
 
 ## `aux_heads:` — classificatori sulla z
 
-Usato da {bdg-primary}`vae` {bdg-info}`autoencoder` {bdg-success}`cgcnn` (per cui è obbligatorio, `mode != "none"`).
+Usato solo da {bdg-success}`cgcnn` (per cui è obbligatorio, `mode != "none"`): in CGCNN la classificazione è l'unico obiettivo di training.
 
 ```{eval-rst}
 .. autoclass:: dim_red.pipeline.config.AuxHeadsConfig
@@ -13,7 +13,7 @@ Usato da {bdg-primary}`vae` {bdg-info}`autoencoder` {bdg-success}`cgcnn` (per cu
 
 ## `supcon:` — Supervised Contrastive
 
-Usato solo da {bdg-warning}`supcon`. La loss è calcolata sull'output di una `ProjectionTail` (Khosla et al. 2020), non sulla rappresentazione `r` del corpo stesso — nessuna head di classificazione a questo stadio (quelle arrivano in fase 2, vedi {doc}`tails`).
+Usato da {bdg-warning}`supcon` e {bdg-secondary}`supcon_mace`. La loss è calcolata sull'output di una `ProjectionTail` (Khosla et al. 2020), non sulla rappresentazione `r` del corpo stesso — nessuna head di classificazione a questo stadio (quelle arrivano in fase 2, vedi {doc}`tails`).
 
 ```{eval-rst}
 .. autoclass:: dim_red.pipeline.config.SupConConfig
@@ -22,7 +22,7 @@ Usato solo da {bdg-warning}`supcon`. La loss è calcolata sull'output di una `Pr
 
 ## `batching:` — campionamento dei batch
 
-Usato solo da {bdg-warning}`supcon`. Solo i batch di *training* sono interessati — quelli di validazione restano sempre casuali.
+Usato da {bdg-warning}`supcon` e {bdg-secondary}`supcon_mace`. Solo i batch di *training* sono interessati — quelli di validazione restano sempre casuali.
 
 ```{eval-rst}
 .. autoclass:: dim_red.pipeline.config.BatchingConfig

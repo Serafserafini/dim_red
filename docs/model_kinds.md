@@ -1,43 +1,9 @@
 # Confronto tra model_kind
 
-`RunConfig.model_kind` ∈ `{"vae", "autoencoder", "supcon", "cgcnn", "mace"}` (default `"vae"`, chiave YAML top-level `model:`) sceglie l'intera famiglia di modello. Ogni scheda descrive **cosa fa**, non un numero misurato — vedi {doc}`tools` quando ci saranno run reali da confrontare.
+`RunConfig.model_kind` ∈ `{"supcon", "supcon_mace", "cgcnn"}` (default `"supcon"`, chiave YAML top-level `model:`) sceglie l'intera famiglia di modello. Ogni scheda descrive **cosa fa**, non un numero misurato — vedi {doc}`tools` per confrontare run reali.
 
-::::{grid} 1 1 2 2
+::::{grid} 1 1 3 3
 :gutter: 3
-
-:::{grid-item-card} {bdg-primary}`vae`
-Featurizzazione
-: SOAP
-
-Obiettivo
-: Ricostruzione + KL (`train.beta`) + head ausiliarie opzionali
-
-Decoder
-: Sì
-
-Fasi
-: Una sola
-
-Config chiave
-: `vae`, `train`, `aux_heads`
-:::
-
-:::{grid-item-card} {bdg-info}`autoencoder`
-Featurizzazione
-: SOAP
-
-Obiettivo
-: Ricostruzione deterministica, nessun KL/`beta`
-
-Decoder
-: Sì
-
-Fasi
-: Una sola
-
-Config chiave
-: `vae` (stesso blocco), `train`, `aux_heads`
-:::
 
 :::{grid-item-card} {bdg-warning}`supcon`
 Featurizzazione
@@ -50,10 +16,27 @@ Decoder
 : No — solo encoder
 
 Fasi
-: Fase 1 (corpo + proiezione) + tail fase 2 opzionale
+: Fase 1 (corpo + proiezione) + tail fase 2 opzionali
 
 Config chiave
-: `vae` (solo encoder), `supcon`, `batching`
+: `encoder`, `supcon`, `batching`, `train`
+:::
+
+:::{grid-item-card} {bdg-secondary}`supcon_mace`
+Featurizzazione
+: Embedding di un modello MACE pre-addestrato e congelato (no SOAP)
+
+Obiettivo
+: Lo stesso di `supcon`, allenato sopra gli embedding MACE
+
+Decoder
+: No — solo encoder
+
+Fasi
+: Come `supcon`
+
+Config chiave
+: `mace` (richiede `checkpoint_path`), `encoder`, `supcon`, `batching`, `train`
 :::
 
 :::{grid-item-card} {bdg-success}`cgcnn`
@@ -67,36 +50,22 @@ Decoder
 : No — solo encoder
 
 Fasi
-: Una sola (tail fase 2 ammessa per confronto/ablation)
+: Una sola (tail fase 2 ammesse)
 
 Config chiave
-: `graph`, `vae.latent_dim`, `aux_heads`
-:::
-
-:::{grid-item-card} {bdg-secondary}`mace`
-Featurizzazione
-: Grafo + corpo pre-addestrato congelato (no SOAP)
-
-Obiettivo
-: Nessuno — non si allena nulla
-
-Decoder
-: No — nessuna testa propria
-
-Fasi
-: Solo forward pass; classificazione **solo** via `tails`
-
-Config chiave
-: `mace`, `tails`
+: `graph`, `encoder.latent_dim`, `aux_heads`, `train`
 :::
 
 ::::
 
-## Perché queste famiglie, non una sola
+## Come si relazionano
 
-- **vae / autoencoder** condividono architettura e API (`VAEArchConfig`, `codec.split_encoder_decoder`) al punto da essere intercambiabili in uno sweep cambiando solo `model:` — la differenza reale è se il latente è campionato (KL, `beta`) o deterministico.
-- **supcon** non ricostruisce nulla: impara una rappresentazione separando famiglia/spacegroup via una loss contrastiva supervisionata (Khosla et al. 2020), calcolata su una `ProjectionTail` separata dal corpo. Il corpo, una volta congelato, può ricevere uno o più *tail* in fase 2 — vedi {doc}`tails`.
-- **cgcnn** è l'unico corpo che non usa SOAP affatto: costruisce il proprio grafo di legami e non ha alcun obiettivo non supervisionato di fallback, quindi richiede sempre almeno una head ausiliaria attiva.
-- **mace** è l'unico che non allena nulla: avvolge un modello equivariante (Batatia et al. 2022) già pre-addestrato su un foundation model, tramite `mace_jax`. `tails` è l'unico modo per ottenerne una classificazione.
+- **supcon** non ricostruisce nulla: impara una rappresentazione separando famiglia/spacegroup via una loss contrastiva supervisionata (Khosla et al. 2020), calcolata su una `ProjectionTail` separata dal corpo. Il corpo, una volta congelato, può ricevere dei *tail* in fase 2 — vedi {doc}`tails`.
+- **supcon_mace** è `supcon` con gli embedding di un modello MACE (Batatia et al. 2022, via `mace_jax`) al posto del SOAP: stesso codice di training, stessi tail. Cattura interazioni a 3 corpi/angolari che il SOAP medio non esprime.
+- **cgcnn** è l'unico corpo che non usa né SOAP né MACE: costruisce il proprio grafo di legami e allena direttamente la classificazione dentro il corpo (cross-entropy congiunta), quindi richiede sempre almeno una head attiva.
 
-Vedi {doc}`architecture` per il blocco `vae:` condiviso, {doc}`aux_supcon` per `aux_heads`/`supcon`/`batching`, e la matrice di compatibilità completa in {doc}`runconfig`.
+```{note}
+I modelli `vae`, `autoencoder` e `mace` (corpo MACE congelato senza training) sono stati rimossi: `vae:`/`autoencoder`/`mace` come valore di `model:` solleva un errore esplicito.
+```
+
+Vedi {doc}`architecture` per il blocco `encoder:` condiviso, {doc}`aux_supcon` per `aux_heads`/`supcon`/`batching`, e la matrice di compatibilità completa in {doc}`runconfig`.

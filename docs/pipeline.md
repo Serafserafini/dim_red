@@ -28,7 +28,7 @@ SOAP · grafo · MACE
 :::
 
 :::{grid-item-card} 4 · Corpo del modello
-vae · ae · supcon · cgcnn · mace
+supcon · supcon_mace · cgcnn
 `RunConfig.model_kind`
 +++
 {doc}`model_kinds`
@@ -36,7 +36,7 @@ vae · ae · supcon · cgcnn · mace
 
 :::{grid-item-card} 5 · Tail (fase 2)
 :class-card: sd-border-dashed
-classification · visualization · hierarchical
+classification · visualization · hierarchical_supcon
 `RunConfig.tails`
 +++
 {doc}`tails`
@@ -57,8 +57,8 @@ Un `SweepConfig` esegue questa stessa pipeline una volta per ogni combinazione d
 
 Qualunque `model_kind`, un {py:class}`~dim_red.pipeline.config.RunConfig` (riferimento completo in {doc}`runconfig`) richiede sempre:
 
-- `soap` — anche quando non è la featurizzazione effettivamente usata (`cgcnn`/`mace` la ignorano a favore di `graph`/`mace`).
-- `vae` — architettura encoder/decoder condivisa (`autoencoder`, `supcon` ne leggono un sottoinsieme; `cgcnn` solo `latent_dim`; `mace` la ignora del tutto).
-- `train` — meccaniche di training condivise (per `mace`, che non allena nulla, solo `device` ha senso).
+- `soap` — anche quando non è la featurizzazione effettivamente usata (`cgcnn`/`supcon_mace` la ignorano a favore di `graph`/`mace`).
+- `encoder` — architettura dell'encoder condivisa (`cgcnn` ne legge solo `latent_dim`).
+- `train` — meccaniche di training condivise.
 
 Il resto della configurazione — quale sotto-config si applica a quale `model_kind` — è coperto pagina per pagina; la {doc}`runconfig` raccoglie anche la matrice di compatibilità completa e le regole di validazione (`__post_init__`).

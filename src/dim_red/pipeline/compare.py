@@ -94,13 +94,10 @@ _HYPERPARAM_KEY_ABBREV = {
     "crystal_systems": "cs",
     "limit_per_system": "limit",
     "encoder_hidden_dim": "hd",
-    "decoder_hidden_dim": "dhd",
     "latent_dim": "ld",
-    "mirror": "mirror",
     "epochs": "ep",
     "batch_size": "bs",
     "learning_rate": "lr",
-    "beta": "beta",
     "val_ratio": "val_ratio",
     "device": "device",
     "mode": "aux",
@@ -122,7 +119,7 @@ _HYPERPARAM_KEY_ABBREV = {
 
 def _abbreviate_hyperparam_key(path: str) -> str:
     """Short form of a dotted hyperparameter path's leaf name, e.g.
-    ``"vae.encoder_hidden_dim"`` -> ``"hd"``, for compact run labels.
+    ``"encoder.encoder_hidden_dim"`` -> ``"hd"``, for compact run labels.
     """
     key = path.rsplit(".", 1)[-1]
     return _HYPERPARAM_KEY_ABBREV.get(key, key)
@@ -234,10 +231,6 @@ def run_labels(runs: List[RunData]) -> Dict[Path, str]:
 _LOSS_METRIC_ORDER = [
     "train_loss",
     "val_loss",
-    "train_recon",
-    "val_recon",
-    "train_kl",
-    "val_kl",
     "train_family_ce",
     "val_family_ce",
     "train_spacegroup_ce",
@@ -247,10 +240,10 @@ _LOSS_METRIC_ORDER = [
 
 def available_loss_metrics(runs: List[RunData]) -> List[str]:
     """Loss-history columns present in every run's ``loss_history.csv``
-    (excluding ``"epoch"``), e.g. ``val_loss`` plus its ``recon``/``kl``
-    components and, when auxiliary heads were active, the family/spacegroup
-    cross-entropy terms -- in a fixed, readable order (known metrics first,
-    any unexpected extra column sorted after).
+    (excluding ``"epoch"``), e.g. ``val_loss`` plus, when classification
+    heads were active, the family/spacegroup cross-entropy terms -- in a
+    fixed, readable order (known metrics first, any unexpected extra column
+    sorted after).
     """
     common = set(runs[0].loss_history)
     for run in runs[1:]:
@@ -327,7 +320,7 @@ def final_metric_groups(
 ) -> Dict[Any, List[float]]:
     """Group each run's final (last-epoch) ``metric`` by its value of
     ``hyperparam`` -- any dotted-path config key, e.g. as returned by
-    ``varying_hyperparams`` (``"vae.encoder_hidden_dim"``,
+    ``varying_hyperparams`` (``"encoder.encoder_hidden_dim"``,
     ``"train.learning_rate"``, ``"aux_heads.lambda_family"``, ...).
 
     Multiple runs commonly share the same hyperparameter value -- e.g. a
@@ -857,7 +850,7 @@ def classification_accuracies_from_npz(npz: Dict[str, np.ndarray]) -> Dict[str, 
     """Family/spacegroup classification accuracy from any npz-shaped dict
     carrying ``family_probs``/``family_classes``/``labels`` and, optionally,
     ``spacegroup_probs``/``spacegroup_classes``/``spacegroups`` -- the
-    payload shape both a run's own ``embeddings.npz`` (vae/autoencoder/cgcnn
+    payload shape both a run's own ``embeddings.npz`` (cgcnn's
     built-in heads) and a ``dim_red.pipeline.tail_training`` classification
     tail's ``tail_predictions.npz`` (supcon, or a cgcnn body's separate
     classification tail) share, letting callers (e.g.
@@ -1005,7 +998,7 @@ def generate_comparison_report(
 ) -> Path:
     """Discover every run under ``sweep_dir`` and render the full comparison
     suite (loss curves -- one subplot per loss-history column common to every
-    run, e.g. total/recon/KL and, when active, the aux-head cross-entropy or
+    run, e.g. the total and, when active, the aux-head cross-entropy or
     SupCon terms, not just the total -- final-metric-vs-hyperparameter plots
     for those same components against whatever hyperparameter varied, a
     spacegroup histogram colored by family, a latent-space grid (any non-2D

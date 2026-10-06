@@ -348,12 +348,12 @@ pytest.importorskip("pyxtal")
 
 from dim_red.pipeline.config import AugmentationConfig as PipelineAugmentationConfig
 from dim_red.pipeline.config import (
+    EncoderConfig,
     FetchConfig,
     PyxtalConfig,
     RunConfig,
     SoapConfig,
     TrainSettings,
-    VAEArchConfig,
 )
 from dim_red.pipeline.dataset_cache import (
     build_dataset_for_run,
@@ -481,7 +481,7 @@ def _run_config(data_source="fetch", pyxtal_config=None, augmentation_config=Non
             else None
         ),
         soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
+        encoder=EncoderConfig(encoder_hidden_dim=[4], latent_dim=2),
         train=TrainSettings(),
         seed=0,
         data_source=data_source,
@@ -876,7 +876,7 @@ def _cgcnn_run_config(data_source="fetch", pyxtal_config=None):
             else None
         ),
         soap=SoapConfig(),
-        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
+        encoder=EncoderConfig(encoder_hidden_dim=[4], latent_dim=2),
         train=TrainSettings(),
         graph=GraphConfig(radius=3.0, max_num_nbr=4, max_species=2),
         aux_heads=AuxHeadsConfig(mode="family_only"),
@@ -916,7 +916,7 @@ def test_build_graph_dataset_for_run_dispatches_to_pyxtal(tmp_path):
     assert mock_generate.call_count == 1
 
 
-# --- MACE dataset (model_kind == "mace") -------------------------------------
+# --- MACE dataset (model_kind == "supcon_mace") -------------------------------------
 #
 # Unlike the CGCNN graph tests above, dim_red.mace.model.MaceEncoder itself
 # requires mace_jax (not installed in every test environment) -- but
@@ -1063,11 +1063,11 @@ def _mace_run_config(data_source="fetch", pyxtal_config=None):
             else None
         ),
         soap=SoapConfig(),
-        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
+        encoder=EncoderConfig(encoder_hidden_dim=[4], latent_dim=2),
         train=TrainSettings(),
         mace=MaceConfig(checkpoint_path="/fake/ckpt", r_max=5.0),
         seed=0,
-        model_kind="mace",
+        model_kind="supcon_mace",
         data_source=data_source,
         pyxtal=pyxtal_config,
     )

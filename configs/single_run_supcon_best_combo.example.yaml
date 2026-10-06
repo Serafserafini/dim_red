@@ -23,19 +23,16 @@ soap:
   l_max: 6
   sigma: 0.5
   element_agnostic: true
-  normalize_distances: false
   species: null
 
-vae:
+encoder:
   encoder_hidden_dim: [256, 128]
   latent_dim: 32
-  mirror: true
 
 train:
   epochs: 200
   batch_size: 128
   learning_rate: 0.001
-  optimizer: adam
   val_ratio: 0.2
   device: gpu
   early_stopping:
@@ -81,7 +78,6 @@ tails:
     epochs: 40
     batch_size: 32
     learning_rate: 0.001
-    optimizer: adam
     device: gpu
     early_stopping:
       enabled: true
@@ -89,6 +85,4 @@ tails:
       min_delta: 0.0001
       restore_best_weights: true
   classification:
-    mode: family_only
-    lambda_family: 1.0
     head_hidden_dim: 32

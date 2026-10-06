@@ -48,8 +48,8 @@ logger = logging.getLogger("dim_red.pipeline")
 
 _DEFAULT_KEY_HYPERPARAMS = (
     "model",
-    "vae.latent_dim",
-    "vae.encoder_hidden_dim",
+    "encoder.latent_dim",
+    "encoder.encoder_hidden_dim",
     "train.learning_rate",
     "train.batch_size",
     "train.epochs",
@@ -128,18 +128,20 @@ def collect_run_dirs(inputs: Sequence[Union[str, Path]]) -> List[Path]:
 def run_classification_accuracies(run: RunData) -> Dict[str, float]:
     """Family/spacegroup classification accuracy for ``run``, uniformly
     across storage locations: tries ``run.embeddings`` first (covers
-    vae/autoencoder/cgcnn's built-in heads); if that has no classifier
-    predictions (e.g. a supcon body, or any run without auxiliary heads),
-    falls back to ``<run_dir>/tails/classification/tail_predictions.npz`` if
-    present (a supcon or cgcnn classification tail -- same payload keys, see
+    cgcnn's built-in heads); if that has no classifier predictions (e.g. a
+    supcon body, or any run without classification heads), falls back to
+    ``<run_dir>/tails/classification/tail_predictions.npz`` if present (a
+    classification tail -- same payload keys, see
     ``dim_red.pipeline.compare.classification_accuracies_from_npz``), then to
-    ``<run_dir>/tails/hierarchical/tail_predictions.npz`` (a hierarchical
-    tail -- same ``family``/``spacegroup`` payload keys, see
-    ``dim_red.pipeline.compare.hierarchical_accuracies_from_npz`` for its
-    extra ``spacegroup_oracle`` number, not surfaced here). Only checks those
-    exact paths, not a dedup-suffixed ``tails/classification-2``/
-    ``tails/hierarchical-2`` from a repeated manual ``dimred-train-tail``
-    call. Returns ``{}`` if none of these sources has classifier predictions.
+    the ``tail_predictions.npz`` of the first ``<run_dir>/tails/hierarchical_supcon*``
+    directory (a hierarchical_supcon tail -- same ``family``/``spacegroup``
+    payload keys, see ``dim_red.pipeline.compare.hierarchical_accuracies_from_npz``
+    for its extra ``spacegroup_oracle`` number, not surfaced here; the glob
+    covers a custom ``output_subdir`` such as ``hierarchical_supcon_round19_baseline``
+    and dedup suffixes). Only ``tails/classification`` is matched exactly, not
+    a dedup-suffixed ``tails/classification-2`` from a repeated manual
+    ``dimred-train-tail`` call. Returns ``{}`` if none of these sources has
+    classifier predictions.
 
     Every source here carries a per-row ``split`` array, so the bare
     ``"family"``/``"spacegroup"`` keys returned are val-only accuracy (not
@@ -149,8 +151,12 @@ def run_classification_accuracies(run: RunData) -> Dict[str, float]:
     accs = classification_accuracies_from_npz(run.embeddings)
     if accs:
         return accs
-    for tail_kind in ("classification", "hierarchical"):
-        tail_predictions = run.run_dir / "tails" / tail_kind / "tail_predictions.npz"
+    tails_dir = run.run_dir / "tails"
+    candidates = [tails_dir / "classification"] + sorted(
+        tails_dir.glob("hierarchical_supcon*")
+    )
+    for tail_dir in candidates:
+        tail_predictions = tail_dir / "tail_predictions.npz"
         if tail_predictions.exists():
             with np.load(tail_predictions) as npz:
                 accs = classification_accuracies_from_npz(dict(npz.items()))

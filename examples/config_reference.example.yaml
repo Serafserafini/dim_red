@@ -15,7 +15,7 @@
 # need -- every field omitted from a real config falls back to the default
 # shown here.
 #
-# Run with: python -m dim_red.pipeline.cli --config <your_config.yaml>
+# Run with: dimred-run <your_config.yaml>
 # or:       dimred-run <your_config.yaml>
 
 # --- Top level ------------------------------------------------------------
@@ -29,7 +29,7 @@ model: vae # "vae" (default) | "autoencoder" | "supcon" | "cgcnn" -- which
   # model dim_red.pipeline.single_run.run_single trains; "vae"/"autoencoder"/
   # "supcon" read their encoder architecture from "vae:" below (SOAP-vector
   # input); "cgcnn" reads its graph-construction + architecture
-  # hyperparameters from "graph:" instead (only "vae.latent_dim" is still
+  # hyperparameters from "graph:" instead (only "encoder.latent_dim" is still
   # read) and its input is built directly from crystal structures, no SOAP
   # at all -- see "soap:"/"graph:" below
 data_source: fetch # "fetch" (default, Materials Project) | "pyxtal"
@@ -90,7 +90,6 @@ soap:
   l_max: 3
   sigma: 0.5
   element_agnostic: false
-  normalize_distances: false
   species: null # auto-detected across all fetched/generated structures
 
 # --- Encoder/decoder architecture (vae/autoencoder/supcon/cgcnn) -----------
@@ -99,12 +98,10 @@ soap:
 # this block is ignored, same treatment "supcon" already gives
 # decoder_hidden_dim/mirror.
 
-vae:
+encoder:
   encoder_hidden_dim: [] # REQUIRED, no default -- e.g. [128, 64]; ignored for model: cgcnn
-  decoder_hidden_dim: null # null -> mirrors the encoder (reversed); ignored
     # for model: supcon/cgcnn (no decoder)
   latent_dim: 0 # REQUIRED, no default -- e.g. 2
-  mirror: true # only consulted when decoder_hidden_dim is null; ignored for
     # model: supcon/cgcnn
 
 # --- model: cgcnn only: graph construction + architecture ------------------
@@ -181,11 +178,7 @@ batching:
 train:
   epochs: 20
   batch_size: 32
-  learning_rate: 0.001 # Adam's learning rate (used when optimizer: adam,
-    # the default); unused when optimizer: velo
-  optimizer: adam # "adam" (default, fast) or "velo" (learned_optimization's
-    # pretrained VeLO meta-learned optimizer -- much slower to start, see CLAUDE.md)
-  beta: 1.0 # KL weight; ignored for model: autoencoder/supcon/cgcnn (no KL term)
+  learning_rate: 0.001 # Adam's learning rate
   val_ratio: 0.2
   device: cpu # "cpu" | "gpu" -- raises if no matching JAX device exists
   early_stopping: # same mechanism for vae/autoencoder/supcon/cgcnn: stop once
@@ -207,15 +200,12 @@ train:
 # classification tail is redundant with its own built-in heads above but
 # harmless (useful for ablation). visualization, however, is offered for
 # *every* model_kind, including vae/autoencoder -- genuinely useful since
-# vae.latent_dim need not be 2, and aux_heads has no visualization
+# encoder.latent_dim need not be 2, and aux_heads has no visualization
 # equivalent of its own. Omit this block entirely (default: null) to
 # disable, current behavior unchanged.
 
 tails: null # example block, all fields at their default:
   # classification: null # set to auto-train a classification tail, e.g.:
-  #   mode: family_and_spacegroup # "family_only" | "family_and_spacegroup"
-  #   lambda_family: 1.0
-  #   lambda_spacegroup: 1.0 # ignored unless mode: family_and_spacegroup
   #   head_hidden_dim: 16
   # visualization: null # set to auto-train a visualization tail, e.g.:
   #   viz_dim: 2 # 2 or 3
@@ -233,6 +223,5 @@ tails: null # example block, all fields at their default:
   #   epochs: 20
   #   batch_size: 32
   #   learning_rate: 0.001
-  #   optimizer: adam
   #   device: cpu
   #   early_stopping: {enabled: false, patience: 10, min_delta: 0.0, restore_best_weights: true}

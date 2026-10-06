@@ -1,12 +1,11 @@
 """
 Integration test for a single pipeline run: mocks the network fetch and SOAP
-computation (no Materials Project access needed) but exercises the real VAE
+computation (no Materials Project access needed) but exercises the real
 training loop end-to-end on tiny synthetic data, and checks that every
 expected artifact is written to the run directory.
 """
 
 import csv
-import dataclasses
 import logging
 from unittest.mock import patch
 
@@ -28,6 +27,7 @@ from dim_red.pipeline.config import (
     BatchingConfig,
     ClassificationTailConfig,
     EarlyStoppingConfig,
+    EncoderConfig,
     FetchConfig,
     GraphConfig,
     MaceConfig,
@@ -37,7 +37,6 @@ from dim_red.pipeline.config import (
     SupConConfig,
     TailTrainSettings,
     TrainSettings,
-    VAEArchConfig,
     VisualizationTailConfig,
 )
 from dim_red.pipeline.single_run import run_single
@@ -55,7 +54,7 @@ def _make_config(tmp_path, name=None) -> RunConfig:
     return RunConfig(
         fetch=FetchConfig(crystal_systems=["cubic"], limit_per_system=8),
         soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
+        encoder=EncoderConfig(encoder_hidden_dim=[4], latent_dim=2),
         train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
         seed=0,
         output_dir=str(tmp_path / "runs"),
@@ -92,7 +91,7 @@ def test_run_single_writes_expected_artifacts(tmp_path):
     with open(run_dir / "config.yaml") as f:
         saved = yaml.safe_load(f)
     assert saved["fetch"]["crystal_systems"] == ["cubic"]
-    assert saved["vae"]["encoder_hidden_dim"] == [4]
+    assert saved["encoder"]["encoder_hidden_dim"] == [4]
 
     embeddings = np.load(run_dir / "embeddings.npz")
     n_total = 8  # full dataset (train + val), not just the held-out split
@@ -119,35 +118,16 @@ def test_run_single_writes_expected_artifacts(tmp_path):
 
     with open(run_dir / "loss_history.csv") as f:
         header = f.readline().strip().split(",")
+    # Default model is supcon with the default family_only mode.
     assert header == [
         "epoch",
         "train_loss",
-        "train_recon",
-        "train_kl",
         "val_loss",
-        "val_recon",
-        "val_kl",
+        "train_norm_penalty",
+        "val_norm_penalty",
+        "train_family_supcon",
+        "val_family_supcon",
     ]
-
-
-def test_run_single_optimizer_velo_still_works_end_to_end(tmp_path):
-    """ "velo" is opt-in now (default is "adam") -- confirm it still works
-    end-to-end through the full pipeline, not just the lower-level
-    train_vae/train_supcon/... functions.
-    """
-    config = _make_config(tmp_path, name="test-run-velo")
-    config = dataclasses.replace(
-        config, train=dataclasses.replace(config.train, optimizer="velo")
-    )
-    fetch_patch, soap_patch = _patch_dataset()
-
-    with fetch_patch, soap_patch:
-        run_dir = run_single(config)
-
-    assert (run_dir / "model_params.msgpack").exists()
-    with open(run_dir / "run.log") as f:
-        run_log = f.read()
-    assert "optimizer=velo" in run_log
 
 
 def test_run_single_auto_name_encodes_swept_params(tmp_path):
@@ -157,64 +137,7 @@ def test_run_single_auto_name_encodes_swept_params(tmp_path):
     with fetch_patch, soap_patch:
         run_dir = run_single(config)
 
-    assert "hd-4" in run_dir.name
-    assert "cs-cubic" in run_dir.name
-
-
-def test_run_single_autoencoder_writes_expected_artifacts(tmp_path):
-    config = RunConfig(
-        fetch=FetchConfig(crystal_systems=["cubic"], limit_per_system=8),
-        soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
-        train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
-        seed=0,
-        output_dir=str(tmp_path / "runs"),
-        model_kind="autoencoder",
-    )
-    fetch_patch, soap_patch = _patch_dataset()
-
-    with fetch_patch, soap_patch:
-        run_dir = run_single(config)
-
-    assert "model-autoencoder" in run_dir.name
-    assert (run_dir / "embeddings.npz").exists()
-    assert (run_dir / "model_params.msgpack").exists()
-
-    embeddings = np.load(run_dir / "embeddings.npz")
-    assert embeddings["embeddings"].shape == (8, 2)
-
-    # No KL columns at all for a plain Autoencoder (unlike the VAE's header).
-    with open(run_dir / "loss_history.csv") as f:
-        header = f.readline().strip().split(",")
-    assert header == [
-        "epoch",
-        "train_loss",
-        "train_recon",
-        "val_loss",
-        "val_recon",
-    ]
-
-
-def test_run_single_autoencoder_and_vae_dont_collide_in_same_sweep_dir(tmp_path):
-    base_kwargs = dict(
-        fetch=FetchConfig(crystal_systems=["cubic"], limit_per_system=8),
-        soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
-        train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
-        seed=0,
-        output_dir=str(tmp_path / "runs"),
-    )
-    vae_config = RunConfig(**base_kwargs, model_kind="vae")
-    ae_config = RunConfig(**base_kwargs, model_kind="autoencoder")
-    fetch_patch, soap_patch = _patch_dataset()
-
-    with fetch_patch, soap_patch:
-        vae_run_dir = run_single(vae_config)
-        ae_run_dir = run_single(ae_config)
-
-    assert vae_run_dir != ae_run_dir
-    assert "model-autoencoder" in ae_run_dir.name
-    assert "model-" not in vae_run_dir.name  # default "vae" stays untagged
+    assert run_dir.name.startswith("model-supcon_hd-4_cs-cubic")
 
 
 def test_run_single_pyxtal_data_source_writes_expected_artifacts(tmp_path):
@@ -222,7 +145,7 @@ def test_run_single_pyxtal_data_source_writes_expected_artifacts(tmp_path):
 
     config = RunConfig(
         soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
+        encoder=EncoderConfig(encoder_hidden_dim=[4], latent_dim=2),
         train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
         seed=0,
         output_dir=str(tmp_path / "runs"),
@@ -276,7 +199,7 @@ def test_run_single_augmentation_expands_dataset(tmp_path):
     config = RunConfig(
         fetch=FetchConfig(crystal_systems=["cubic"], limit_per_system=n_fetched),
         soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
+        encoder=EncoderConfig(encoder_hidden_dim=[4], latent_dim=2),
         train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
         augmentation=AugmentationConfig(
             n_augmented=1, jitter_probability=1.0, jitter_std=0.05, seed=0
@@ -317,7 +240,7 @@ def test_run_single_augmentation_split_never_separates_sibling_copies(tmp_path):
     config = RunConfig(
         fetch=FetchConfig(crystal_systems=["cubic"], limit_per_system=n_fetched),
         soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
+        encoder=EncoderConfig(encoder_hidden_dim=[4], latent_dim=2),
         train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
         augmentation=AugmentationConfig(
             n_augmented=3, jitter_probability=1.0, jitter_std=0.05, seed=0
@@ -365,7 +288,7 @@ def test_run_single_augmentation_supercell_radius_expands_single_atom_structures
     config = RunConfig(
         fetch=FetchConfig(crystal_systems=["cubic"], limit_per_system=n_fetched),
         soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
+        encoder=EncoderConfig(encoder_hidden_dim=[4], latent_dim=2),
         train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
         augmentation=AugmentationConfig(
             n_augmented=1,
@@ -419,172 +342,6 @@ def test_run_single_reuses_dataset_cache_across_runs(tmp_path):
     assert mock_fetch.call_count == 1
 
 
-def test_run_single_family_and_spacegroup_aux_heads(tmp_path):
-    config = RunConfig(
-        fetch=FetchConfig(crystal_systems=["cubic", "hexagonal"], limit_per_system=10),
-        soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        vae=VAEArchConfig(encoder_hidden_dim=[8], latent_dim=2),
-        train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.2),
-        aux_heads=AuxHeadsConfig(
-            mode="family_and_spacegroup",
-            lambda_family=1.0,
-            lambda_spacegroup=0.5,
-            head_hidden_dim=4,
-        ),
-        seed=0,
-        output_dir=str(tmp_path / "runs"),
-        name=None,
-    )
-
-    spacegroup_offsets = {"cubic": 195, "hexagonal": 168}
-
-    def fake_fetch(crystal_system, api_key=None, limit=10):
-        offset = spacegroup_offsets[crystal_system]
-        return [
-            _fake_atoms("Cu", f"mp-{crystal_system}-{i}", offset + (i % 2))
-            for i in range(limit)
-        ]
-
-    rng = np.random.default_rng(0)
-
-    def fake_compute_soap(atoms, **kwargs):
-        n = len(atoms) if isinstance(atoms, list) else 1
-        return rng.normal(size=(n, 5)).astype(np.float32)
-
-    with (
-        patch(
-            "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
-            side_effect=fake_fetch,
-        ),
-        patch(
-            "dim_red.pipeline.dataset_cache.compute_soap", side_effect=fake_compute_soap
-        ),
-    ):
-        run_dir = run_single(config)
-
-    assert "aux-family_and_spacegroup" in run_dir.name
-
-    with open(run_dir / "loss_history.csv") as f:
-        header = f.readline().strip().split(",")
-    assert header == [
-        "epoch",
-        "train_loss",
-        "train_recon",
-        "train_kl",
-        "val_loss",
-        "val_recon",
-        "val_kl",
-        "train_family_ce",
-        "val_family_ce",
-        "train_spacegroup_ce",
-        "val_spacegroup_ce",
-    ]
-
-    embeddings = np.load(run_dir / "embeddings.npz")
-    n_total = 20  # 2 crystal systems x limit_per_system=10
-    assert set(embeddings["family_classes"].tolist()) == {"Cubic", "Hexagonal"}
-    assert set(embeddings["spacegroup_classes"].tolist()) == {168, 169, 195, 196}
-    assert embeddings["family_probs"].shape == (n_total, 2)
-    assert embeddings["spacegroup_probs"].shape == (n_total, 4)
-    np.testing.assert_allclose(
-        embeddings["family_probs"].sum(axis=1), np.ones(n_total), atol=1e-5
-    )
-    np.testing.assert_allclose(
-        embeddings["spacegroup_probs"].sum(axis=1), np.ones(n_total), atol=1e-5
-    )
-
-
-def test_run_single_autoencoder_family_only_aux_heads(tmp_path):
-    config = RunConfig(
-        fetch=FetchConfig(crystal_systems=["cubic", "hexagonal"], limit_per_system=8),
-        soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
-        train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
-        aux_heads=AuxHeadsConfig(
-            mode="family_only", lambda_family=1.0, head_hidden_dim=4
-        ),
-        seed=0,
-        output_dir=str(tmp_path / "runs"),
-        model_kind="autoencoder",
-    )
-
-    def fake_fetch(crystal_system, api_key=None, limit=10):
-        return [_fake_atoms("Cu", f"mp-{crystal_system}-{i}") for i in range(limit)]
-
-    rng = np.random.default_rng(0)
-
-    def fake_compute_soap(atoms, **kwargs):
-        n = len(atoms) if isinstance(atoms, list) else 1
-        return rng.normal(size=(n, 5)).astype(np.float32)
-
-    with (
-        patch(
-            "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
-            side_effect=fake_fetch,
-        ),
-        patch(
-            "dim_red.pipeline.dataset_cache.compute_soap", side_effect=fake_compute_soap
-        ),
-    ):
-        run_dir = run_single(config)
-
-    with open(run_dir / "loss_history.csv") as f:
-        header = f.readline().strip().split(",")
-    assert "train_family_ce" in header
-    assert "train_kl" not in header
-
-    embeddings = np.load(run_dir / "embeddings.npz")
-    n_total = 16
-    assert "family_probs" in embeddings.files
-    np.testing.assert_allclose(
-        embeddings["family_probs"].sum(axis=1), np.ones(n_total), atol=1e-5
-    )
-
-
-def test_run_single_family_only_aux_heads_no_spacegroup_artifacts(tmp_path):
-    config = RunConfig(
-        fetch=FetchConfig(crystal_systems=["cubic", "hexagonal"], limit_per_system=8),
-        soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
-        train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
-        aux_heads=AuxHeadsConfig(
-            mode="family_only", lambda_family=1.0, head_hidden_dim=4
-        ),
-        seed=0,
-        output_dir=str(tmp_path / "runs"),
-        name="family-only-run",
-    )
-
-    def fake_fetch(crystal_system, api_key=None, limit=10):
-        return [_fake_atoms("Cu", f"mp-{crystal_system}-{i}") for i in range(limit)]
-
-    rng = np.random.default_rng(0)
-
-    def fake_compute_soap(atoms, **kwargs):
-        n = len(atoms) if isinstance(atoms, list) else 1
-        return rng.normal(size=(n, 5)).astype(np.float32)
-
-    with (
-        patch(
-            "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
-            side_effect=fake_fetch,
-        ),
-        patch(
-            "dim_red.pipeline.dataset_cache.compute_soap", side_effect=fake_compute_soap
-        ),
-    ):
-        run_dir = run_single(config)
-
-    with open(run_dir / "loss_history.csv") as f:
-        header = f.readline().strip().split(",")
-    assert "train_family_ce" in header
-    assert "train_spacegroup_ce" not in header
-
-    embeddings = np.load(run_dir / "embeddings.npz")
-    assert "family_probs" in embeddings.files
-    assert "spacegroup_probs" not in embeddings.files
-
-
 def _fake_fetch_with_spacegroups(spacegroup_offsets):
     def fake_fetch(crystal_system, api_key=None, limit=10):
         offset = spacegroup_offsets[crystal_system]
@@ -610,7 +367,7 @@ def test_run_single_supcon_family_and_spacegroup_writes_expected_artifacts(tmp_p
     config = RunConfig(
         fetch=FetchConfig(crystal_systems=["cubic", "hexagonal"], limit_per_system=10),
         soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        vae=VAEArchConfig(encoder_hidden_dim=[8], latent_dim=2),
+        encoder=EncoderConfig(encoder_hidden_dim=[8], latent_dim=2),
         train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.2),
         supcon=SupConConfig(
             mode="family_and_spacegroup",
@@ -677,7 +434,7 @@ def test_run_single_supcon_lambda_norm_threaded_through_config(tmp_path):
     config = RunConfig(
         fetch=FetchConfig(crystal_systems=["cubic", "hexagonal"], limit_per_system=10),
         soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        vae=VAEArchConfig(encoder_hidden_dim=[8], latent_dim=2),
+        encoder=EncoderConfig(encoder_hidden_dim=[8], latent_dim=2),
         train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.2),
         supcon=SupConConfig(mode="family_only", tau=0.1, lambda_norm=0.3),
         seed=0,
@@ -720,7 +477,7 @@ def test_run_single_supcon_default_lambda_norm_still_writes_norm_penalty_columns
     config = RunConfig(
         fetch=FetchConfig(crystal_systems=["cubic"], limit_per_system=8),
         soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
+        encoder=EncoderConfig(encoder_hidden_dim=[4], latent_dim=2),
         train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
         supcon=SupConConfig(mode="family_only"),
         seed=0,
@@ -754,7 +511,7 @@ def test_run_single_supcon_family_only_mode_history_and_name(tmp_path):
     config = RunConfig(
         fetch=FetchConfig(crystal_systems=["cubic", "hexagonal"], limit_per_system=8),
         soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
+        encoder=EncoderConfig(encoder_hidden_dim=[4], latent_dim=2),
         train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
         supcon=SupConConfig(mode="family_only"),
         seed=0,
@@ -786,37 +543,13 @@ def test_run_single_supcon_family_only_mode_history_and_name(tmp_path):
     assert "family_probs" not in embeddings.files
 
 
-def test_run_single_supcon_and_vae_dont_collide_in_same_sweep_dir(tmp_path):
-    base_kwargs = dict(
-        fetch=FetchConfig(crystal_systems=["cubic"], limit_per_system=8),
-        soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
-        train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
-        seed=0,
-        output_dir=str(tmp_path / "runs"),
-    )
-    vae_config = RunConfig(**base_kwargs, model_kind="vae")
-    supcon_config = RunConfig(
-        **base_kwargs, model_kind="supcon", supcon=SupConConfig(mode="family_only")
-    )
-    fetch_patch, soap_patch = _patch_dataset()
-
-    with fetch_patch, soap_patch:
-        vae_run_dir = run_single(vae_config)
-        supcon_run_dir = run_single(supcon_config)
-
-    assert vae_run_dir != supcon_run_dir
-    assert "model-supcon" in supcon_run_dir.name
-    assert (supcon_run_dir / "embeddings.npz").exists()
-
-
 def test_run_single_supcon_balanced_batching_writes_expected_artifacts(
     tmp_path, caplog
 ):
     config = RunConfig(
         fetch=FetchConfig(crystal_systems=["cubic", "hexagonal"], limit_per_system=20),
         soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        vae=VAEArchConfig(encoder_hidden_dim=[8], latent_dim=2),
+        encoder=EncoderConfig(encoder_hidden_dim=[8], latent_dim=2),
         train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.2),
         supcon=SupConConfig(mode="family_and_spacegroup", tau=0.1),
         batching=BatchingConfig(
@@ -866,7 +599,7 @@ def test_run_single_supcon_balanced_batching_spacegroup_only_mode(tmp_path):
     config = RunConfig(
         fetch=FetchConfig(crystal_systems=["cubic", "hexagonal"], limit_per_system=20),
         soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        vae=VAEArchConfig(encoder_hidden_dim=[8], latent_dim=2),
+        encoder=EncoderConfig(encoder_hidden_dim=[8], latent_dim=2),
         train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.2),
         supcon=SupConConfig(mode="spacegroup_only", tau=0.1),
         batching=BatchingConfig(
@@ -906,7 +639,7 @@ def test_run_single_supcon_random_batching_is_default_and_backward_compatible(
     config = RunConfig(
         fetch=FetchConfig(crystal_systems=["cubic", "hexagonal"], limit_per_system=8),
         soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
+        encoder=EncoderConfig(encoder_hidden_dim=[4], latent_dim=2),
         train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
         supcon=SupConConfig(mode="family_only"),
         seed=0,
@@ -936,84 +669,21 @@ def test_run_single_supcon_random_batching_is_default_and_backward_compatible(
     assert (run_dir / "embeddings.npz").exists()
 
 
-def test_run_single_vae_early_stopping_stops_before_configured_epochs(tmp_path):
-    config = RunConfig(
-        fetch=FetchConfig(crystal_systems=["cubic"], limit_per_system=8),
-        soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
-        train=TrainSettings(
-            epochs=40,
-            batch_size=4,
-            val_ratio=0.25,
-            early_stopping=EarlyStoppingConfig(enabled=True, patience=2),
-        ),
-        seed=0,
-        output_dir=str(tmp_path / "runs"),
-    )
-    fetch_patch, soap_patch = _patch_dataset()
-
-    with fetch_patch, soap_patch:
-        run_dir = run_single(config)
-
-    with open(run_dir / "loss_history.csv") as f:
-        rows = list(csv.DictReader(f))
-    assert len(rows) < 40
-
-    with open(run_dir / "run.log") as f:
-        run_log = f.read()
-    assert "Early stopping: training stopped after" in run_log
-
-    # Downstream artifacts (encode over the whole dataset, plot, params
-    # save) must all still work fine with a shorter-than-configured history.
-    assert (run_dir / "embeddings.npz").exists()
-    assert (run_dir / "model_params.msgpack").exists()
-    embeddings = np.load(run_dir / "embeddings.npz")
-    assert embeddings["embeddings"].shape == (8, 2)
-
-
-def test_run_single_autoencoder_early_stopping_stops_before_configured_epochs(
-    tmp_path,
-):
-    config = RunConfig(
-        fetch=FetchConfig(crystal_systems=["cubic"], limit_per_system=8),
-        soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
-        train=TrainSettings(
-            epochs=40,
-            batch_size=4,
-            val_ratio=0.25,
-            early_stopping=EarlyStoppingConfig(enabled=True, patience=2),
-        ),
-        seed=0,
-        output_dir=str(tmp_path / "runs"),
-        model_kind="autoencoder",
-    )
-    fetch_patch, soap_patch = _patch_dataset()
-
-    with fetch_patch, soap_patch:
-        run_dir = run_single(config)
-
-    with open(run_dir / "loss_history.csv") as f:
-        rows = list(csv.DictReader(f))
-    assert len(rows) < 40
-    with open(run_dir / "run.log") as f:
-        assert "Early stopping: training stopped after" in f.read()
-
-
 def test_run_single_supcon_early_stopping_stops_before_configured_epochs(tmp_path):
     config = RunConfig(
         fetch=FetchConfig(crystal_systems=["cubic", "hexagonal"], limit_per_system=10),
         soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        vae=VAEArchConfig(encoder_hidden_dim=[8], latent_dim=2),
+        encoder=EncoderConfig(encoder_hidden_dim=[8], latent_dim=2),
         train=TrainSettings(
             epochs=40,
             batch_size=4,
             val_ratio=0.2,
-            # Tuned against VeLO's convergence timing (faked fast by
-            # tests/conftest.py's fixture) -- this test is about early
-            # stopping's own bookkeeping, not optimizer choice.
-            optimizer="velo",
-            early_stopping=EarlyStoppingConfig(enabled=True, patience=2),
+            # An improvement of this size never happens, so training stops
+            # after patience + 1 epochs -- the test is about early stopping's
+            # own bookkeeping, not how fast the optimizer converges.
+            early_stopping=EarlyStoppingConfig(
+                enabled=True, patience=2, min_delta=100.0
+            ),
         ),
         supcon=SupConConfig(mode="family_only", tau=0.1),
         seed=0,
@@ -1047,7 +717,7 @@ def test_run_single_early_stopping_disabled_by_default(tmp_path):
     config = RunConfig(
         fetch=FetchConfig(crystal_systems=["cubic"], limit_per_system=8),
         soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
+        encoder=EncoderConfig(encoder_hidden_dim=[4], latent_dim=2),
         train=TrainSettings(epochs=3, batch_size=4, val_ratio=0.25),
         seed=0,
         output_dir=str(tmp_path / "runs"),
@@ -1069,7 +739,7 @@ def _make_supcon_config_with_tails(tmp_path, tails):
     return RunConfig(
         fetch=FetchConfig(crystal_systems=["cubic", "hexagonal"], limit_per_system=10),
         soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        vae=VAEArchConfig(encoder_hidden_dim=[8], latent_dim=2),
+        encoder=EncoderConfig(encoder_hidden_dim=[8], latent_dim=2),
         train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.2),
         supcon=SupConConfig(mode="family_and_spacegroup", tau=0.1, projection_dim=6),
         seed=0,
@@ -1081,7 +751,7 @@ def _make_supcon_config_with_tails(tmp_path, tails):
 
 def test_run_single_supcon_auto_trains_both_tails(tmp_path):
     tails = AutoTailsConfig(
-        classification=ClassificationTailConfig(mode="family_only"),
+        classification=ClassificationTailConfig(),
         visualization=VisualizationTailConfig(viz_dim=2),
         train=TailTrainSettings(epochs=1, batch_size=4),
     )
@@ -1119,7 +789,7 @@ def test_run_single_supcon_auto_trains_both_tails(tmp_path):
 
 def test_run_single_supcon_auto_trains_classification_tail_only(tmp_path):
     tails = AutoTailsConfig(
-        classification=ClassificationTailConfig(mode="family_only"),
+        classification=ClassificationTailConfig(),
         train=TailTrainSettings(epochs=1, batch_size=4),
     )
     config = _make_supcon_config_with_tails(tmp_path, tails)
@@ -1139,36 +809,6 @@ def test_run_single_supcon_auto_trains_classification_tail_only(tmp_path):
 
     assert (run_dir / "tails" / "classification").exists()
     assert not (run_dir / "tails" / "visualization").exists()
-
-
-def test_run_single_classification_tail_ignored_but_visualization_trains_for_vae(
-    tmp_path,
-):
-    # classification is redundant with vae's own aux_heads classification, so
-    # it stays skipped for model_kind="vae" -- but visualization has no
-    # built-in vae equivalent, so it's no longer ignored (see
-    # tail_training._TAIL_MODEL_KINDS).
-    tails = AutoTailsConfig(
-        classification=ClassificationTailConfig(mode="family_only"),
-        visualization=VisualizationTailConfig(viz_dim=2, mode="family_only"),
-        train=TailTrainSettings(epochs=1, batch_size=4),
-    )
-    config = RunConfig(
-        fetch=FetchConfig(crystal_systems=["cubic"], limit_per_system=8),
-        soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
-        train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
-        seed=0,
-        output_dir=str(tmp_path / "runs"),
-        tails=tails,
-    )
-    fetch_patch, soap_patch = _patch_dataset()
-
-    with fetch_patch, soap_patch:
-        run_dir = run_single(config)
-
-    assert not (run_dir / "tails" / "classification").exists()
-    assert (run_dir / "tails" / "visualization" / "tail_embeddings.npz").exists()
 
 
 # --- model_kind == "cgcnn" ---------------------------------------------------
@@ -1205,7 +845,7 @@ def _make_cgcnn_config(tmp_path, aux_mode="family_only", tails=None) -> RunConfi
     return RunConfig(
         fetch=FetchConfig(crystal_systems=["cubic", "hexagonal"], limit_per_system=10),
         soap=SoapConfig(),
-        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=4),
+        encoder=EncoderConfig(encoder_hidden_dim=[4], latent_dim=4),
         train=TrainSettings(epochs=2, batch_size=4, val_ratio=0.2),
         graph=GraphConfig(
             radius=3.0,
@@ -1306,7 +946,7 @@ def test_run_single_cgcnn_auto_trains_visualization_tail(tmp_path):
     assert (visualization_dir / "tail_params.msgpack").exists()
 
 
-# --- model_kind == "mace" -----------------------------------------------------
+# --- model_kind == "supcon_mace" ---------------------------------------------
 #
 # dim_red.mace.model.MaceEncoder requires mace_jax (not installed in every
 # test environment), so it's mocked out entirely here -- the same pattern
@@ -1337,17 +977,17 @@ def _make_mace_config(tmp_path, tails=None) -> RunConfig:
     return RunConfig(
         fetch=FetchConfig(crystal_systems=["cubic", "hexagonal"], limit_per_system=10),
         soap=SoapConfig(),
-        vae=VAEArchConfig(encoder_hidden_dim=[1], latent_dim=1),
-        train=TrainSettings(device="cpu"),
+        encoder=EncoderConfig(encoder_hidden_dim=[4], latent_dim=2),
+        train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.2, device="cpu"),
         mace=MaceConfig(checkpoint_path="/fake/ckpt", r_max=5.0),
         seed=0,
         output_dir=str(tmp_path / "runs"),
-        model_kind="mace",
+        model_kind="supcon_mace",
         tails=tails,
     )
 
 
-def test_run_single_mace_writes_expected_artifacts(tmp_path):
+def test_run_single_supcon_mace_writes_expected_artifacts(tmp_path):
     config = _make_mace_config(tmp_path)
     spacegroup_offsets = {"cubic": 195, "hexagonal": 168}
 
@@ -1360,32 +1000,35 @@ def test_run_single_mace_writes_expected_artifacts(tmp_path):
     ):
         run_dir = run_single(config)
 
-    assert "model-mace" in run_dir.name
+    assert "model-supcon_mace" in run_dir.name
     assert (run_dir / "config.yaml").exists()
     assert (run_dir / "run.log").exists()
     assert (run_dir / "dataset.extxyz").exists()
     assert (run_dir / "embeddings.npz").exists()
     assert (run_dir / "embeddings_plot.png").exists()
     assert (run_dir / "model_params.msgpack").exists()
-    # No training loop at all for a frozen body -- no loss to report.
-    assert not (run_dir / "loss_history.csv").exists()
+    # The SupCon body trained on top of the frozen MACE features does train.
+    assert (run_dir / "loss_history.csv").exists()
+    assert (run_dir / "projection_params.msgpack").exists()
 
     embeddings = np.load(run_dir / "embeddings.npz")
     n_total = 20  # 2 crystal systems x limit_per_system=10
-    assert embeddings["embeddings"].shape == (n_total, 3)  # _FakeMaceEncoder._DIM
+    assert embeddings["embeddings"].shape == (n_total, 2)  # latent_dim=2
+    # The raw input features are the (standardized) MACE embeddings.
+    assert embeddings["features"].shape == (n_total, 3)  # _FakeMaceEncoder._DIM
     # SOAP-shaped payload (feature_mean/feature_std always present, unlike
     # cgcnn's graph-shaped payload which omits them entirely).
     assert "feature_mean" in embeddings.files
     assert "feature_std" in embeddings.files
     assert "features" in embeddings.files
-    # No classifier heads on a frozen body -- never saved for this model_kind.
+    # No classifier heads on a SupCon body -- never saved for this model_kind.
     assert "family_probs" not in embeddings.files
     assert "spacegroup_probs" not in embeddings.files
 
 
-def test_run_single_mace_auto_trains_classification_tail(tmp_path):
+def test_run_single_supcon_mace_auto_trains_classification_tail(tmp_path):
     tails = AutoTailsConfig(
-        classification=ClassificationTailConfig(mode="family_only"),
+        classification=ClassificationTailConfig(),
         train=TailTrainSettings(epochs=1, batch_size=4),
     )
     config = _make_mace_config(tmp_path, tails=tails)

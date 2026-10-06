@@ -8,7 +8,7 @@
 # CGCNN builds its own graph representation directly from a crystal's atoms
 # and bonds -- no soap: block at all for this model. See CLAUDE.md /
 # dim_red.cgcnn.
-# Run with: python -m dim_red.pipeline.cli --config configs/single_run_cgcnn.example.yaml
+# Run with: dimred-run configs/single_run_cgcnn.example.yaml
 # or:       dimred-run configs/single_run_cgcnn.example.yaml
 
 seed: 42
@@ -32,18 +32,14 @@ pyxtal:
 # "soap" block is unused for model: cgcnn -- CGCNN reads "graph" below
 # instead. Omitted here.
 
-# Same shared vae: block every model_kind reads its latent_dim from --
-# encoder_hidden_dim/decoder_hidden_dim/mirror are all IGNORED for
-# model: cgcnn (only latent_dim is read: the body's output width, saved to
-# embeddings.npz, reused by every downstream tail). encoder_hidden_dim
-# still needs *some* value below purely because it's a required field with
-# no default -- same pre-existing wart model: supcon configs already carry
-# for decoder_hidden_dim.
-vae:
+# Shared encoder: block every model_kind reads its latent_dim from --
+# encoder_hidden_dim is IGNORED for model: cgcnn (only latent_dim is read:
+# the body's output width, saved to embeddings.npz, reused by every
+# downstream tail). encoder_hidden_dim still needs *some* value below purely
+# because it's a required field with no default.
+encoder:
   encoder_hidden_dim: [1] # ignored for model: cgcnn (dummy placeholder value)
-  decoder_hidden_dim: null # ignored (no decoder)
   latent_dim: 32 # READ: CGCNN body's output width
-  mirror: true # ignored
 
 # CGCNN graph-construction + architecture hyperparameters.
 graph:
@@ -86,10 +82,7 @@ aux_heads:
 train:
   epochs: 30
   batch_size: 16
-  learning_rate: 0.001 # Adam's learning rate (used when optimizer: adam,
-    # the default); unused when optimizer: velo
-  optimizer: adam # "adam" (default, fast) or "velo" (learned_optimization's
-    # pretrained VeLO meta-learned optimizer -- much slower to start, see CLAUDE.md)
+  learning_rate: 0.001 # Adam's learning rate
   val_ratio: 0.2
   device: cpu
   early_stopping:
@@ -107,10 +100,8 @@ train:
 # visualization-tail is genuinely useful since latent_dim above need not be 2.
 # tails:
 #   classification:
-#     mode: family_and_spacegroup
 #   visualization:
 #     viz_dim: 2
 #   train:
 #     epochs: 20
 #     batch_size: 32
-#     optimizer: adam

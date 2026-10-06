@@ -1,33 +1,35 @@
 """
-Utilities to build and split datasets for VAE training.
+Container for tabular feature matrices (e.g. standardized SOAP descriptors)
+and a reproducible train/validation split.
 """
 
 from dataclasses import dataclass
 from typing import Tuple
+
 import numpy as np
 
 
 @dataclass(frozen=True)
-class VAEDatabase:
-    """Container for tabular feature matrices used for VAE training.
+class FeatureDatabase:
+    """Container for tabular feature matrices used for model training.
 
     Attributes:
         data: 2D array with shape ``(n_samples, n_features)`` containing
-            normalized or raw input vectors consumed by the VAE.
+            normalized or raw input vectors consumed by the model.
     """
 
     data: np.ndarray
 
     @classmethod
-    def from_array(cls, X: np.ndarray) -> "VAEDatabase":
-        """Build a :class:`VAEDatabase` instance from an array-like object.
+    def from_array(cls, X: np.ndarray) -> "FeatureDatabase":
+        """Build a :class:`FeatureDatabase` instance from an array-like object.
 
         Args:
             X: Array-like input expected to be 2D, shaped as
                 ``(n_samples, n_features)``.
 
         Returns:
-            A new :class:`VAEDatabase` with ``float32`` data.
+            A new :class:`FeatureDatabase` with ``float32`` data.
 
         Raises:
             ValueError: If ``X`` is not a 2D array.
@@ -39,10 +41,8 @@ class VAEDatabase:
         return cls(data=X_arr)
 
     def train_val_split(
-        self,
-        val_ratio: float = 0.2,
-        seed: int = 42
-    ) -> Tuple["VAEDatabase", "VAEDatabase"]:
+        self, val_ratio: float = 0.2, seed: int = 42
+    ) -> Tuple["FeatureDatabase", "FeatureDatabase"]:
         """Split dataset into train/validation partitions.
 
         The split is reproducible thanks to a local RNG initialized with
@@ -55,7 +55,7 @@ class VAEDatabase:
 
         Returns:
             A tuple ``(train_db, val_db)`` where each element is a
-            :class:`VAEDatabase`.
+            :class:`FeatureDatabase`.
 
         Raises:
             ValueError: If ``val_ratio`` is not strictly between 0 and 1.
@@ -74,6 +74,6 @@ class VAEDatabase:
         train_idx = indices[n_val:]
 
         return (
-            VAEDatabase(self.data[train_idx]),
-            VAEDatabase(self.data[val_idx]),
+            FeatureDatabase(self.data[train_idx]),
+            FeatureDatabase(self.data[val_idx]),
         )

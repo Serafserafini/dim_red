@@ -13,16 +13,15 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from dim_red.dataset import FeatureDatabase
 from dim_red.supcon.model import SupConEncoder
 from dim_red.supcon.tails import ProjectionTail
 from dim_red.supcon.training import (
     TrainConfig,
     norm_penalty,
     supcon_loss,
-    train_supcon,
-    train_supcon_no_projection,
+    training_first_phase,
 )
-from dim_red.vae.database import VAEDatabase
 
 
 def test_supcon_loss_matches_manual_computation():
@@ -111,12 +110,12 @@ def test_supcon_loss_rejects_invalid_distance():
 def _make_split_db(n=40, n_features=5, val_ratio=0.25, seed=0):
     rng = np.random.default_rng(seed)
     X = rng.normal(size=(n, n_features)).astype(np.float32)
-    db = VAEDatabase.from_array(X)
+    db = FeatureDatabase.from_array(X)
     return db.train_val_split(val_ratio=val_ratio, seed=seed)
 
 
 def _split_indices_like_train_val_split(n, val_ratio, seed):
-    """Reproduce VAEDatabase.train_val_split's index split to align external
+    """Reproduce FeatureDatabase.train_val_split's index split to align external
     label arrays (family/spacegroup ids) with train_db/val_db rows.
     """
     n_val = max(1, int(round(n * val_ratio)))
@@ -137,7 +136,7 @@ def _make_projection_tail(latent_dim=3, projection_dim=4, seed=0):
     )
 
 
-def test_train_supcon_family_and_spacegroup_returns_history():
+def test_training_first_phase_family_and_spacegroup_returns_history():
     n = 40
     train_db, val_db = _make_split_db(n=n)
     train_idx, val_idx = _split_indices_like_train_val_split(n, 0.25, 0)
@@ -148,7 +147,7 @@ def test_train_supcon_family_and_spacegroup_returns_history():
 
     model = SupConEncoder(input_dim=5, encoder_hidden_dim=[8], latent_dim=3, seed=0)
     config = TrainConfig(epochs=2, batch_size=8, tau=0.1, seed=0, device="cpu")
-    history = train_supcon(
+    history = training_first_phase(
         model,
         _make_projection_tail(),
         train_db,
@@ -176,7 +175,7 @@ def test_train_supcon_family_and_spacegroup_returns_history():
         assert all(v >= 0.0 for v in history[key])
 
 
-def test_train_supcon_family_only_mode_has_no_spacegroup_keys():
+def test_training_first_phase_family_only_mode_has_no_spacegroup_keys():
     n = 40
     train_db, val_db = _make_split_db(n=n)
     train_idx, val_idx = _split_indices_like_train_val_split(n, 0.25, 0)
@@ -185,7 +184,7 @@ def test_train_supcon_family_only_mode_has_no_spacegroup_keys():
 
     model = SupConEncoder(input_dim=5, encoder_hidden_dim=[8], latent_dim=3, seed=0)
     config = TrainConfig(epochs=1, batch_size=8, tau=0.1, seed=0, device="cpu")
-    history = train_supcon(
+    history = training_first_phase(
         model,
         _make_projection_tail(),
         train_db,
@@ -203,7 +202,7 @@ def test_train_supcon_family_only_mode_has_no_spacegroup_keys():
         assert total == pytest.approx(family, abs=1e-6)
 
 
-def test_train_supcon_spacegroup_only_mode_has_no_family_keys():
+def test_training_first_phase_spacegroup_only_mode_has_no_family_keys():
     n = 40
     train_db, val_db = _make_split_db(n=n)
     train_idx, val_idx = _split_indices_like_train_val_split(n, 0.25, 0)
@@ -212,7 +211,7 @@ def test_train_supcon_spacegroup_only_mode_has_no_family_keys():
 
     model = SupConEncoder(input_dim=5, encoder_hidden_dim=[8], latent_dim=3, seed=0)
     config = TrainConfig(epochs=1, batch_size=8, tau=0.1, seed=0, device="cpu")
-    history = train_supcon(
+    history = training_first_phase(
         model,
         _make_projection_tail(),
         train_db,
@@ -227,16 +226,16 @@ def test_train_supcon_spacegroup_only_mode_has_no_family_keys():
     assert "train_family_supcon" not in history
 
 
-def test_train_supcon_requires_at_least_one_label_type():
+def test_training_first_phase_requires_at_least_one_label_type():
     train_db, val_db = _make_split_db(n=40)
     model = SupConEncoder(input_dim=5, encoder_hidden_dim=[8], latent_dim=3, seed=0)
     config = TrainConfig(epochs=1, batch_size=8, seed=0, device="cpu")
 
     with pytest.raises(ValueError, match="nothing to contrast on"):
-        train_supcon(model, _make_projection_tail(), train_db, val_db, config)
+        training_first_phase(model, _make_projection_tail(), train_db, val_db, config)
 
 
-def test_train_supcon_family_ids_must_be_given_with_val_ids():
+def test_training_first_phase_family_ids_must_be_given_with_val_ids():
     n = 40
     train_db, val_db = _make_split_db(n=n)
     train_idx, _ = _split_indices_like_train_val_split(n, 0.25, 0)
@@ -247,7 +246,7 @@ def test_train_supcon_family_ids_must_be_given_with_val_ids():
     config = TrainConfig(epochs=1, batch_size=8, seed=0, device="cpu")
 
     with pytest.raises(ValueError, match="must be given together"):
-        train_supcon(
+        training_first_phase(
             model,
             _make_projection_tail(),
             train_db,
@@ -257,14 +256,14 @@ def test_train_supcon_family_ids_must_be_given_with_val_ids():
         )
 
 
-def test_train_supcon_rejects_invalid_distance():
+def test_training_first_phase_rejects_invalid_distance():
     train_db, val_db = _make_split_db(n=40)
     model = SupConEncoder(input_dim=5, encoder_hidden_dim=[8], latent_dim=3, seed=0)
     config = TrainConfig(epochs=1, batch_size=8, seed=0, device="cpu", distance="bogus")
     family_ids = np.zeros(40, dtype=np.int32)
 
     with pytest.raises(ValueError, match="distance must be one of"):
-        train_supcon(
+        training_first_phase(
             model,
             _make_projection_tail(),
             train_db,
@@ -275,7 +274,7 @@ def test_train_supcon_rejects_invalid_distance():
         )
 
 
-def test_train_supcon_cosine_distance_returns_history():
+def test_training_first_phase_cosine_distance_returns_history():
     n = 40
     train_db, val_db = _make_split_db(n=n)
     train_idx, val_idx = _split_indices_like_train_val_split(n, 0.25, 0)
@@ -287,7 +286,7 @@ def test_train_supcon_cosine_distance_returns_history():
         epochs=2, batch_size=8, seed=0, device="cpu", distance="cosine"
     )
 
-    history = train_supcon(
+    history = training_first_phase(
         model,
         _make_projection_tail(),
         train_db,
@@ -302,14 +301,14 @@ def test_train_supcon_cosine_distance_returns_history():
     assert all(math.isfinite(v) for v in history["val_loss"])
 
 
-def test_train_supcon_invalid_batching_strategy():
+def test_training_first_phase_invalid_batching_strategy():
     train_db, val_db = _make_split_db(n=40)
     model = SupConEncoder(input_dim=5, encoder_hidden_dim=[8], latent_dim=3, seed=0)
     config = TrainConfig(epochs=1, batch_size=8, seed=0, device="cpu")
     family_ids = np.zeros(40, dtype=np.int32)
 
     with pytest.raises(ValueError, match="batching_strategy must be one of"):
-        train_supcon(
+        training_first_phase(
             model,
             _make_projection_tail(),
             train_db,
@@ -321,14 +320,14 @@ def test_train_supcon_invalid_batching_strategy():
         )
 
 
-def test_train_supcon_balanced_batching_requires_family_ids():
+def test_training_first_phase_balanced_batching_requires_family_ids():
     train_db, val_db = _make_split_db(n=40)
     model = SupConEncoder(input_dim=5, encoder_hidden_dim=[8], latent_dim=3, seed=0)
     config = TrainConfig(epochs=1, batch_size=8, seed=0, device="cpu")
     family_ids = np.zeros(40, dtype=np.int32)
 
     with pytest.raises(ValueError, match="requires batching_family_ids"):
-        train_supcon(
+        training_first_phase(
             model,
             _make_projection_tail(),
             train_db,
@@ -341,7 +340,7 @@ def test_train_supcon_balanced_batching_requires_family_ids():
         )
 
 
-def test_train_supcon_balanced_batching_requires_positive_K():
+def test_training_first_phase_balanced_batching_requires_positive_K():
     n = 40
     train_db, val_db = _make_split_db(n=n)
     train_idx, val_idx = _split_indices_like_train_val_split(n, 0.25, 0)
@@ -351,7 +350,7 @@ def test_train_supcon_balanced_batching_requires_positive_K():
     family_ids = rng.integers(0, 3, size=n).astype(np.int32)
 
     with pytest.raises(ValueError, match="batching_K must be a positive integer"):
-        train_supcon(
+        training_first_phase(
             model,
             _make_projection_tail(),
             train_db,
@@ -364,7 +363,7 @@ def test_train_supcon_balanced_batching_requires_positive_K():
         )
 
 
-def test_train_supcon_balanced_batching_requires_spacegroup_ids():
+def test_training_first_phase_balanced_batching_requires_spacegroup_ids():
     n = 40
     train_db, val_db = _make_split_db(n=n)
     train_idx, val_idx = _split_indices_like_train_val_split(n, 0.25, 0)
@@ -377,7 +376,7 @@ def test_train_supcon_balanced_batching_requires_spacegroup_ids():
     # (S=None means "use every spacegroup present", not "skip") -- so
     # batching_spacegroup_ids is required regardless of whether S is given.
     with pytest.raises(ValueError, match="requires batching_spacegroup_ids"):
-        train_supcon(
+        training_first_phase(
             model,
             _make_projection_tail(),
             train_db,
@@ -391,7 +390,7 @@ def test_train_supcon_balanced_batching_requires_spacegroup_ids():
         )
 
 
-def test_train_supcon_balanced_batching_returns_history():
+def test_training_first_phase_balanced_batching_returns_history():
     n = 40
     train_db, val_db = _make_split_db(n=n)
     train_idx, val_idx = _split_indices_like_train_val_split(n, 0.25, 0)
@@ -401,7 +400,7 @@ def test_train_supcon_balanced_batching_returns_history():
 
     model = SupConEncoder(input_dim=5, encoder_hidden_dim=[8], latent_dim=3, seed=0)
     config = TrainConfig(epochs=2, batch_size=8, tau=0.1, seed=0, device="cpu")
-    history = train_supcon(
+    history = training_first_phase(
         model,
         _make_projection_tail(),
         train_db,
@@ -435,7 +434,9 @@ def test_train_supcon_balanced_batching_returns_history():
         assert all(v >= 0.0 for v in history[key])
 
 
-def test_train_supcon_balanced_batching_logs_warning_about_ignored_batch_size(caplog):
+def test_training_first_phase_balanced_batching_logs_warning_about_ignored_batch_size(
+    caplog,
+):
     n = 40
     train_db, val_db = _make_split_db(n=n)
     train_idx, val_idx = _split_indices_like_train_val_split(n, 0.25, 0)
@@ -447,7 +448,7 @@ def test_train_supcon_balanced_batching_logs_warning_about_ignored_batch_size(ca
     config = TrainConfig(epochs=1, batch_size=8, tau=0.1, seed=0, device="cpu")
 
     with caplog.at_level(logging.WARNING, logger="dim_red.pipeline"):
-        train_supcon(
+        training_first_phase(
             model,
             _make_projection_tail(),
             train_db,
@@ -464,7 +465,7 @@ def test_train_supcon_balanced_batching_logs_warning_about_ignored_batch_size(ca
     assert any("train.batch_size (8) is ignored" in r.message for r in caplog.records)
 
 
-def test_train_supcon_balanced_batching_decoupled_from_loss_family_flag():
+def test_training_first_phase_balanced_batching_decoupled_from_loss_family_flag():
     """batching_family_ids can group batches by family even when the family
     SupCon loss term itself is inactive (mode == "spacegroup_only") --
     history must not contain a family term, only a spacegroup one.
@@ -478,7 +479,7 @@ def test_train_supcon_balanced_batching_decoupled_from_loss_family_flag():
 
     model = SupConEncoder(input_dim=5, encoder_hidden_dim=[8], latent_dim=3, seed=0)
     config = TrainConfig(epochs=1, batch_size=8, tau=0.1, seed=0, device="cpu")
-    history = train_supcon(
+    history = training_first_phase(
         model,
         _make_projection_tail(),
         train_db,
@@ -502,7 +503,7 @@ def _family_ids_for(n, n_family=3, seed=1):
     return rng.integers(0, n_family, size=n).astype(np.int32)
 
 
-def test_train_supcon_early_stopping_disabled_runs_full_epochs():
+def test_training_first_phase_early_stopping_disabled_runs_full_epochs():
     n = 40
     train_db, val_db = _make_split_db(n=n)
     train_idx, val_idx = _split_indices_like_train_val_split(n, 0.25, 0)
@@ -510,7 +511,7 @@ def test_train_supcon_early_stopping_disabled_runs_full_epochs():
 
     model = SupConEncoder(input_dim=5, encoder_hidden_dim=[8], latent_dim=3, seed=0)
     config = TrainConfig(epochs=4, batch_size=8, tau=0.1, seed=0, device="cpu")
-    history = train_supcon(
+    history = training_first_phase(
         model,
         _make_projection_tail(),
         train_db,
@@ -522,7 +523,7 @@ def test_train_supcon_early_stopping_disabled_runs_full_epochs():
     assert len(history["train_loss"]) == 4
 
 
-def test_train_supcon_early_stopping_stops_before_configured_epochs():
+def test_training_first_phase_early_stopping_stops_before_configured_epochs():
     n = 40
     train_db, val_db = _make_split_db(n=n)
     train_idx, val_idx = _split_indices_like_train_val_split(n, 0.25, 0)
@@ -538,7 +539,7 @@ def test_train_supcon_early_stopping_stops_before_configured_epochs():
         early_stopping=True,
         early_stopping_patience=2,
     )
-    history = train_supcon(
+    history = training_first_phase(
         model,
         _make_projection_tail(),
         train_db,
@@ -553,7 +554,7 @@ def test_train_supcon_early_stopping_stops_before_configured_epochs():
     assert best_epoch_idx <= n_epochs_run - 1 - config.early_stopping_patience
 
 
-def test_train_supcon_early_stopping_restore_best_changes_final_params():
+def test_training_first_phase_early_stopping_restore_best_changes_final_params():
     n = 40
     train_db, val_db = _make_split_db(n=n)
     train_idx, val_idx = _split_indices_like_train_val_split(n, 0.25, 0)
@@ -572,7 +573,7 @@ def test_train_supcon_early_stopping_restore_best_changes_final_params():
         early_stopping_patience=2,
         early_stopping_restore_best=True,
     )
-    history_restore = train_supcon(
+    history_restore = training_first_phase(
         model_restore,
         _make_projection_tail(),
         train_db,
@@ -595,7 +596,7 @@ def test_train_supcon_early_stopping_restore_best_changes_final_params():
         early_stopping_patience=2,
         early_stopping_restore_best=False,
     )
-    history_no_restore = train_supcon(
+    history_no_restore = training_first_phase(
         model_no_restore,
         _make_projection_tail(),
         train_db,
@@ -620,14 +621,14 @@ def test_train_supcon_early_stopping_restore_best_changes_final_params():
     )
 
 
-def test_train_supcon_early_stopping_rejects_invalid_patience():
+def test_training_first_phase_early_stopping_rejects_invalid_patience():
     n = 40
     train_db, val_db = _make_split_db(n=n)
     train_idx, val_idx = _split_indices_like_train_val_split(n, 0.25, 0)
     family_ids = _family_ids_for(n)
 
     with pytest.raises(ValueError, match="early_stopping_patience"):
-        train_supcon(
+        training_first_phase(
             SupConEncoder(input_dim=5, encoder_hidden_dim=[8], latent_dim=3, seed=0),
             _make_projection_tail(),
             train_db,
@@ -645,14 +646,14 @@ def test_train_supcon_early_stopping_rejects_invalid_patience():
         )
 
 
-def test_train_supcon_early_stopping_rejects_negative_min_delta():
+def test_training_first_phase_early_stopping_rejects_negative_min_delta():
     n = 40
     train_db, val_db = _make_split_db(n=n)
     train_idx, val_idx = _split_indices_like_train_val_split(n, 0.25, 0)
     family_ids = _family_ids_for(n)
 
     with pytest.raises(ValueError, match="early_stopping_min_delta"):
-        train_supcon(
+        training_first_phase(
             SupConEncoder(input_dim=5, encoder_hidden_dim=[8], latent_dim=3, seed=0),
             _make_projection_tail(),
             train_db,
@@ -684,7 +685,7 @@ def test_norm_penalty_grows_with_embedding_scale():
     assert float(large) == pytest.approx(float(small) * 100.0, rel=1e-4)
 
 
-def test_train_supcon_lambda_norm_defaults_to_zero_and_is_backward_compatible():
+def test_training_first_phase_lambda_norm_defaults_to_zero_and_is_backward_compatible():
     """lambda_norm=0.0 (the default) must leave train_loss/val_loss exactly
     equal to the family/spacegroup terms, same as before this feature
     existed -- norm_penalty is tracked but contributes nothing to the total.
@@ -696,7 +697,7 @@ def test_train_supcon_lambda_norm_defaults_to_zero_and_is_backward_compatible():
 
     model = SupConEncoder(input_dim=5, encoder_hidden_dim=[8], latent_dim=3, seed=0)
     config = TrainConfig(epochs=2, batch_size=8, tau=0.1, seed=0, device="cpu")
-    history = train_supcon(
+    history = training_first_phase(
         model,
         _make_projection_tail(),
         train_db,
@@ -713,7 +714,7 @@ def test_train_supcon_lambda_norm_defaults_to_zero_and_is_backward_compatible():
         assert total == pytest.approx(family, abs=1e-6)
 
 
-def test_train_supcon_lambda_norm_weights_total_correctly():
+def test_training_first_phase_lambda_norm_weights_total_correctly():
     n = 40
     train_db, val_db = _make_split_db(n=n)
     train_idx, val_idx = _split_indices_like_train_val_split(n, 0.25, 0)
@@ -721,7 +722,7 @@ def test_train_supcon_lambda_norm_weights_total_correctly():
 
     model = SupConEncoder(input_dim=5, encoder_hidden_dim=[8], latent_dim=3, seed=0)
     config = TrainConfig(epochs=2, batch_size=8, tau=0.1, seed=0, device="cpu")
-    history = train_supcon(
+    history = training_first_phase(
         model,
         _make_projection_tail(),
         train_db,
@@ -745,7 +746,7 @@ def test_train_supcon_lambda_norm_weights_total_correctly():
         assert total == pytest.approx(family + 0.5 * penalty, abs=1e-4)
 
 
-def test_train_supcon_norm_penalty_present_even_in_spacegroup_only_mode():
+def test_training_first_phase_norm_penalty_present_even_in_spacegroup_only_mode():
     """norm_penalty doesn't depend on labels at all, so it's tracked
     regardless of which SupCon terms (family/spacegroup) are active.
     """
@@ -757,7 +758,7 @@ def test_train_supcon_norm_penalty_present_even_in_spacegroup_only_mode():
 
     model = SupConEncoder(input_dim=5, encoder_hidden_dim=[8], latent_dim=3, seed=0)
     config = TrainConfig(epochs=1, batch_size=8, tau=0.1, seed=0, device="cpu")
-    history = train_supcon(
+    history = training_first_phase(
         model,
         _make_projection_tail(),
         train_db,
@@ -778,7 +779,7 @@ def test_train_supcon_norm_penalty_present_even_in_spacegroup_only_mode():
         assert total == pytest.approx(spacegroup + 0.2 * penalty, abs=1e-4)
 
 
-def test_train_supcon_rejects_negative_lambda_norm():
+def test_training_first_phase_rejects_negative_lambda_norm():
     n = 40
     train_db, val_db = _make_split_db(n=n)
     train_idx, val_idx = _split_indices_like_train_val_split(n, 0.25, 0)
@@ -788,7 +789,7 @@ def test_train_supcon_rejects_negative_lambda_norm():
     config = TrainConfig(epochs=1, batch_size=8, seed=0, device="cpu")
 
     with pytest.raises(ValueError, match="lambda_norm must be >= 0"):
-        train_supcon(
+        training_first_phase(
             model,
             _make_projection_tail(),
             train_db,
@@ -800,7 +801,7 @@ def test_train_supcon_rejects_negative_lambda_norm():
         )
 
 
-def test_train_supcon_computes_loss_on_projection_output_not_body_output():
+def test_training_first_phase_computes_loss_on_projection_output_not_body_output():
     """projection_dim != latent_dim -- supcon_loss can only run on the
     projection tail's output (shape (batch, projection_dim)); if a
     regression made it run on the body's raw output (shape (batch,
@@ -819,7 +820,7 @@ def test_train_supcon_computes_loss_on_projection_output_not_body_output():
     projection_tail = _make_projection_tail(latent_dim=3, projection_dim=7, seed=0)
     config = TrainConfig(epochs=1, batch_size=8, tau=0.1, seed=0, device="cpu")
 
-    history = train_supcon(
+    history = training_first_phase(
         model,
         projection_tail,
         train_db,
@@ -833,7 +834,7 @@ def test_train_supcon_computes_loss_on_projection_output_not_body_output():
     assert projection_tail.project(np.zeros((1, 3), dtype=np.float32)).shape == (1, 7)
 
 
-def test_train_supcon_mutates_both_body_and_projection_tail_params():
+def test_training_first_phase_mutates_both_body_and_projection_tail_params():
     n = 40
     train_db, val_db = _make_split_db(n=n)
     train_idx, val_idx = _split_indices_like_train_val_split(n, 0.25, 0)
@@ -847,7 +848,7 @@ def test_train_supcon_mutates_both_body_and_projection_tail_params():
     )
 
     config = TrainConfig(epochs=3, batch_size=8, tau=0.1, seed=0, device="cpu")
-    train_supcon(
+    training_first_phase(
         model,
         projection_tail,
         train_db,
@@ -873,162 +874,3 @@ def test_train_supcon_mutates_both_body_and_projection_tail_params():
     )
     assert body_changed
     assert tail_changed
-
-
-def test_train_supcon_optimizer_velo_returns_history():
-    """ "velo" still works now that it's no longer the default -- exercises
-    the VeLO path (faked fast by tests/conftest.py's autouse fixture).
-    """
-    n = 40
-    train_db, val_db = _make_split_db(n=n)
-    train_idx, val_idx = _split_indices_like_train_val_split(n, 0.25, 0)
-    family_ids = _family_ids_for(n)
-
-    model = SupConEncoder(input_dim=5, encoder_hidden_dim=[8], latent_dim=3, seed=0)
-    projection_tail = _make_projection_tail()
-    config = TrainConfig(
-        epochs=2, batch_size=8, tau=0.1, seed=0, device="cpu", optimizer="velo"
-    )
-    history = train_supcon(
-        model,
-        projection_tail,
-        train_db,
-        val_db,
-        config,
-        train_family_ids=family_ids[train_idx],
-        val_family_ids=family_ids[val_idx],
-    )
-
-    assert len(history["train_loss"]) == 2
-    assert all(math.isfinite(v) for v in history["train_loss"])
-
-
-def test_train_supcon_rejects_invalid_optimizer():
-    n = 40
-    train_db, val_db = _make_split_db(n=n)
-    train_idx, val_idx = _split_indices_like_train_val_split(n, 0.25, 0)
-    family_ids = _family_ids_for(n)
-
-    model = SupConEncoder(input_dim=5, encoder_hidden_dim=[8], latent_dim=3, seed=0)
-    projection_tail = _make_projection_tail()
-    config = TrainConfig(
-        epochs=1, batch_size=8, seed=0, device="cpu", optimizer="bogus"
-    )
-
-    with pytest.raises(ValueError, match="optimizer must be one of"):
-        train_supcon(
-            model,
-            projection_tail,
-            train_db,
-            val_db,
-            config,
-            train_family_ids=family_ids[train_idx],
-            val_family_ids=family_ids[val_idx],
-        )
-
-
-# --- train_supcon_no_projection (Khosla sweep D: encoder trained without --
-# a separate projection tail, loss computed directly on r) ----------------
-
-
-def test_train_supcon_no_projection_family_and_spacegroup_returns_history():
-    n = 40
-    train_db, val_db = _make_split_db(n=n)
-    train_idx, val_idx = _split_indices_like_train_val_split(n, 0.25, 0)
-
-    rng = np.random.default_rng(1)
-    family_ids = rng.integers(0, 3, size=n).astype(np.int32)
-    spacegroup_ids = rng.integers(0, 6, size=n).astype(np.int32)
-
-    model = SupConEncoder(input_dim=5, encoder_hidden_dim=[8], latent_dim=3, seed=0)
-    config = TrainConfig(epochs=2, batch_size=8, tau=0.1, seed=0, device="cpu")
-    history = train_supcon_no_projection(
-        model,
-        train_db,
-        val_db,
-        config,
-        train_family_ids=family_ids[train_idx],
-        val_family_ids=family_ids[val_idx],
-        train_spacegroup_ids=spacegroup_ids[train_idx],
-        val_spacegroup_ids=spacegroup_ids[val_idx],
-        lambda_family=1.0,
-        lambda_spacegroup=0.5,
-    )
-
-    for key in (
-        "train_loss",
-        "val_loss",
-        "train_family_supcon",
-        "val_family_supcon",
-        "train_spacegroup_supcon",
-        "val_spacegroup_supcon",
-    ):
-        assert key in history
-        assert len(history[key]) == 2
-        assert all(math.isfinite(v) for v in history[key])
-        assert all(v >= 0.0 for v in history[key])
-
-
-def test_train_supcon_no_projection_family_only_mode_has_no_spacegroup_keys():
-    n = 40
-    train_db, val_db = _make_split_db(n=n)
-    train_idx, val_idx = _split_indices_like_train_val_split(n, 0.25, 0)
-    rng = np.random.default_rng(1)
-    family_ids = rng.integers(0, 3, size=n).astype(np.int32)
-
-    model = SupConEncoder(input_dim=5, encoder_hidden_dim=[8], latent_dim=3, seed=0)
-    config = TrainConfig(epochs=1, batch_size=8, tau=0.1, seed=0, device="cpu")
-    history = train_supcon_no_projection(
-        model,
-        train_db,
-        val_db,
-        config,
-        train_family_ids=family_ids[train_idx],
-        val_family_ids=family_ids[val_idx],
-        lambda_family=1.0,
-    )
-
-    assert "train_family_supcon" in history
-    assert "train_spacegroup_supcon" not in history
-    for total, family in zip(history["train_loss"], history["train_family_supcon"]):
-        assert total == pytest.approx(family, abs=1e-6)
-
-
-def test_train_supcon_no_projection_requires_at_least_one_label_type():
-    train_db, val_db = _make_split_db(n=40)
-    model = SupConEncoder(input_dim=5, encoder_hidden_dim=[8], latent_dim=3, seed=0)
-    config = TrainConfig(epochs=1, batch_size=8, seed=0, device="cpu")
-
-    with pytest.raises(ValueError, match="nothing to contrast on"):
-        train_supcon_no_projection(model, train_db, val_db, config)
-
-
-def test_train_supcon_no_projection_updates_body_params():
-    n = 40
-    train_db, val_db = _make_split_db(n=n)
-    train_idx, val_idx = _split_indices_like_train_val_split(n, 0.25, 0)
-    rng = np.random.default_rng(1)
-    family_ids = rng.integers(0, 3, size=n).astype(np.int32)
-
-    model = SupConEncoder(input_dim=5, encoder_hidden_dim=[8], latent_dim=3, seed=0)
-    params_before = jax.tree_util.tree_map(lambda x: np.array(x), model.params)
-
-    config = TrainConfig(
-        epochs=5, batch_size=8, learning_rate=0.05, tau=0.1, seed=0, device="cpu"
-    )
-    train_supcon_no_projection(
-        model,
-        train_db,
-        val_db,
-        config,
-        train_family_ids=family_ids[train_idx],
-        val_family_ids=family_ids[val_idx],
-        lambda_family=1.0,
-    )
-
-    changed = jax.tree_util.tree_map(
-        lambda before, after: not np.allclose(before, np.array(after)),
-        params_before,
-        model.params,
-    )
-    assert any(jax.tree_util.tree_leaves(changed))

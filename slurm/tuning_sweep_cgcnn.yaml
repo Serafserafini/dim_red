@@ -31,7 +31,7 @@
 # check if you ever raise supercell_radius further.)
 #
 # With the budget confirmed safe, widened to 5 grid axes / 32 runs:
-# graph.h_fea_len (2, 64 -> 128) and vae.latent_dim (2, 4 -> 8) added on top
+# graph.h_fea_len (2, 64 -> 128) and encoder.latent_dim (2, 4 -> 8) added on top
 # of graph.n_conv (2), graph.atom_fea_len (2) and aux_heads.mode (2,
 # with/without the spacegroup head -- family_only runs simply won't have a
 # spacegroup_probs/spacegroup_2d_* column in dimred-benchmark's table,
@@ -54,9 +54,9 @@ base:
     n_species: 2
     seed: 42
 
-  # Only vae.latent_dim is read for model: cgcnn -- see
+  # Only encoder.latent_dim is read for model: cgcnn -- see
   # configs/single_run_cgcnn.example.yaml's comments.
-  vae:
+  encoder:
     encoder_hidden_dim: [1]
     latent_dim: 8 # overridden by the grid below
 
@@ -82,7 +82,6 @@ base:
     epochs: 100
     batch_size: 32
     learning_rate: 0.001
-    optimizer: adam
     val_ratio: 0.2
     device: gpu
     early_stopping:
@@ -115,4 +114,4 @@ grid:
   graph.atom_fea_len: [8, 16]
   graph.h_fea_len: [16, 32]
   aux_heads.mode: [family_only, family_and_spacegroup]
-  vae.latent_dim: [4, 8]
+  encoder.latent_dim: [4, 8]

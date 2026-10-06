@@ -1,29 +1,17 @@
 """
-Command-line entrypoints for the unified fetch -> SOAP -> VAE pipeline.
+Command-line entrypoints for the dim_red pipeline (structures -> features ->
+model), installed as console scripts by ``pip install -e .``:
 
-Preferred usage (console scripts installed by ``pip install -e .``):
-    dimred-run configs/single_run.example.yaml
-    dimred-sweep configs/sweep.example.yaml
-    dimred-rerun runs/20260728-1/hd-128_cs-cubic
+    dimred-run configs/single_run_supcon.example.yaml
+    dimred-sweep configs/sweep_supcon.example.yaml
+    dimred-rerun runs/20260728-1/model-supcon_hd-128-64_cs-cubic
     dimred-compare runs/20260728-1
-    dimred-apply new_structures.extxyz runs/20260728-1/hd-128_cs-cubic
-    dimred-train-tail configs/tail_train_classification.example.yaml runs/20260728-1/hd-128_cs-cubic
-    dimred-benchmark runs/tuning_vae/20260728-1 runs/tuning_cgcnn/20260728-1 --output runs/benchmark.csv
+    dimred-apply new_structures.extxyz runs/20260728-1/model-supcon_hd-128-64_cs-cubic
+    dimred-train-tail configs/tail_train_classification.example.yaml runs/20260728-1/model-supcon_hd-128-64_cs-cubic
+    dimred-benchmark runs/tuning_supcon/20260728-1 runs/tuning_cgcnn/20260728-1 --output runs/benchmark.csv
 
-Equivalent, flag-based form (``python -m``), kept for scripting/backward
-compatibility:
-    python -m dim_red.pipeline.cli --config configs/single_run.example.yaml
-    python -m dim_red.pipeline.cli --config configs/sweep.example.yaml --sweep
-    python -m dim_red.pipeline.cli --rerun runs/20260728-1/hd-128_cs-cubic
-    python -m dim_red.pipeline.cli --compare runs/20260728-1
-    python -m dim_red.pipeline.cli --apply new_structures.extxyz --apply-run runs/20260728-1/hd-128_cs-cubic
-    python -m dim_red.pipeline.cli --train-tail configs/tail_train_classification.example.yaml --train-tail-run runs/20260728-1/hd-128_cs-cubic
-
-Note: no single-letter flags are defined here on purpose. ``dim_red.vae.training``
-imports ``learned_optimization``, which parses ``sys.argv`` with ``absl`` at
-import time and raises on ambiguous short flags such as ``-v``. For the same
-reason, every command below imports its own (possibly jax-pulling)
-dependencies lazily, so e.g. ``dimred-compare`` never needs jax installed.
+Every command imports its own (possibly jax-pulling) dependencies lazily, so
+e.g. ``dimred-compare`` never needs jax installed.
 """
 
 from __future__ import annotations
@@ -38,13 +26,10 @@ from typing import Optional
 def _configure_console_logging() -> None:
     """Attach a console handler directly to the "dim_red.pipeline" logger.
 
-    Not using ``logging.basicConfig`` here: importing ``run_single``/``run_sweep``
-    (which pull in ``dim_red.vae.training`` -> ``learned_optimization`` -> absl)
-    already attaches a handler to the root logger as an import side effect, so
-    ``basicConfig`` would be a no-op and its ``level=INFO`` would be silently
-    ignored. Configuring our own logger directly, with ``propagate=False``,
-    sidesteps that and also avoids duplicate/differently-formatted output from
-    absl's root handler.
+    Configured directly on our own logger (with ``propagate=False``) rather
+    than via ``logging.basicConfig``, so the output format and level don't
+    depend on -- or get duplicated by -- whatever handlers a third-party
+    import happened to attach to the root logger.
     """
     logger = logging.getLogger("dim_red.pipeline")
     logger.setLevel(logging.INFO)
@@ -165,7 +150,7 @@ def _do_benchmark(
 
 
 def run_command(argv=None) -> None:
-    """``dimred-run <config>``: run a single fetch -> SOAP -> VAE pass."""
+    """``dimred-run <config>``: run a single dim_red pipeline pass."""
     parser = argparse.ArgumentParser(description="Run a single dim_red pipeline pass.")
     parser.add_argument("config", type=str, help="Path to a single-run YAML config.")
     parser.add_argument(
@@ -299,7 +284,7 @@ def benchmark_command(argv=None) -> None:
         type=str,
         nargs="+",
         help="One or more run directories and/or sweep directories (e.g. "
-        "runs/tuning_vae/20260728-1) -- a sweep directory is expanded to "
+        "runs/tuning_supcon/20260728-1) -- a sweep directory is expanded to "
         "every completed run found directly under it.",
     )
     parser.add_argument(
@@ -310,7 +295,7 @@ def benchmark_command(argv=None) -> None:
         type=str,
         default=None,
         help="Comma-separated dotted config paths to include as columns "
-        "(default: model,vae.latent_dim,vae.encoder_hidden_dim,"
+        "(default: model,encoder.latent_dim,encoder.encoder_hidden_dim,"
         "train.learning_rate,train.batch_size,train.epochs,seed).",
     )
     parser.add_argument(
@@ -437,16 +422,16 @@ def _do_train_tail(config_path: str, run_dir: str) -> Path:
 
 def train_tail_command(argv=None) -> None:
     """``dimred-train-tail <config> <run_dir>``: freeze an already-trained
-    ``model: supcon`` run's body and train exactly one tail (classification
-    or visualization) on top of it. See
+    run's body and train exactly one tail (classification, visualization, or
+    hierarchical_supcon) on top of it. See
     ``configs/tail_train_classification.example.yaml``/
     ``configs/tail_train_visualization.example.yaml``.
     """
     parser = argparse.ArgumentParser(
         description="Freeze an already-trained dim_red run's body and train "
-        "a classification, visualization, or hierarchical tail on top of "
-        "it. A classification/hierarchical tail requires a supcon/cgcnn/"
-        "mace run; a visualization tail works for any model_kind."
+        "a classification, visualization, or hierarchical_supcon tail on "
+        "top of it. See dim_red.pipeline.tail_training._TAIL_MODEL_KINDS for "
+        "which model_kinds each tail kind accepts."
     )
     parser.add_argument("config", type=str, help="Path to a tail-training YAML config.")
     parser.add_argument(
@@ -454,219 +439,7 @@ def train_tail_command(argv=None) -> None:
         type=str,
         help="Path to the completed run directory whose frozen body to "
         "attach the tail to (overrides run_dir in the config, if it sets "
-        "one) -- model_kind must be supcon/cgcnn/mace for a classification "
-        "or hierarchical tail, any model_kind for a visualization tail.",
+        "one).",
     )
     args = parser.parse_args(argv)
     _do_train_tail(args.config, args.run_dir)
-
-
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Unified fetch -> SOAP -> VAE training pipeline for dim_red."
-    )
-    parser.add_argument(
-        "--config", type=str, help="Path to a single-run or sweep YAML config."
-    )
-    parser.add_argument(
-        "--sweep",
-        action="store_true",
-        help="Treat --config as a sweep config and expand its grid into multiple runs.",
-    )
-    parser.add_argument(
-        "--rerun",
-        type=str,
-        default=None,
-        help="Path to an existing run directory; reruns it from its saved config.yaml.",
-    )
-    parser.add_argument(
-        "--cache-dir",
-        type=str,
-        default=None,
-        help="Dataset cache directory (default: <output_dir>/_dataset_cache).",
-    )
-    parser.add_argument(
-        "--compare",
-        type=str,
-        default=None,
-        help=(
-            "Path to a sweep directory (e.g. runs/20260728-1); renders the "
-            "comparison-plot suite for every run found under it into "
-            "<sweep_dir>/comparison/ instead of running anything."
-        ),
-    )
-    parser.add_argument(
-        "--data-file",
-        type=_str_to_bool,
-        default=False,
-        metavar="{true,false}",
-        help="With --compare: also write the data behind each comparison "
-        "plot to a CSV file next to its PNG (default: false, PNGs only).",
-    )
-    parser.add_argument(
-        "--apply",
-        type=str,
-        default=None,
-        help=(
-            "Path to an extended-XYZ file with structures to apply an "
-            "already-trained run's model to; requires --apply-run. Plots "
-            "them in that run's latent space alongside its original "
-            "training dataset instead of running anything."
-        ),
-    )
-    parser.add_argument(
-        "--apply-run",
-        type=str,
-        default=None,
-        help="With --apply: path to the completed run directory whose model to apply.",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default=None,
-        help="With --apply: where to write the applied embeddings/plot "
-        "(default: <apply-run>/applied).",
-    )
-    parser.add_argument(
-        "--label-field",
-        type=str,
-        default=None,
-        help="With --apply: an atoms.info key to color/label the new "
-        "structures by (default: a single 'Applied structure' group).",
-    )
-    parser.add_argument(
-        "--train-tail",
-        type=str,
-        default=None,
-        help=(
-            "Path to a tail-training YAML config; requires --train-tail-run. "
-            "Freezes an already-trained dim_red run's body and trains a "
-            "classification, visualization, or hierarchical tail on top of "
-            "it (classification/hierarchical require model_kind supcon/"
-            "cgcnn/mace; visualization works for any model_kind), instead "
-            "of running anything else."
-        ),
-    )
-    parser.add_argument(
-        "--train-tail-run",
-        type=str,
-        default=None,
-        help="With --train-tail: path to the completed run directory whose "
-        "frozen body to attach the tail to (overrides run_dir in the "
-        "config, if it sets one).",
-    )
-    parser.add_argument(
-        "--benchmark",
-        type=str,
-        default=None,
-        nargs="+",
-        help=(
-            "One or more run/sweep directories (possibly spanning different "
-            "model_kinds); assembles a cross-run benchmark CSV at "
-            "--benchmark-output instead of running anything."
-        ),
-    )
-    parser.add_argument(
-        "--benchmark-output",
-        type=str,
-        default=None,
-        help="With --benchmark: path to write the benchmark CSV to (required).",
-    )
-    parser.add_argument(
-        "--benchmark-key-hyperparams",
-        type=str,
-        default=None,
-        help="With --benchmark: comma-separated dotted config paths to "
-        "include as columns (default: see benchmark_command's --key-hyperparams).",
-    )
-    parser.add_argument(
-        "--benchmark-plot",
-        action="store_true",
-        help="With --benchmark: also render a visual-comparison suite (box "
-        "plots of classification accuracy and 2D embedding-quality metrics, "
-        "pooled by model_kind) into --benchmark-output's sibling "
-        "benchmark_plots/ directory.",
-    )
-    parser.add_argument(
-        "--benchmark-plot-data-file",
-        type=_str_to_bool,
-        default=False,
-        metavar="{true,false}",
-        help="With --benchmark-plot: also write the data behind each plot "
-        "to a CSV file next to its PNG (default: false, PNGs only).",
-    )
-    _add_umap_args(parser)
-    return parser
-
-
-def main(argv=None) -> None:
-    """Flag-based entrypoint for ``python -m dim_red.pipeline.cli``; prefer the
-    dedicated ``dimred-run``/``dimred-sweep``/``dimred-rerun``/``dimred-compare``/
-    ``dimred-apply`` console scripts for interactive use.
-    """
-    parser = _build_parser()
-    args = parser.parse_args(argv)
-
-    if args.compare:
-        _do_compare(
-            args.compare,
-            None,
-            args.data_file,
-            umap_n_neighbors=args.umap_n_neighbors,
-            umap_min_dist=args.umap_min_dist,
-            umap_metric=args.umap_metric,
-            umap_random_state=args.umap_random_state,
-        )
-        return
-
-    if args.benchmark:
-        if not args.benchmark_output:
-            parser.error("--benchmark requires --benchmark-output.")
-        _do_benchmark(
-            args.benchmark,
-            args.benchmark_output,
-            args.benchmark_key_hyperparams,
-            plot=args.benchmark_plot,
-            plot_data_file=args.benchmark_plot_data_file,
-        )
-        return
-
-    if args.apply:
-        if not args.apply_run:
-            parser.error("--apply requires --apply-run.")
-        _do_apply(
-            args.apply,
-            args.apply_run,
-            args.output_dir,
-            args.label_field,
-            umap_n_neighbors=args.umap_n_neighbors,
-            umap_min_dist=args.umap_min_dist,
-            umap_metric=args.umap_metric,
-            umap_random_state=args.umap_random_state,
-        )
-        return
-
-    if args.train_tail:
-        if not args.train_tail_run:
-            parser.error("--train-tail requires --train-tail-run.")
-        _do_train_tail(args.train_tail, args.train_tail_run)
-        return
-
-    if args.rerun:
-        _do_rerun(args.rerun, args.cache_dir)
-        return
-
-    if not args.config:
-        parser.error(
-            "--config is required unless --rerun, --compare, --apply, "
-            "--train-tail or --benchmark is used."
-        )
-
-    if args.sweep:
-        _do_sweep(args.config, args.cache_dir)
-    else:
-        _do_run(args.config, args.cache_dir)
-
-
-if __name__ == "__main__":
-    main()

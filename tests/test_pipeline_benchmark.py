@@ -29,11 +29,12 @@ from dim_red.pipeline.benchmark import (
 from dim_red.pipeline.compare import load_run
 from dim_red.pipeline.config import (
     AuxHeadsConfig,
+    EncoderConfig,
     FetchConfig,
+    MaceConfig,
     RunConfig,
     SoapConfig,
     TrainSettings,
-    VAEArchConfig,
     run_config_to_dict,
 )
 
@@ -105,7 +106,7 @@ def _write_loss_history(path, epochs=3):
 
 def _write_run(
     run_dir,
-    model_kind="vae",
+    model_kind="supcon",
     n=8,
     n_classes=2,
     latent_dim=2,
@@ -121,9 +122,10 @@ def _write_run(
         model_kind=model_kind,
         fetch=FetchConfig(crystal_systems=["cubic"], limit_per_system=8),
         soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=latent_dim),
+        encoder=EncoderConfig(encoder_hidden_dim=[4], latent_dim=latent_dim),
         train=TrainSettings(epochs=3, batch_size=4, val_ratio=0.25),
         aux_heads=aux_heads,
+        mace=MaceConfig(checkpoint_path="/fake/ckpt"),
         seed=0,
         output_dir=str(run_dir.parent),
         name=run_dir.name,
@@ -151,8 +153,8 @@ def _write_run(
     return run_dir
 
 
-def _write_tail_predictions(run_dir, n=8, n_classes=2):
-    tail_dir = run_dir / "tails" / "classification"
+def _write_tail_predictions(run_dir, n=8, n_classes=2, tail_name="classification"):
+    tail_dir = run_dir / "tails" / tail_name
     tail_dir.mkdir(parents=True)
     class_labels = np.arange(n) % n_classes
     family_probs = np.eye(n_classes, dtype=np.float32)[class_labels]
@@ -191,8 +193,20 @@ def _write_log(path, timestamps):
 # --- run_classification_accuracies -----------------------------------------
 
 
+def test_run_classification_accuracies_finds_a_hierarchical_supcon_tail(tmp_path):
+    """A hierarchical_supcon tail writes to ``tails/<output_subdir>`` (e.g. a
+    custom ``hierarchical_supcon_round19_baseline``), not a fixed name."""
+    run_dir = _write_run(tmp_path / "run", model_kind="supcon", with_aux=False)
+    _write_tail_predictions(run_dir, tail_name="hierarchical_supcon_round19_baseline")
+    run = load_run(run_dir)
+
+    accs = run_classification_accuracies(run)
+
+    assert accs["family"] == pytest.approx(1.0)
+
+
 def test_run_classification_accuracies_reads_embeddings_npz(tmp_path):
-    run_dir = _write_run(tmp_path / "run", model_kind="vae", with_aux=True)
+    run_dir = _write_run(tmp_path / "run", model_kind="supcon", with_aux=True)
     run = load_run(run_dir)
 
     accs = run_classification_accuracies(run)
@@ -249,8 +263,8 @@ def test_run_wall_clock_seconds_none_when_log_missing(tmp_path):
 
 def test_collect_run_dirs_mixes_and_dedups_run_and_sweep_dirs(tmp_path):
     sweep_dir = tmp_path / "sweep"
-    run_a = _write_run(sweep_dir / "run-a", model_kind="vae")
-    run_b = _write_run(sweep_dir / "run-b", model_kind="vae")
+    run_a = _write_run(sweep_dir / "run-a", model_kind="supcon")
+    run_b = _write_run(sweep_dir / "run-b", model_kind="supcon")
     standalone = _write_run(
         tmp_path / "standalone_run", model_kind="cgcnn", with_aux=True
     )
@@ -278,7 +292,7 @@ def test_resolve_2d_embedding_prefers_visualization_tail_when_present(tmp_path):
 
 
 def test_resolve_2d_embedding_passthrough_when_native_is_2d(tmp_path):
-    run_dir = _write_run(tmp_path / "run", model_kind="vae", latent_dim=2)
+    run_dir = _write_run(tmp_path / "run", model_kind="supcon", latent_dim=2)
     run = load_run(run_dir)
 
     result = _resolve_2d_embedding(run)
@@ -287,7 +301,7 @@ def test_resolve_2d_embedding_passthrough_when_native_is_2d(tmp_path):
 
 
 def test_resolve_2d_embedding_pca_fallback_for_higher_dim(tmp_path):
-    run_dir = _write_run(tmp_path / "run", model_kind="vae", latent_dim=8)
+    run_dir = _write_run(tmp_path / "run", model_kind="supcon", latent_dim=8)
     run = load_run(run_dir)
 
     result = _resolve_2d_embedding(run)
@@ -296,7 +310,7 @@ def test_resolve_2d_embedding_pca_fallback_for_higher_dim(tmp_path):
 
 
 def test_resolve_2d_embedding_none_when_native_is_1d(tmp_path):
-    run_dir = _write_run(tmp_path / "run", model_kind="vae", latent_dim=1)
+    run_dir = _write_run(tmp_path / "run", model_kind="supcon", latent_dim=1)
     run = load_run(run_dir)
 
     assert _resolve_2d_embedding(run) is None
@@ -340,15 +354,17 @@ def test_benchmark_row_has_model_kind_and_metrics(tmp_path):
 
 
 def test_generate_benchmark_table_end_to_end_mixed_model_kinds(tmp_path):
-    vae_dir = _write_run(tmp_path / "vae_run", model_kind="vae", with_aux=True)
+    supcon_dir = _write_run(tmp_path / "supcon_run", model_kind="supcon", with_aux=True)
     cgcnn_dir = _write_run(tmp_path / "cgcnn_run", model_kind="cgcnn", with_aux=True)
-    supcon_dir = _write_run(
-        tmp_path / "supcon_run", model_kind="supcon", with_aux=False
+    mace_dir = _write_run(
+        tmp_path / "supcon_mace_run", model_kind="supcon_mace", with_aux=False
     )
-    _write_tail_predictions(supcon_dir)
+    _write_tail_predictions(mace_dir)
 
     output_csv = tmp_path / "benchmark.csv"
-    result_path = generate_benchmark_table([vae_dir, cgcnn_dir, supcon_dir], output_csv)
+    result_path = generate_benchmark_table(
+        [supcon_dir, cgcnn_dir, mace_dir], output_csv
+    )
 
     assert result_path == output_csv
     with open(output_csv, newline="") as f:
@@ -356,25 +372,25 @@ def test_generate_benchmark_table_end_to_end_mixed_model_kinds(tmp_path):
 
     assert len(rows) == 3
     model_kinds = {row["model_kind"] for row in rows}
-    assert model_kinds == {"vae", "cgcnn", "supcon"}
+    assert model_kinds == {"supcon", "cgcnn", "supcon_mace"}
     fieldnames = rows[0].keys()
     assert "family_silhouette" in fieldnames
     assert "family" in fieldnames
-    # supcon has no built-in aux heads in embeddings.npz -- its "family"
+    # supcon_mace has no built-in heads in embeddings.npz -- its "family"
     # accuracy column comes from the tail_predictions.npz fallback, and is
     # still present (not missing) in the shared column set.
-    supcon_row = next(r for r in rows if r["model_kind"] == "supcon")
-    assert float(supcon_row["family"]) == pytest.approx(1.0)
+    mace_row = next(r for r in rows if r["model_kind"] == "supcon_mace")
+    assert float(mace_row["family"]) == pytest.approx(1.0)
 
 
 # --- benchmark plots ----------------------------------------------------------
 
 
 def _rows_for_plots(tmp_path):
-    vae_a = _write_run(tmp_path / "vae_a", model_kind="vae", with_aux=True)
-    vae_b = _write_run(tmp_path / "vae_b", model_kind="vae", with_aux=True)
+    supcon_a = _write_run(tmp_path / "supcon_a", model_kind="supcon", with_aux=True)
+    supcon_b = _write_run(tmp_path / "supcon_b", model_kind="supcon", with_aux=True)
     cgcnn_run = _write_run(tmp_path / "cgcnn_run", model_kind="cgcnn", with_aux=True)
-    return [benchmark_row(load_run(d)) for d in [vae_a, vae_b, cgcnn_run]]
+    return [benchmark_row(load_run(d)) for d in [supcon_a, supcon_b, cgcnn_run]]
 
 
 def test_plot_classification_accuracy_by_model_kind_writes_png_and_csv(tmp_path):
@@ -389,7 +405,7 @@ def test_plot_classification_accuracy_by_model_kind_writes_png_and_csv(tmp_path)
     assert save_path.exists()
     with open(csv_path, newline="") as f:
         csv_rows = list(csv.DictReader(f))
-    assert {r["model_kind"] for r in csv_rows} == {"vae", "cgcnn"}
+    assert {r["model_kind"] for r in csv_rows} == {"supcon", "cgcnn"}
     assert {r["metric"] for r in csv_rows} == {"family"}
 
 
@@ -414,7 +430,7 @@ def test_plot_2d_quality_by_model_kind_writes_png_and_csv(tmp_path):
     with open(csv_path, newline="") as f:
         csv_rows = list(csv.DictReader(f))
     assert {r["label_set"] for r in csv_rows} == {"family_2d"}
-    assert {r["model_kind"] for r in csv_rows} == {"vae", "cgcnn"}
+    assert {r["model_kind"] for r in csv_rows} == {"supcon", "cgcnn"}
 
 
 def test_generate_benchmark_plots_writes_both_pngs(tmp_path):
@@ -431,11 +447,11 @@ def test_generate_benchmark_plots_writes_both_pngs(tmp_path):
 
 
 def test_generate_benchmark_table_plot_true_also_writes_plots(tmp_path):
-    vae_dir = _write_run(tmp_path / "vae_run", model_kind="vae", with_aux=True)
+    supcon_dir = _write_run(tmp_path / "supcon_run", model_kind="supcon", with_aux=True)
     cgcnn_dir = _write_run(tmp_path / "cgcnn_run", model_kind="cgcnn", with_aux=True)
     output_csv = tmp_path / "benchmark.csv"
 
-    generate_benchmark_table([vae_dir, cgcnn_dir], output_csv, plot=True)
+    generate_benchmark_table([supcon_dir, cgcnn_dir], output_csv, plot=True)
 
     plots_dir = tmp_path / "benchmark_plots"
     assert (plots_dir / "accuracy_by_model_kind.png").exists()
@@ -443,9 +459,9 @@ def test_generate_benchmark_table_plot_true_also_writes_plots(tmp_path):
 
 
 def test_generate_benchmark_table_plot_false_skips_plots(tmp_path):
-    vae_dir = _write_run(tmp_path / "vae_run", model_kind="vae", with_aux=True)
+    supcon_dir = _write_run(tmp_path / "supcon_run", model_kind="supcon", with_aux=True)
     output_csv = tmp_path / "benchmark.csv"
 
-    generate_benchmark_table([vae_dir], output_csv)
+    generate_benchmark_table([supcon_dir], output_csv)
 
     assert not (tmp_path / "benchmark_plots").exists()

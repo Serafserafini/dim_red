@@ -27,5 +27,4 @@ train:
   epochs: 40
   batch_size: 16
   learning_rate: 0.001
-  optimizer: adam
   device: gpu

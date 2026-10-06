@@ -3,20 +3,16 @@ Training utilities for CGCNN -- a single-phase loop that jointly trains the
 body and classifier head(s) via cross-entropy on family (+ optional
 family-masked spacegroup) labels.
 
-Mirrors ``dim_red.autoencoder.training``'s aux-heads training pattern (not
-``dim_red.supcon.training``'s two-phase contrastive design): there is no
-reconstruction term, no KL, no contrastive loss -- classification is
+Unlike ``dim_red.supcon.training``'s two-phase contrastive design, there is
+no reconstruction term, no KL and no contrastive loss: classification is
 CGCNN's only training objective. ``train_family_ids``/``val_family_ids`` are
-therefore REQUIRED (not ``Optional``, unlike
-``autoencoder.training.train_autoencoder``), since a family-less call would
-be a pure no-op that silently trains nothing.
+therefore REQUIRED (not ``Optional``), since a family-less call would be a
+pure no-op that silently trains nothing.
 
-``_iter_batches``/``_make_optimizer``/``_prepare_padded_batches``/
-``_make_eval_epoch`` are verbatim duplicates of
-``dim_red.autoencoder.training``'s -- already rank-agnostic (they operate
-generically on any tuple of same-leading-dim arrays), so they work unchanged
-on the five graph arrays (2D/3D/4D) a ``GraphDatabase`` holds, alongside the
-1D family/spacegroup id arrays.
+``_iter_batches``/``_prepare_padded_batches``/``_make_eval_epoch`` are
+rank-agnostic (they operate generically on any tuple of same-leading-dim
+arrays), so they work unchanged on the five graph arrays (2D/3D/4D) a
+``GraphDatabase`` holds, alongside the 1D family/spacegroup id arrays.
 """
 
 from dataclasses import dataclass
@@ -32,8 +28,6 @@ from dim_red.cgcnn.model import CGCNNEncoder, apply_family_mask
 
 Array = jax.Array
 
-_OPTIMIZERS = ("adam", "velo")
-
 
 @dataclass(frozen=True)
 class TrainConfig:
@@ -42,14 +36,7 @@ class TrainConfig:
     Attributes:
         epochs: Number of full passes over training data.
         batch_size: Number of samples per mini-batch.
-        learning_rate: Adam's learning rate, used whenever ``optimizer ==
-            "adam"`` (the default). Ignored (kept for API compatibility) when
-            ``optimizer == "velo"``.
-        optimizer: ``"adam"`` (default) -- a plain ``optax.adam(learning_rate)``
-            -- or ``"velo"`` -- ``learned_optimization``'s pretrained VeLO
-            meta-learned optimizer, whose ``num_steps``-dependent setup and
-            pretrained-hypernetwork checkpoint load cost real, fixed time
-            before training even starts. See ``_make_optimizer``.
+        learning_rate: Adam's learning rate.
         lambda_family: Weight applied to the (always-active) family
             classification cross-entropy term.
         lambda_spacegroup: Weight applied to the (family-masked) spacegroup
@@ -75,7 +62,6 @@ class TrainConfig:
     epochs: int = 20
     batch_size: int = 32
     learning_rate: float = 1e-3
-    optimizer: str = "adam"
     lambda_family: float = 1.0
     lambda_spacegroup: float = 1.0
     seed: int = 42
@@ -101,21 +87,9 @@ def _iter_batches(
     return batches
 
 
-def _make_optimizer(optimizer: str, learning_rate: float, num_steps: int):
-    """Build this training loop's optax-compatible optimizer.
-
-    ``"adam"`` (default) is a plain ``optax.adam(learning_rate)``, wrapped in
-    ``optax.with_extra_args_support`` so it also accepts the
-    ``extra_args={"loss": ...}`` kwarg every train/eval step always passes
-    (VeLO is loss-conditioned; a bare ``optax.adam`` doesn't accept
-    ``extra_args`` at all). ``"velo"`` uses ``learned_optimization``'s
-    pretrained VeLO meta-learned optimizer instead.
-    """
-    if optimizer == "velo":
-        from learned_optimization.research.general_lopt import prefab
-
-        return prefab.optax_lopt(num_steps=num_steps)
-    return optax.with_extra_args_support(optax.adam(learning_rate))
+def _make_optimizer(learning_rate: float):
+    """Build this training loop's optimizer: a plain ``optax.adam(learning_rate)``."""
+    return optax.adam(learning_rate)
 
 
 def _prepare_padded_batches(
@@ -160,7 +134,7 @@ def _make_train_step(
 ):
     """Create a jitted training step bound to model, optimizer and loss weights.
 
-    Unlike ``autoencoder.training``'s, ``has_family`` is not a parameter
+    ``has_family`` is not a parameter
     here -- family classification is unconditionally active (``train_cgcnn``
     requires ``train_family_ids``/``val_family_ids``, see below).
     """
@@ -198,9 +172,7 @@ def _make_train_step(
         (loss, (family_ce, spacegroup_ce)), grads = jax.value_and_grad(
             loss_fn, has_aux=True
         )(params)
-        updates, new_opt_state = tx.update(
-            grads, opt_state, params, extra_args={"loss": loss}
-        )
+        updates, new_opt_state = tx.update(grads, opt_state, params)
         new_params = optax.apply_updates(params, updates)
         return new_params, new_opt_state, loss, family_ce, spacegroup_ce
 
@@ -287,11 +259,11 @@ def train_cgcnn(
     family_spacegroup_mask: Optional[np.ndarray] = None,
 ) -> Dict[str, List[float]]:
     """Train a ``CGCNNEncoder`` body + classifier head(s) jointly (Adam by
-    default, or VeLO -- see ``TrainConfig.optimizer``) via cross-entropy on
+    default) via cross-entropy on
     family (+ optional family-masked spacegroup) labels, and return
     per-epoch loss history. ``model.params`` is updated in place.
 
-    Unlike ``train_vae``/``train_autoencoder``, ``train_family_ids``/
+    ``train_family_ids``/
     ``val_family_ids`` are REQUIRED (not ``Optional``) -- CGCNN has no other
     training objective at all (no reconstruction, no contrastive loss), so a
     family-less call would be a pure no-op that silently trains nothing.
@@ -344,10 +316,6 @@ def train_cgcnn(
         raise ValueError("batch_size must be a positive integer")
     if config.learning_rate <= 0:
         raise ValueError("learning_rate must be > 0")
-    if config.optimizer not in _OPTIMIZERS:
-        raise ValueError(
-            f"optimizer must be one of {_OPTIMIZERS}, got {config.optimizer!r}"
-        )
     if config.lambda_family < 0:
         raise ValueError("lambda_family must be >= 0")
     if config.lambda_spacegroup < 0:
@@ -398,8 +366,6 @@ def train_cgcnn(
     )
 
     rng = np.random.default_rng(config.seed)
-    batches_per_epoch = int(np.ceil(n_train / config.batch_size))
-    total_steps = max(1, config.epochs * batches_per_epoch)
 
     history: Dict[str, List[float]] = {
         "train_loss": [],
@@ -411,7 +377,7 @@ def train_cgcnn(
         history["train_spacegroup_ce"] = []
         history["val_spacegroup_ce"] = []
 
-    tx = _make_optimizer(config.optimizer, config.learning_rate, total_steps)
+    tx = _make_optimizer(config.learning_rate)
     lambda_family = jnp.asarray(config.lambda_family, dtype=jnp.float32)
     lambda_spacegroup = jnp.asarray(config.lambda_spacegroup, dtype=jnp.float32)
 

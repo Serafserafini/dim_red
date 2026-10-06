@@ -23,11 +23,10 @@ from dim_red.pipeline.config import (
     BalancedBatchingParams,
     BatchingConfig,
     ClassificationTailConfig,
+    EncoderConfig,
     FetchConfig,
     GraphConfig,
     HierarchicalSupconTailConfig,
-    HierarchicalTailConfig,
-    HierarchicalVisualizationConfig,
     MaceConfig,
     RunConfig,
     SoapConfig,
@@ -35,7 +34,6 @@ from dim_red.pipeline.config import (
     TailTrainConfig,
     TailTrainSettings,
     TrainSettings,
-    VAEArchConfig,
     VisualizationTailConfig,
 )
 from dim_red.pipeline.single_run import run_single
@@ -74,7 +72,7 @@ def _train_supcon_run(tmp_path, projection_dim=6, latent_dim=3):
     config = RunConfig(
         fetch=FetchConfig(crystal_systems=["cubic", "hexagonal"], limit_per_system=10),
         soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        vae=VAEArchConfig(encoder_hidden_dim=[8], latent_dim=latent_dim),
+        encoder=EncoderConfig(encoder_hidden_dim=[8], latent_dim=latent_dim),
         train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
         supcon=SupConConfig(
             mode="family_and_spacegroup", tau=0.1, projection_dim=projection_dim
@@ -98,41 +96,12 @@ def _train_supcon_run(tmp_path, projection_dim=6, latent_dim=3):
     return run_dir
 
 
-def _train_a_vae_run(tmp_path, model_kind="vae"):
-    config = RunConfig(
-        fetch=FetchConfig(crystal_systems=["cubic"], limit_per_system=8),
-        soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=2),
-        train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
-        seed=0,
-        output_dir=str(tmp_path / "runs"),
-        model_kind=model_kind,
-    )
-    fake_atoms = [_fake_atoms("Cu", f"mp-{i}", 1) for i in range(8)]
-    with (
-        patch(
-            "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
-            return_value=fake_atoms,
-        ),
-        patch(
-            "dim_red.pipeline.dataset_cache.compute_soap",
-            side_effect=_fake_compute_soap(),
-        ),
-    ):
-        run_dir = run_single(config)
-    return run_dir
-
-
-def _train_an_autoencoder_run(tmp_path):
-    return _train_a_vae_run(tmp_path, model_kind="autoencoder")
-
-
 def test_train_tail_classification_writes_expected_artifacts(tmp_path):
     run_dir = _train_supcon_run(tmp_path)
     config = TailTrainConfig(
         run_dir=str(run_dir),
         tail_kind="classification",
-        classification=ClassificationTailConfig(mode="family_and_spacegroup"),
+        classification=ClassificationTailConfig(),
         train=TailTrainSettings(epochs=2, batch_size=4),
     )
 
@@ -160,14 +129,11 @@ def test_train_tail_classification_writes_expected_artifacts(tmp_path):
         "val_loss",
         "train_family_ce",
         "val_family_ce",
-        "train_spacegroup_ce",
-        "val_spacegroup_ce",
     ]
 
     predictions = np.load(tail_dir / "tail_predictions.npz")
     n_total = 20  # 2 crystal systems x limit_per_system=10
     assert predictions["family_probs"].shape == (n_total, 2)  # 2 families
-    assert predictions["spacegroup_probs"].shape[0] == n_total
     np.testing.assert_allclose(
         predictions["family_probs"].sum(axis=1), np.ones(n_total), atol=1e-4
     )
@@ -175,39 +141,11 @@ def test_train_tail_classification_writes_expected_artifacts(tmp_path):
     # alongside the predicted probabilities, no join against the parent
     # run's embeddings.npz needed to evaluate the classifier later.
     assert predictions["labels"].shape[0] == n_total
-    assert predictions["spacegroups"].shape[0] == n_total
-
-    # A confusion matrix, a per-class precision/recall/F1 bar chart, and a
-    # calibration diagram, for both family and spacegroup, on both splits.
-    for level in ("family", "spacegroup"):
-        for split in ("train", "val"):
-            for kind in ("confusion_matrix", "classification_report", "calibration"):
-                assert (tail_dir / f"{kind}_{level}_{split}.png").exists()
-
-
-def test_train_tail_classification_family_only_has_no_spacegroup_columns(tmp_path):
-    run_dir = _train_supcon_run(tmp_path)
-    config = TailTrainConfig(
-        run_dir=str(run_dir),
-        tail_kind="classification",
-        classification=ClassificationTailConfig(mode="family_only"),
-        train=TailTrainSettings(epochs=1, batch_size=4),
-    )
-
-    tail_dir = train_tail(config)
-
-    with open(tail_dir / "loss_history.csv") as f:
-        header = f.readline().strip().split(",")
-    assert "train_family_ce" in header
-    assert "train_spacegroup_ce" not in header
-
-    predictions = np.load(tail_dir / "tail_predictions.npz")
-    assert "family_probs" in predictions.files
+    # A family classifier has no spacegroup output.
     assert "spacegroup_probs" not in predictions.files
-    assert "labels" in predictions.files
-    assert "spacegroups" not in predictions.files
 
-    # No spacegroup term active -> only the family evaluation plots exist.
+    # A confusion matrix, a per-class precision/recall/F1 bar chart and a
+    # calibration diagram, on both splits (family level only).
     for split in ("train", "val"):
         for kind in ("confusion_matrix", "classification_report", "calibration"):
             assert (tail_dir / f"{kind}_family_{split}.png").exists()
@@ -278,377 +216,6 @@ def test_train_tail_visualization_balanced_batching(tmp_path):
     assert (tail_dir / "tail_embeddings.npz").exists()
 
 
-def test_train_tail_hierarchical_writes_expected_artifacts(tmp_path):
-    run_dir = _train_supcon_run(tmp_path)
-    config = TailTrainConfig(
-        run_dir=str(run_dir),
-        tail_kind="hierarchical",
-        # expert_input="body" (the non-default option since it flipped to
-        # "soap") -- this test exercises the general artifact-writing
-        # mechanics, not which representation experts train on; pinning it
-        # keeps this test independent of compute_soap/dataset.extxyz.
-        hierarchical=HierarchicalTailConfig(
-            head_hidden_dim=8, min_samples_per_expert=5, expert_input="body"
-        ),
-        train=TailTrainSettings(epochs=2, batch_size=4),
-    )
-
-    tail_dir = train_tail(config)
-
-    assert tail_dir.parent.name == "tails"
-    assert tail_dir.name == "hierarchical"
-    assert (tail_dir / "tail_config.yaml").exists()
-    assert (tail_dir / "tail_predictions.npz").exists()
-    assert (tail_dir / "family_expert_status.yaml").exists()
-    assert (tail_dir / "run.log").exists()
-
-    # Stage 1 (family).
-    assert (tail_dir / "family" / "tail_params.msgpack").exists()
-    assert (tail_dir / "family" / "loss_history.csv").exists()
-
-    # Both families ("Cubic"/"Hexagonal") have enough training rows (7/8,
-    # both >= min_samples_per_expert=5) and 2 distinct spacegroups each -->
-    # both get a dedicated expert, not a fallback.
-    with open(tail_dir / "family_expert_status.yaml") as f:
-        status = yaml.safe_load(f)["families"]
-    status_by_family = {entry["family"]: entry for entry in status}
-    assert set(status_by_family) == {"Cubic", "Hexagonal"}
-    for family, entry in status_by_family.items():
-        assert entry["expert"] is True
-        assert entry["n_local_spacegroup_classes"] == 2
-        expert_dir = tail_dir / "experts" / family
-        assert (expert_dir / "tail_params.msgpack").exists()
-        assert (expert_dir / "loss_history.csv").exists()
-        assert (expert_dir / "local_spacegroup_classes.yaml").exists()
-
-    predictions = np.load(tail_dir / "tail_predictions.npz")
-    n_total = 20  # 2 crystal systems x limit_per_system=10
-    assert predictions["family_probs"].shape == (n_total, 2)
-    assert predictions["spacegroup_probs"].shape[0] == n_total
-    assert (
-        predictions["spacegroup_probs_oracle"].shape
-        == predictions["spacegroup_probs"].shape
-    )
-    np.testing.assert_allclose(
-        predictions["family_probs"].sum(axis=1), np.ones(n_total), atol=1e-4
-    )
-    np.testing.assert_allclose(
-        predictions["spacegroup_probs"].sum(axis=1), np.ones(n_total), atol=1e-4
-    )
-    np.testing.assert_allclose(
-        predictions["spacegroup_probs_oracle"].sum(axis=1), np.ones(n_total), atol=1e-4
-    )
-    assert predictions["labels"].shape[0] == n_total
-    assert predictions["spacegroups"].shape[0] == n_total
-
-    # Same plot suite as "classification" (family + spacegroup, train + val).
-    for level in ("family", "spacegroup"):
-        for split in ("train", "val"):
-            for kind in ("confusion_matrix", "classification_report", "calibration"):
-                assert (tail_dir / f"{kind}_{level}_{split}.png").exists()
-
-    with open(tail_dir / "run.log") as f:
-        run_log = f.read()
-    assert "Training tail_kind=hierarchical" in run_log
-    assert "Tail artifacts saved to" in run_log
-
-
-def test_train_tail_hierarchical_falls_back_for_low_sample_families(tmp_path):
-    run_dir = _train_supcon_run(tmp_path)
-    config = TailTrainConfig(
-        run_dir=str(run_dir),
-        tail_kind="hierarchical",
-        # Both families have well under 100 training rows -- forces every
-        # family into the majority-value fallback, no expert trained.
-        # expert_input="body" pinned for the same reason as the artifacts
-        # test above (irrelevant to fallback logic, keeps this independent
-        # of compute_soap).
-        hierarchical=HierarchicalTailConfig(
-            head_hidden_dim=8, min_samples_per_expert=100, expert_input="body"
-        ),
-        train=TailTrainSettings(epochs=1, batch_size=4),
-    )
-
-    tail_dir = train_tail(config)
-
-    with open(tail_dir / "family_expert_status.yaml") as f:
-        status = yaml.safe_load(f)["families"]
-    assert len(status) == 2
-    for entry in status:
-        assert entry["expert"] is False
-        assert isinstance(entry["fallback_spacegroup"], int)
-    assert not (tail_dir / "experts").exists()
-
-    predictions = np.load(tail_dir / "tail_predictions.npz")
-    # Every fallback prediction is a one-hot distribution over the fallback
-    # spacegroup -- still a valid probability distribution.
-    np.testing.assert_allclose(
-        predictions["spacegroup_probs"].sum(axis=1),
-        np.ones(predictions["spacegroup_probs"].shape[0]),
-        atol=1e-4,
-    )
-
-
-def test_train_tail_hierarchical_expert_input_soap_uses_native_features(tmp_path):
-    run_dir = _train_supcon_run(tmp_path)  # body latent_dim=3
-    config = TailTrainConfig(
-        run_dir=str(run_dir),
-        tail_kind="hierarchical",
-        hierarchical=HierarchicalTailConfig(
-            head_hidden_dim=8, min_samples_per_expert=5, expert_input="soap"
-        ),
-        train=TailTrainSettings(epochs=2, batch_size=4),
-    )
-
-    with patch(
-        "dim_red.pipeline.tail_training.compute_soap",
-        side_effect=_fake_compute_soap(seed=1, n_features=5),
-    ):
-        tail_dir = train_tail(config)
-
-    assert (tail_dir / "tail_predictions.npz").exists()
-    predictions = np.load(tail_dir / "tail_predictions.npz")
-    n_total = 20  # 2 crystal systems x limit_per_system=10
-    assert predictions["family_probs"].shape == (n_total, 2)
-
-    with open(tail_dir / "run.log") as f:
-        run_log = f.read()
-    # Experts train on the recomputed 5-dim native SOAP, not the body's own
-    # 3-dim latent embedding.
-    assert "expert_input=soap (dim=5)" in run_log
-    assert "Recomputed native SOAP features: shape=(20, 5)" in run_log
-
-
-def test_train_tail_hierarchical_expert_head_hidden_dim_gives_experts_a_deeper_mlp(
-    tmp_path,
-):
-    run_dir = _train_supcon_run(tmp_path)
-    config = TailTrainConfig(
-        run_dir=str(run_dir),
-        tail_kind="hierarchical",
-        hierarchical=HierarchicalTailConfig(
-            head_hidden_dim=8,
-            min_samples_per_expert=5,
-            expert_input="soap",
-            expert_head_hidden_dim=[32, 16],
-        ),
-        train=TailTrainSettings(epochs=1, batch_size=4),
-    )
-
-    with patch(
-        "dim_red.pipeline.tail_training.compute_soap",
-        side_effect=_fake_compute_soap(seed=1, n_features=5),
-    ):
-        tail_dir = train_tail(config)
-
-    with open(tail_dir / "run.log") as f:
-        run_log = f.read()
-    assert "expert_hidden_dim=[32, 16]" in run_log
-
-    # An expert's own head has 3 Dense layers (32, 16, n_classes) -- the
-    # family stage (still head_hidden_dim=8, a single layer) has only 2.
-    with open(tail_dir / "experts" / "Cubic" / "tail_params.msgpack", "rb") as f:
-        expert_params = serialization.msgpack_restore(f.read())
-    expert_dense_layers = [
-        k for k in expert_params["family_head"] if k.startswith("Dense_")
-    ]
-    assert len(expert_dense_layers) == 3
-
-    with open(tail_dir / "family" / "tail_params.msgpack", "rb") as f:
-        family_params = serialization.msgpack_restore(f.read())
-    family_dense_layers = [
-        k for k in family_params["family_head"] if k.startswith("Dense_")
-    ]
-    assert len(family_dense_layers) == 2
-
-
-def test_train_tail_hierarchical_visualization_trains_one_tail_per_expert(tmp_path):
-    run_dir = _train_supcon_run(tmp_path)
-    hierarchical_config = TailTrainConfig(
-        run_dir=str(run_dir),
-        tail_kind="hierarchical",
-        output_subdir="hierarchical_soap",
-        hierarchical=HierarchicalTailConfig(
-            head_hidden_dim=8,
-            min_samples_per_expert=5,
-            expert_input="soap",
-            expert_head_hidden_dim=[16, 8],
-        ),
-        train=TailTrainSettings(epochs=2, batch_size=4),
-    )
-    with patch(
-        "dim_red.pipeline.tail_training.compute_soap",
-        side_effect=_fake_compute_soap(seed=1, n_features=5),
-    ):
-        train_tail(hierarchical_config)
-
-    viz_config = TailTrainConfig(
-        run_dir=str(run_dir),
-        tail_kind="hierarchical_visualization",
-        hierarchical_visualization=HierarchicalVisualizationConfig(
-            hierarchical_output_subdir="hierarchical_soap",
-        ),
-        train=TailTrainSettings(epochs=2, batch_size=4),
-    )
-    with patch(
-        "dim_red.pipeline.tail_training.compute_soap",
-        side_effect=_fake_compute_soap(seed=1, n_features=5),
-    ):
-        viz_tail_dir = train_tail(viz_config)
-
-    assert viz_tail_dir.name == "hierarchical_visualization"
-    assert (viz_tail_dir / "tail_config.yaml").exists()
-    # Both families ("Cubic"/"Hexagonal") get a dedicated expert (see
-    # test_train_tail_hierarchical_writes_expected_artifacts), so both get
-    # a visualization tail.
-    for family in ("Cubic", "Hexagonal"):
-        family_dir = viz_tail_dir / family
-        assert (family_dir / "tail_params.msgpack").exists()
-        assert (family_dir / "loss_history.csv").exists()
-        assert (family_dir / "viz_plot_spacegroup.png").exists()
-        embeddings = np.load(family_dir / "tail_embeddings.npz", allow_pickle=True)
-        assert embeddings["embeddings"].shape == (
-            10,
-            2,
-        )  # limit_per_system=10, viz_dim=2
-        assert embeddings["spacegroups"].shape == (10,)
-
-    with open(viz_tail_dir / "run.log") as f:
-        run_log = f.read()
-    assert "Trained 2/2 per-family visualization tails" in run_log
-
-
-def test_train_tail_hierarchical_visualization_input_source_body_uses_body_embedding(
-    tmp_path,
-):
-    run_dir = _train_supcon_run(tmp_path, latent_dim=3)
-    hierarchical_config = TailTrainConfig(
-        run_dir=str(run_dir),
-        tail_kind="hierarchical",
-        output_subdir="hierarchical_soap",
-        hierarchical=HierarchicalTailConfig(
-            head_hidden_dim=8,
-            min_samples_per_expert=5,
-            expert_input="soap",
-            expert_head_hidden_dim=[16, 8],
-        ),
-        train=TailTrainSettings(epochs=2, batch_size=4),
-    )
-    with patch(
-        "dim_red.pipeline.tail_training.compute_soap",
-        side_effect=_fake_compute_soap(seed=1, n_features=5),
-    ):
-        train_tail(hierarchical_config)
-
-    viz_config = TailTrainConfig(
-        run_dir=str(run_dir),
-        tail_kind="hierarchical_visualization",
-        output_subdir="hierarchical_visualization_body",
-        hierarchical_visualization=HierarchicalVisualizationConfig(
-            hierarchical_output_subdir="hierarchical_soap",
-            input_source="body",
-        ),
-        train=TailTrainSettings(epochs=2, batch_size=4),
-    )
-    # No compute_soap patch needed at all -- "body" mode never recomputes
-    # native SOAP or touches dataset.extxyz/the expert's own tail_config.yaml.
-    viz_tail_dir = train_tail(viz_config)
-
-    for family in ("Cubic", "Hexagonal"):
-        family_dir = viz_tail_dir / family
-        assert (family_dir / "tail_params.msgpack").exists()
-        embeddings = np.load(family_dir / "tail_embeddings.npz", allow_pickle=True)
-        assert embeddings["embeddings"].shape == (10, 2)
-
-    # viz tail's own input is the body's 3-dim embedding, not the expert's
-    # 8-dim hidden layer ([16, 8] -> last hidden width 8).
-    with open(viz_tail_dir / "run.log") as f:
-        run_log = f.read()
-    assert "input_source=body input_dim=3" in run_log
-
-    with open(viz_tail_dir / "Cubic" / "tail_params.msgpack", "rb") as f:
-        viz_params = serialization.msgpack_restore(f.read())
-    first_dense = viz_params["Dense_0"]["kernel"]
-    assert first_dense.shape[0] == 3
-
-
-def test_train_tail_hierarchical_visualization_skips_families_without_an_expert(
-    tmp_path,
-):
-    run_dir = _train_supcon_run(tmp_path)
-    hierarchical_config = TailTrainConfig(
-        run_dir=str(run_dir),
-        tail_kind="hierarchical",
-        output_subdir="hierarchical_fallback",
-        # Forces every family into the majority-value fallback -- no expert
-        # trained for either family.
-        hierarchical=HierarchicalTailConfig(
-            head_hidden_dim=8, min_samples_per_expert=100, expert_input="body"
-        ),
-        train=TailTrainSettings(epochs=1, batch_size=4),
-    )
-    train_tail(hierarchical_config)
-
-    viz_config = TailTrainConfig(
-        run_dir=str(run_dir),
-        tail_kind="hierarchical_visualization",
-        hierarchical_visualization=HierarchicalVisualizationConfig(
-            hierarchical_output_subdir="hierarchical_fallback",
-        ),
-        train=TailTrainSettings(epochs=1, batch_size=4),
-    )
-    viz_tail_dir = train_tail(viz_config)
-
-    assert not (viz_tail_dir / "Cubic").exists()
-    assert not (viz_tail_dir / "Hexagonal").exists()
-    with open(viz_tail_dir / "run.log") as f:
-        run_log = f.read()
-    assert "Trained 0/2 per-family visualization tails" in run_log
-
-
-def test_train_tail_hierarchical_visualization_requires_the_referenced_tail_to_exist(
-    tmp_path,
-):
-    run_dir = _train_supcon_run(tmp_path)
-    viz_config = TailTrainConfig(
-        run_dir=str(run_dir),
-        tail_kind="hierarchical_visualization",
-        hierarchical_visualization=HierarchicalVisualizationConfig(
-            hierarchical_output_subdir="does_not_exist",
-        ),
-        train=TailTrainSettings(epochs=1, batch_size=4),
-    )
-    with pytest.raises(FileNotFoundError, match="does_not_exist"):
-        train_tail(viz_config)
-
-
-def test_train_tail_hierarchical_expert_input_soap_requires_dataset_extxyz(tmp_path):
-    run_dir = _train_supcon_run(tmp_path)
-    (run_dir / "dataset.extxyz").unlink()
-    config = TailTrainConfig(
-        run_dir=str(run_dir),
-        tail_kind="hierarchical",
-        hierarchical=HierarchicalTailConfig(expert_input="soap"),
-        train=TailTrainSettings(epochs=1, batch_size=4),
-    )
-
-    with pytest.raises(FileNotFoundError, match="dataset.extxyz"):
-        train_tail(config)
-
-
-def test_train_tail_hierarchical_expert_input_soap_rejects_non_soap_body(tmp_path):
-    run_dir = _train_a_cgcnn_run(tmp_path)
-    config = TailTrainConfig(
-        run_dir=str(run_dir),
-        tail_kind="hierarchical",
-        hierarchical=HierarchicalTailConfig(expert_input="soap"),
-        train=TailTrainSettings(epochs=1, batch_size=4),
-    )
-
-    with pytest.raises(ValueError, match="expert_input='soap'"):
-        train_tail(config)
-
-
 def test_train_tail_hierarchical_supcon_writes_expected_artifacts(tmp_path):
     run_dir = _train_supcon_run(tmp_path)
     config = TailTrainConfig(
@@ -715,14 +282,9 @@ def test_train_tail_hierarchical_supcon_writes_expected_artifacts(tmp_path):
         with open(sg_dir / "classifier_tail_params.msgpack", "rb") as f:
             classifier_params = serialization.msgpack_restore(f.read())
         classifier_dense_layers = sorted(
-            k for k in classifier_params["family_head"] if k.startswith("Dense_")
+            k for k in classifier_params if k.startswith("Dense_")
         )
-        assert (
-            classifier_params["family_head"][classifier_dense_layers[0]][
-                "kernel"
-            ].shape[0]
-            == 3
-        )
+        assert classifier_params[classifier_dense_layers[0]]["kernel"].shape[0] == 3
 
         embeddings = np.load(sg_dir / "visualization_embeddings.npz", allow_pickle=True)
         assert embeddings["embeddings"].shape == (10, 2)  # limit_per_system=10
@@ -860,57 +422,12 @@ def test_train_tail_hierarchical_supcon_falls_back_for_low_sample_families(tmp_p
     )
 
 
-@pytest.mark.parametrize("tail_kind", ["classification", "hierarchical"])
-def test_train_tail_rejects_classification_and_hierarchical_for_vae_run(
-    tmp_path, tail_kind
-):
-    # classification/hierarchical are redundant with vae/autoencoder's own
-    # aux_heads classification, so they stay restricted to supcon/cgcnn/mace
-    # -- unlike visualization, see test_train_tail_visualization_accepts_*
-    # below.
-    run_dir = _train_a_vae_run(tmp_path)
-    kwargs = (
-        {"classification": ClassificationTailConfig(mode="family_only")}
-        if tail_kind == "classification"
-        else {"hierarchical": HierarchicalTailConfig()}
-    )
-    config = TailTrainConfig(run_dir=str(run_dir), tail_kind=tail_kind, **kwargs)
-
-    with pytest.raises(
-        ValueError, match="requires a completed run whose model_kind is one of"
-    ):
-        train_tail(config)
-
-
-@pytest.mark.parametrize("run_builder", [_train_a_vae_run, _train_an_autoencoder_run])
-def test_train_tail_visualization_accepts_vae_and_autoencoder_runs(
-    tmp_path, run_builder
-):
-    # Unlike classification/hierarchical, a visualization tail has no
-    # built-in vae/autoencoder equivalent (aux_heads only ever produces a
-    # classifier), so it's offered for every model_kind.
-    run_dir = run_builder(tmp_path)
-    config = TailTrainConfig(
-        run_dir=str(run_dir),
-        tail_kind="visualization",
-        visualization=VisualizationTailConfig(viz_dim=2, mode="family_only"),
-        train=TailTrainSettings(epochs=1, batch_size=4),
-    )
-
-    tail_dir = train_tail(config)
-
-    assert (tail_dir / "tail_embeddings.npz").exists()
-    assert (tail_dir / "viz_plot_family.png").exists()
-    embeddings = np.load(tail_dir / "tail_embeddings.npz")
-    assert embeddings["embeddings"].shape == (8, 2)
-
-
 def test_train_tail_reruns_dedup_output_dir(tmp_path):
     run_dir = _train_supcon_run(tmp_path)
     config = TailTrainConfig(
         run_dir=str(run_dir),
         tail_kind="classification",
-        classification=ClassificationTailConfig(mode="family_only"),
+        classification=ClassificationTailConfig(),
         train=TailTrainSettings(epochs=1, batch_size=4),
     )
 
@@ -943,7 +460,7 @@ def test_train_tail_never_recomputes_soap_for_training_points(tmp_path):
     config = TailTrainConfig(
         run_dir=str(run_dir),
         tail_kind="classification",
-        classification=ClassificationTailConfig(mode="family_only"),
+        classification=ClassificationTailConfig(),
         train=TailTrainSettings(epochs=1, batch_size=4),
     )
 
@@ -971,34 +488,13 @@ def test_train_tail_does_not_require_dataset_or_model_params(tmp_path):
     config = TailTrainConfig(
         run_dir=str(run_dir),
         tail_kind="classification",
-        classification=ClassificationTailConfig(mode="family_only"),
+        classification=ClassificationTailConfig(),
         train=TailTrainSettings(epochs=1, batch_size=4),
     )
 
     tail_dir = train_tail(config)
 
     assert (tail_dir / "tail_predictions.npz").exists()
-
-
-def test_train_tail_optimizer_velo_still_works_end_to_end(tmp_path):
-    """ "velo" is opt-in now (default is "adam") -- confirm it still works
-    end-to-end through train_tail, not just the lower-level
-    train_classification_tail/train_visualization_tail functions.
-    """
-    run_dir = _train_supcon_run(tmp_path)
-    config = TailTrainConfig(
-        run_dir=str(run_dir),
-        tail_kind="classification",
-        classification=ClassificationTailConfig(mode="family_only"),
-        train=TailTrainSettings(epochs=1, batch_size=4, optimizer="velo"),
-    )
-
-    tail_dir = train_tail(config)
-
-    assert (tail_dir / "tail_params.msgpack").exists()
-    with open(tail_dir / "run.log") as f:
-        run_log = f.read()
-    assert "optimizer=velo" in run_log
 
 
 # --- model_kind == "cgcnn" ---------------------------------------------------
@@ -1020,7 +516,7 @@ def _train_a_cgcnn_run(tmp_path):
     config = RunConfig(
         fetch=FetchConfig(crystal_systems=["cubic", "hexagonal"], limit_per_system=10),
         soap=SoapConfig(),
-        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=3),
+        encoder=EncoderConfig(encoder_hidden_dim=[4], latent_dim=3),
         train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
         graph=GraphConfig(
             radius=3.0,
@@ -1080,16 +576,16 @@ class _FakeMaceEncoder:
         return rng.normal(size=(len(atoms_list), self._DIM)).astype(np.float32)
 
 
-def _train_a_mace_run(tmp_path):
+def _train_a_supcon_mace_run(tmp_path):
     config = RunConfig(
         fetch=FetchConfig(crystal_systems=["cubic", "hexagonal"], limit_per_system=10),
         soap=SoapConfig(),
-        vae=VAEArchConfig(encoder_hidden_dim=[1], latent_dim=1),
-        train=TrainSettings(device="cpu"),
+        encoder=EncoderConfig(encoder_hidden_dim=[4], latent_dim=2),
+        train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25, device="cpu"),
         mace=MaceConfig(checkpoint_path="/fake/ckpt", r_max=5.0),
         seed=0,
         output_dir=str(tmp_path / "runs"),
-        model_kind="mace",
+        model_kind="supcon_mace",
     )
     spacegroup_offsets = {"cubic": 195, "hexagonal": 168}
     with (
@@ -1110,12 +606,12 @@ def _train_a_mace_run(tmp_path):
     return run_dir
 
 
-def test_train_tail_accepts_mace_run(tmp_path):
-    run_dir = _train_a_mace_run(tmp_path)
+def test_train_tail_accepts_supcon_mace_run(tmp_path):
+    run_dir = _train_a_supcon_mace_run(tmp_path)
     config = TailTrainConfig(
         run_dir=str(run_dir),
         tail_kind="classification",
-        classification=ClassificationTailConfig(mode="family_only"),
+        classification=ClassificationTailConfig(),
         train=TailTrainSettings(epochs=1, batch_size=4),
     )
 
@@ -1123,3 +619,20 @@ def test_train_tail_accepts_mace_run(tmp_path):
 
     assert (tail_dir / "tail_predictions.npz").exists()
     assert (tail_dir / "tail_params.msgpack").exists()
+
+
+def test_train_tail_rejects_hierarchical_supcon_for_a_cgcnn_run(tmp_path):
+    """hierarchical_supcon trains a SupCon body per family on the run's native
+    features, which a cgcnn run (graph features) doesn't have."""
+    run_dir = _train_a_cgcnn_run(tmp_path)
+    config = TailTrainConfig(
+        run_dir=str(run_dir),
+        tail_kind="hierarchical_supcon",
+        hierarchical_supcon=HierarchicalSupconTailConfig(),
+        train=TailTrainSettings(epochs=1, batch_size=4),
+    )
+
+    with pytest.raises(
+        ValueError, match="requires a completed run whose model_kind is one of"
+    ):
+        train_tail(config)

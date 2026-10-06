@@ -291,17 +291,6 @@ class CGCNNEncoderModule(nn.Module):
         return z
 
 
-class Encoder:
-    """Thin adapter exposing only the encoder interface of a trained ``CGCNNEncoder``."""
-
-    def __init__(self, cgcnn_encoder: "CGCNNEncoder"):
-        self._cgcnn_encoder = cgcnn_encoder
-
-    def __call__(self, graph_batch: Tuple) -> Array:
-        """Return the representation ``z`` for a graph batch."""
-        return self._cgcnn_encoder.encode(graph_batch)
-
-
 class CGCNNEncoder:
     """High-level wrapper managing Flax module creation and parameters for
     the CGCNN body + optional classifier heads -- mirrors
@@ -421,7 +410,6 @@ class CGCNNEncoder:
             method=self.module.init_all,
         )
         self.params = variables["params"]
-        self.encoder = Encoder(self)
 
     def encode_with_params(self, params: Params, graph_batch: Tuple) -> Array:
         """Encode a graph batch using an explicit parameter tree.

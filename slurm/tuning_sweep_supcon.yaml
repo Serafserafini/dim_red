@@ -21,7 +21,7 @@
 # the earlier crash -- see slurm/tuning_sweep_cgcnn.yaml), supcon.distance
 # is back in the grid (2, euclidean/cosine) on top of encoder_hidden_dim (2),
 # supcon.mode (2), supcon.tau (2) and batching.strategy (2) = 32 runs.
-# vae.latent_dim deliberately left fixed (not a grid axis here, unlike the
+# encoder.latent_dim deliberately left fixed (not a grid axis here, unlike the
 # other three kinds' configs): supcon already pays extra cost per run over
 # vae/autoencoder/cgcnn (an auto-trained classification tail runs right
 # after every body), so it's the one kind kept a notch more conservative
@@ -46,13 +46,11 @@ base:
     l_max: 3
     sigma: 0.5
     element_agnostic: true
-    normalize_distances: false
     species: null
 
-  vae:
+  encoder:
     encoder_hidden_dim: [128] # overridden by the grid below
     latent_dim: 8
-    mirror: true
 
   supcon:
     mode: family_and_spacegroup # overridden by the grid below
@@ -69,12 +67,10 @@ base:
     balanced_params: {P: null, K: 16, S: 4}
 
   tails:
-    classification:
-      mode: family_and_spacegroup
+    classification: {}
     train:
       epochs: 40
       batch_size: 32
-      optimizer: adam
       device: gpu
       early_stopping:
         enabled: true
@@ -86,7 +82,6 @@ base:
     epochs: 100
     batch_size: 64
     learning_rate: 0.001
-    optimizer: adam
     val_ratio: 0.2
     device: gpu
     early_stopping:
@@ -114,7 +109,7 @@ base:
 # 2 hidden-dim x 2 supcon modes x 2 tau values x 2 batching strategies x 2
 # distances = 32 runs, all sharing one cached dataset build.
 grid:
-  vae.encoder_hidden_dim:
+  encoder.encoder_hidden_dim:
     - [64]
     - [128, 64]
   supcon.mode: [family_only, family_and_spacegroup]

@@ -10,21 +10,15 @@
 # dataset.extxyz, model_params.msgpack and embeddings.npz) is passed on the
 # command line, not in this file, so the same tail config can be reused
 # across many runs without editing it each time:
-# Run with: python -m dim_red.pipeline.cli --train-tail configs/tail_train_classification.example.yaml --train-tail-run runs/<date>-<n>/<run-name>
-# or:       dimred-train-tail configs/tail_train_classification.example.yaml runs/<date>-<n>/<run-name>
+# Run with: dimred-train-tail configs/tail_train_classification.example.yaml runs/<date>-<n>/<run-name>
 
-tail_kind: classification # "classification" or "visualization" -- see
-# configs/tail_train_visualization.example.yaml for the latter.
+tail_kind: classification # "classification", "visualization" or
+# "hierarchical_supcon" -- see configs/tail_train_visualization.example.yaml
+# and configs/tail_train_hierarchical_supcon_best_combo.example.yaml.
 
+# A family classifier. Spacegroup classification is done by the per-family
+# experts of tail_kind: hierarchical_supcon, not here.
 classification:
-  # "family_only" or "family_and_spacegroup" (default, shown here) -- unlike
-  # supcon.mode in the phase-1 config, "spacegroup_only" is not valid here:
-  # the spacegroup head is conditioned on family via a co-occurrence mask
-  # (dim_red.supcon.tails.apply_family_mask), so it always needs the family
-  # head active too.
-  mode: family_and_spacegroup
-  lambda_family: 1.0
-  lambda_spacegroup: 1.0 # ignored unless mode: family_and_spacegroup
   head_hidden_dim: 16
 
 # Directory name under <run_dir>/tails/ this tail's artifacts are written
@@ -36,10 +30,7 @@ seed: 42 # seed for the tail's own parameter initialization
 train:
   epochs: 20
   batch_size: 32
-  learning_rate: 0.001 # Adam's learning rate (used when optimizer: adam,
-    # the default); unused when optimizer: velo
-  optimizer: adam # "adam" (default, fast) or "velo" (learned_optimization's
-    # pretrained VeLO meta-learned optimizer -- much slower to start, see CLAUDE.md)
+  learning_rate: 0.001 # Adam's learning rate
   device: cpu
   # Same early-stopping mechanism as the rest of the pipeline (monitors
   # val_loss, using phase 1's exact train/val split).

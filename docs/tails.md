@@ -1,6 +1,6 @@
 # Tail training — fase 2
 
-Congela il corpo di un run {bdg-warning}`supcon` / {bdg-success}`cgcnn` / {bdg-secondary}`mace` già completato e allena esattamente un "tail" sopra le rappresentazioni salvate — architettura-agnostico, opera solo su `embeddings.npz` (mai sul corpo stesso, mai su un forward pass ricomputato).
+Congela il corpo di un run {bdg-warning}`supcon` / {bdg-secondary}`supcon_mace` / {bdg-success}`cgcnn` già completato e allena esattamente un "tail" sopra le rappresentazioni salvate — architettura-agnostico, opera solo su `embeddings.npz` (mai sul corpo stesso, mai su un forward pass ricomputato).
 
 Due percorsi d'uso, stesso motore (`train_tail` sotto):
 
@@ -13,7 +13,7 @@ Due percorsi d'uso, stesso motore (`train_tail` sotto):
 
 ## `tail_kind = "classification"`
 
-Un'unica head di famiglia (+ spacegroup mascherata su famiglia, opzionale).
+Un classificatore di famiglia (MLP con cross-entropy). La classificazione dello spacegroup non si fa qui: la fanno gli esperti per famiglia di `hierarchical_supcon`.
 
 ```{eval-rst}
 .. autoclass:: dim_red.pipeline.config.ClassificationTailConfig
@@ -29,15 +29,15 @@ Riusa la stessa loss SupCon della fase 1, applicata a una proiezione appresa a b
 
 ```
 
-## `tail_kind = "hierarchical"`
+## `tail_kind = "hierarchical_supcon"`
 
-Classificatore genuinamente a due stadi: stadio 1 predice la famiglia; stadio 2 è un "esperto" indipendente *per famiglia*, addestrato solo sulle righe di quella famiglia sui soli spacegroup osservati al suo interno. A differenza degli altri tail, permette la classificazione end-to-end di strutture del tutto nuove (`pipeline.inference.predict_hierarchical`).
+Classificatore a due stadi in cui ogni stadio ha lo stesso aspetto del modello a livello di famiglia (encoder + proiezione, poi classificatore e visualizzatore). Stadio 1: un classificatore di famiglia sull'embedding del corpo. Stadio 2: per ogni famiglia, un *esperto* — un nuovo encoder SupCon con la sua proiezione, allenato solo sulle righe di quella famiglia (sulle feature native: SOAP per `supcon`, embedding MACE per `supcon_mace`) con loss contrastiva sullo spacegroup locale, più un classificatore e un visualizzatore 2D sull'embedding congelato dell'esperto. Le famiglie con troppi pochi campioni o meno di 2 spacegroup non hanno un esperto e prevedono lo spacegroup più frequente.
+
+Non è disponibile tramite `RunConfig.tails`: si lancia con `dimred-train-tail`.
 
 ```{eval-rst}
-.. autoclass:: dim_red.pipeline.config.HierarchicalTailConfig
+.. autoclass:: dim_red.pipeline.config.HierarchicalSupconTailConfig
 
-
-.. autofunction:: dim_red.pipeline.inference.predict_hierarchical
 ```
 
 ## Meccaniche di training condivise

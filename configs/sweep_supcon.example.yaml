@@ -5,7 +5,7 @@
 # ("*_only") vs 2-level ("family_and_spacegroup") SupCon variants, and
 # "random" vs "balanced" batching, side by side at parity of every other
 # hyperparameter.
-# Run with: python -m dim_red.pipeline.cli --config configs/sweep_supcon.example.yaml --sweep
+# Run with: dimred-sweep configs/sweep_supcon.example.yaml
 # or:       dimred-sweep configs/sweep_supcon.example.yaml
 
 base:
@@ -27,13 +27,11 @@ base:
     l_max: 3
     sigma: 0.5
     element_agnostic: false
-    normalize_distances: false
     species: null
 
-  vae:
+  encoder:
     encoder_hidden_dim: [128]
     latent_dim: 2
-    mirror: true
 
   supcon:
     mode: family_and_spacegroup
@@ -57,8 +55,7 @@ base:
   train:
     epochs: 20
     batch_size: 32
-    learning_rate: 0.001 # Adam's learning rate; unused when optimizer: velo
-    optimizer: adam # "adam" (default, fast) or "velo" (much slower to start, see CLAUDE.md)
+    learning_rate: 0.001 # Adam's learning rate
     val_ratio: 0.2
     device: cpu
 
@@ -70,19 +67,17 @@ base:
   # to disable, current behavior unchanged.
   # tails:
   #   classification:
-  #     mode: family_and_spacegroup
   #   visualization:
   #     viz_dim: 2
   #   train:
   #     epochs: 20
   #     batch_size: 32
-  #     optimizer: adam
 
 # 2 hidden-layer configs x 2 tau values x 3 modes x 2 batching strategies =
 # 24 runs. Since only soap/pyxtal settings affect the dataset cache key, all
 # 24 runs share one cached dataset build.
 grid:
-  vae.encoder_hidden_dim:
+  encoder.encoder_hidden_dim:
     - [128]
     - [128, 64]
   supcon.tau: [0.05, 0.1]

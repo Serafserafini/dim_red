@@ -6,10 +6,7 @@ No decoder, no KL term, no classifier heads: this package's only job is to
 map input feature vectors to a latent ``z`` that a Supervised Contrastive
 loss (see ``dim_red.supcon.training``) pulls together for same-label
 structures and pushes apart otherwise. Encoding is deterministic (a single
-vector, no PRNG key needed at encode time), the same shape as
-``dim_red.autoencoder.model.Autoencoder.encode`` -- ``EncoderModule`` below
-is a deliberate duplicate of that module's encoder half (not an import) so
-this package has no dependency on ``dim_red.vae``/``dim_red.autoencoder``.
+vector, no PRNG key needed at encode time).
 """
 
 from typing import Sequence
@@ -35,17 +32,6 @@ class EncoderModule(nn.Module):
         for dim in self.hidden_dim:
             h = nn.relu(nn.Dense(dim)(h))
         return nn.Dense(self.latent_dim)(h)
-
-
-class Encoder:
-    """Thin adapter exposing only the encoder interface of a trained ``SupConEncoder``."""
-
-    def __init__(self, supcon_encoder: "SupConEncoder"):
-        self._supcon_encoder = supcon_encoder
-
-    def __call__(self, x: Array) -> Array:
-        """Return the latent vector ``z`` for input batch ``x``."""
-        return self._supcon_encoder.encode(x)
 
 
 class SupConEncoder:
@@ -96,7 +82,6 @@ class SupConEncoder:
         rng = jax.random.PRNGKey(seed)
         variables = self.module.init({"params": rng}, init_x)
         self.params = variables["params"]
-        self.encoder = Encoder(self)
 
     def encode_with_params(self, params: Params, x: Array) -> Array:
         """Encode ``x`` using an explicit parameter tree."""

@@ -1,7 +1,7 @@
 """
 Container for whole-dataset CGCNN graph arrays.
 
-Mirrors ``dim_red.vae.database.VAEDatabase``'s API shape (``train_val_split``)
+Mirrors ``dim_red.dataset.FeatureDatabase``'s API shape (``train_val_split``)
 generalized to 5 parallel arrays instead of one flat feature matrix -- a
 crystal graph (variable atom/edge count per structure) can't be represented
 as one row of a fixed-width matrix the way a SOAP descriptor can, so this
@@ -161,7 +161,7 @@ class GraphDatabase:
         """Split dataset into train/validation partitions.
 
         Identical split logic/semantics to
-        ``dim_red.vae.database.VAEDatabase.train_val_split``: reproducible
+        ``dim_red.dataset.FeatureDatabase.train_val_split``: reproducible
         via a local RNG seeded with ``seed``, at least one sample guaranteed
         in both partitions.
 

@@ -28,10 +28,10 @@ def _make_sweep_config(tmp_path) -> SweepConfig:
         "output_dir": str(tmp_path / "runs"),
         "fetch": {"crystal_systems": ["cubic"], "limit_per_system": 8},
         "soap": {"r_cut": 3.0, "n_max": 2, "l_max": 2},
-        "vae": {"encoder_hidden_dim": [4], "latent_dim": 2},
+        "encoder": {"encoder_hidden_dim": [4], "latent_dim": 2},
         "train": {"epochs": 1, "batch_size": 4, "val_ratio": 0.25},
     }
-    return SweepConfig(base=base, grid={"vae.encoder_hidden_dim": [[4], [8]]})
+    return SweepConfig(base=base, grid={"encoder.encoder_hidden_dim": [[4], [8]]})
 
 
 def _patch_dataset(n_samples: int = 8, n_features: int = 5):
@@ -53,7 +53,11 @@ def test_run_sweep_run_dirs_have_no_timestamp(tmp_path):
 
     assert len(run_dirs) == 2
     names = {d.name for d in run_dirs}
-    assert names == {"hd-4_cs-cubic", "hd-8_cs-cubic"}
+    # Named from the swept hyperparameters (hidden dims, data source) plus the
+    # default supcon tag -- no timestamp.
+    assert len(names) == 2
+    assert any(n.startswith("model-supcon_hd-4_cs-cubic") for n in names)
+    assert any(n.startswith("model-supcon_hd-8_cs-cubic") for n in names)
     for d in run_dirs:
         assert d.parent.name.startswith("2")  # date prefix e.g. "20260729-1"
         assert "-" in d.parent.name
@@ -103,7 +107,7 @@ def test_run_sweep_can_vary_a_training_hyperparam_not_in_any_named_axis(tmp_path
         "output_dir": str(tmp_path / "runs"),
         "fetch": {"crystal_systems": ["cubic"], "limit_per_system": 8},
         "soap": {"r_cut": 3.0, "n_max": 2, "l_max": 2},
-        "vae": {"encoder_hidden_dim": [4], "latent_dim": 2},
+        "encoder": {"encoder_hidden_dim": [4], "latent_dim": 2},
         "train": {"epochs": 1, "batch_size": 4, "val_ratio": 0.25},
     }
     config = SweepConfig(base=base, grid={"train.learning_rate": [0.01, 0.001, 0.0001]})
@@ -129,12 +133,12 @@ def test_run_sweep_writes_readme_entry(tmp_path):
     content = readme_path.read_text()
     sweep_name = run_dirs[0].parent.name
     assert f"## {sweep_name}" in content
-    assert "Sweep axes: vae.encoder_hidden_dim" in content
+    assert "Sweep axes: encoder.encoder_hidden_dim" in content
     # Non-default settings: values shared by every run in the sweep show up
     # as a single value; the swept axis itself shows up as "varies: ...".
     assert "fetch.limit_per_system: 8" in content
     assert "data_source: fetch" not in content  # data_source left at default
-    assert "vae.encoder_hidden_dim: varies: [4] | [8]" in content
+    assert "encoder.encoder_hidden_dim: varies: [4] | [8]" in content
 
 
 def test_run_sweep_appends_to_existing_readme(tmp_path):
@@ -159,7 +163,7 @@ def test_run_sweep_can_vary_supcon_tau_and_mode(tmp_path):
         "model": "supcon",
         "fetch": {"crystal_systems": ["cubic"], "limit_per_system": 8},
         "soap": {"r_cut": 3.0, "n_max": 2, "l_max": 2},
-        "vae": {"encoder_hidden_dim": [4], "latent_dim": 2},
+        "encoder": {"encoder_hidden_dim": [4], "latent_dim": 2},
         "train": {"epochs": 1, "batch_size": 4, "val_ratio": 0.25},
     }
     config = SweepConfig(
@@ -191,19 +195,20 @@ def test_run_sweep_can_vary_supcon_tau_and_mode(tmp_path):
 
 
 def test_run_sweep_can_vary_model_kind(tmp_path):
-    """Sweeping "model" produces both a VAE and an Autoencoder run in the
-    same sweep directory, distinctly named (no collision), each trained
-    through its own path end-to-end.
+    """Sweeping "model" produces a supcon and a cgcnn run in the same sweep
+    directory, distinctly named (no collision), each trained through its own
+    path end-to-end.
     """
     base = {
         "seed": 0,
         "output_dir": str(tmp_path / "runs"),
         "fetch": {"crystal_systems": ["cubic"], "limit_per_system": 8},
         "soap": {"r_cut": 3.0, "n_max": 2, "l_max": 2},
-        "vae": {"encoder_hidden_dim": [4], "latent_dim": 2},
+        "encoder": {"encoder_hidden_dim": [4], "latent_dim": 2},
+        "aux_heads": {"mode": "family_only"},  # required by cgcnn, ignored by supcon
         "train": {"epochs": 1, "batch_size": 4, "val_ratio": 0.25},
     }
-    config = SweepConfig(base=base, grid={"model": ["vae", "autoencoder"]})
+    config = SweepConfig(base=base, grid={"model": ["supcon", "cgcnn"]})
     fetch_patch, soap_patch = _patch_dataset()
 
     with fetch_patch, soap_patch:
@@ -211,7 +216,8 @@ def test_run_sweep_can_vary_model_kind(tmp_path):
 
     assert len(run_dirs) == 2
     names = {d.name for d in run_dirs}
-    assert names == {"hd-4_cs-cubic", "model-autoencoder_hd-4_cs-cubic"}
+    assert any(n.startswith("model-supcon_") for n in names)
+    assert any(n.startswith("model-cgcnn_") for n in names)
     for run_dir in run_dirs:
         assert (run_dir / "loss_history.csv").exists()
 
@@ -227,10 +233,10 @@ def test_run_sweep_auto_trains_tails_for_every_run(tmp_path):
         "model": "supcon",
         "fetch": {"crystal_systems": ["cubic"], "limit_per_system": 8},
         "soap": {"r_cut": 3.0, "n_max": 2, "l_max": 2},
-        "vae": {"encoder_hidden_dim": [4], "latent_dim": 2},
+        "encoder": {"encoder_hidden_dim": [4], "latent_dim": 2},
         "train": {"epochs": 1, "batch_size": 4, "val_ratio": 0.25},
         "tails": {
-            "classification": {"mode": "family_only"},
+            "classification": {"head_hidden_dim": 4},
             "visualization": {"viz_dim": 2},
             "train": {"epochs": 1, "batch_size": 4},
         },

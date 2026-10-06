@@ -28,9 +28,9 @@ base:
     n_species: 2
     seed: 42
 
-  # Only vae.latent_dim is read for model: cgcnn -- see
+  # Only encoder.latent_dim is read for model: cgcnn -- see
   # configs/single_run_cgcnn.example.yaml's comments.
-  vae:
+  encoder:
     encoder_hidden_dim: [1]
     latent_dim: 8
 
@@ -56,7 +56,6 @@ base:
     epochs: 30
     batch_size: 16
     learning_rate: 0.001
-    optimizer: adam
     val_ratio: 0.2
     device: cpu
 

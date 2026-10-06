@@ -38,13 +38,11 @@ base:
     l_max: 3
     sigma: 0.5
     element_agnostic: false
-    normalize_distances: false
     species: null
 
-  vae:
+  encoder:
     encoder_hidden_dim: [128] # overridden by the grid below
     latent_dim: 8
-    mirror: true
 
   supcon:
     mode: family_and_spacegroup
@@ -61,25 +59,22 @@ base:
     balanced_params: {P: null, K: 16, S: 4}
 
   tails:
-    classification:
-      mode: family_and_spacegroup
+    classification: {}
     train:
       epochs: 20
       batch_size: 32
-      optimizer: adam
 
   train:
     epochs: 30
     batch_size: 32
     learning_rate: 0.001
-    optimizer: adam
     val_ratio: 0.2
     device: cpu
 
 # 2 hidden-dim configs x 2 tau values x 2 distances x 2 batching strategies
 # = 16 runs, all sharing one cached dataset build.
 grid:
-  vae.encoder_hidden_dim:
+  encoder.encoder_hidden_dim:
     - [64]
     - [128, 64]
   supcon.tau: [0.05, 0.1]

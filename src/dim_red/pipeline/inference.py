@@ -11,7 +11,7 @@ to fit/standardize the model, same order as the SOAP features it saw),
 original dataset's latent embeddings/labels, the standardized ``features``
 fed to the model plus the ``feature_mean``/``feature_std`` they were
 standardized with, and the family/spacegroup class vocabularies when a
-VAE's/Autoencoder's auxiliary heads were active). ``load_trained_run`` reads
+CGCNN's classification heads were active). ``load_trained_run`` reads
 all four: it takes ``feature_mean``/``feature_std`` directly from
 ``embeddings.npz`` (saved there by ``dim_red.pipeline.single_run.run_single``
 since ``dim_red.pipeline.dataset_cache.build_dataset_for_run`` now returns
@@ -45,9 +45,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-import jax
 import numpy as np
-import yaml
 from ase import Atoms
 from ase.io import read as read_atoms
 from flax import serialization
@@ -56,7 +54,6 @@ from dim_red.analysis.plotting import plot_applied_structures
 from dim_red.pipeline.compare import LatentUmapParams, make_umap
 from dim_red.pipeline.config import RunConfig, load_run_config
 from dim_red.soap import compute_soap
-from dim_red.supcon.tails import ClassificationTail
 from dim_red.utils import apply_standardization, fit_standardization
 
 logger = logging.getLogger("dim_red.pipeline")
@@ -81,7 +78,7 @@ class LoadedRun:
 
     run_dir: Path
     config: RunConfig
-    model: Any  # dim_red.vae.model.VAE | autoencoder.model.Autoencoder | supcon.model.SupConEncoder | cgcnn.model.CGCNNEncoder
+    model: Any  # supcon.model.SupConEncoder | cgcnn.model.CGCNNEncoder
     species: List[str]
     feature_mean: np.ndarray
     feature_std: np.ndarray
@@ -171,7 +168,7 @@ def _build_model(config: RunConfig, input_dim: int, embeddings: Dict[str, np.nda
     """Reconstruct a run's model architecture (with freshly-initialized,
     soon-to-be-overwritten weights) from its ``RunConfig`` -- mirrors the
     construction in ``dim_red.pipeline.single_run.run_single``. Family/
-    spacegroup classifier-head sizes (vae/autoencoder/cgcnn only) come from
+    spacegroup classifier-head sizes (cgcnn only) come from
     ``embeddings['family_classes']``/``['spacegroup_classes']``, since
     ``RunConfig`` itself doesn't carry the resolved class counts.
     """
@@ -180,18 +177,10 @@ def _build_model(config: RunConfig, input_dim: int, embeddings: Dict[str, np.nda
 
         return SupConEncoder(
             input_dim=input_dim,
-            encoder_hidden_dim=config.vae.encoder_hidden_dim,
-            latent_dim=config.vae.latent_dim,
+            encoder_hidden_dim=config.encoder.encoder_hidden_dim,
+            latent_dim=config.encoder.latent_dim,
             seed=config.seed,
         )
-
-    if config.model_kind == "mace":
-        from dim_red.mace.model import MaceEncoder
-
-        # input_dim/embeddings unused: a frozen body's architecture (and
-        # therefore its output width) is whatever the loaded checkpoint
-        # says, not derived from this run's saved artifacts at all.
-        return MaceEncoder(**config.mace.mace_kwargs())
 
     if config.model_kind == "cgcnn":
         from dim_red.cgcnn.model import CGCNNEncoder
@@ -214,7 +203,7 @@ def _build_model(config: RunConfig, input_dim: int, embeddings: Dict[str, np.nda
             n_conv=config.graph.n_conv,
             h_fea_len=config.graph.h_fea_len,
             n_h=config.graph.n_h,
-            latent_dim=config.vae.latent_dim,
+            latent_dim=config.encoder.latent_dim,
             n_gaussian=config.graph.n_gaussian,
             max_species=config.graph.max_species,
             n_family_classes=n_family_classes,
@@ -223,36 +212,7 @@ def _build_model(config: RunConfig, input_dim: int, embeddings: Dict[str, np.nda
             seed=config.seed,
         )
 
-    aux_mode = config.aux_heads.mode
-    use_family = aux_mode != "none"
-    use_spacegroup = aux_mode == "family_and_spacegroup"
-    n_family_classes = (
-        len(embeddings["family_classes"])
-        if use_family and "family_classes" in embeddings
-        else None
-    )
-    n_spacegroup_classes = (
-        len(embeddings["spacegroup_classes"])
-        if use_spacegroup and "spacegroup_classes" in embeddings
-        else None
-    )
-
-    if config.model_kind == "vae":
-        from dim_red.vae.model import VAE as model_cls
-    else:
-        from dim_red.autoencoder.model import Autoencoder as model_cls
-
-    return model_cls(
-        input_dim=input_dim,
-        encoder_hidden_dim=config.vae.encoder_hidden_dim,
-        decoder_hidden_dim=config.vae.decoder_hidden_dim,
-        latent_dim=config.vae.latent_dim,
-        n_family_classes=n_family_classes,
-        n_spacegroup_classes=n_spacegroup_classes,
-        head_hidden_dim=config.aux_heads.head_hidden_dim,
-        mirror=config.vae.mirror,
-        seed=config.seed,
-    )
+    raise ValueError(f"Unsupported model_kind {config.model_kind!r}")
 
 
 def load_trained_run(run_dir: Union[str, Path]) -> LoadedRun:
@@ -296,25 +256,22 @@ def load_trained_run(run_dir: Union[str, Path]) -> LoadedRun:
         mean = np.zeros(0, dtype=np.float32)
         std = np.ones(0, dtype=np.float32)
         input_dim = 0
-    elif config.model_kind in ("mace", "supcon_mace"):
+    elif config.model_kind == "supcon_mace":
         # Like SOAP-based kinds, feature_mean/feature_std are always saved
         # (dim_red.pipeline.dataset_cache.build_mace_dataset_for_run always
         # returns them -- there's no "pre-existing run predating this field"
-        # fallback case for mace/supcon_mace, since neither model_kind
-        # existed before that field did) -- taken directly from
+        # fallback case for supcon_mace) -- taken directly from
         # embeddings.npz, same fast path as the SOAP-based kinds below. No
         # species list: MaceEncoder doesn't use dim_red.soap's chemical-
         # species machinery at all (its checkpoint carries its own
         # supported-species table internally, loaded from
         # config.mace.checkpoint_path at construction time) -- kept as an
         # inert empty placeholder, same treatment cgcnn's species field
-        # gets above, so LoadedRun's shape stays uniform. This branch only
+        # gets above, so LoadedRun's shape stays uniform. This branch
         # resolves the *raw input features'* standardization stats/width
-        # (identical for both model kinds -- MACE's own frozen embedding);
-        # _build_model (below) is what actually differs, constructing
-        # either a frozen MaceEncoder or a trained SupConEncoder on top of
-        # that same input_dim. dataset.extxyz isn't read here, and the
-        # SOAP-recompute fallback below never applies to either.
+        # (MACE's own frozen embedding); _build_model constructs the trained
+        # SupConEncoder on top of that same input_dim. dataset.extxyz isn't
+        # read here, and the SOAP-recompute fallback below never applies.
         species = []
         mean = embeddings["feature_mean"]
         std = embeddings["feature_std"]
@@ -390,14 +347,7 @@ def load_trained_run(run_dir: Union[str, Path]) -> LoadedRun:
         logger.info(
             "Loaded cgcnn model from %s (latent_dim=%d)",
             run_dir,
-            config.vae.latent_dim,
-        )
-    elif config.model_kind == "mace":
-        logger.info(
-            "Loaded frozen mace model from %s (checkpoint=%s, %d-dim embedding)",
-            run_dir,
-            config.mace.checkpoint_path,
-            input_dim,
+            config.encoder.latent_dim,
         )
     elif config.model_kind == "supcon_mace":
         logger.info(
@@ -406,7 +356,7 @@ def load_trained_run(run_dir: Union[str, Path]) -> LoadedRun:
             run_dir,
             config.mace.checkpoint_path,
             input_dim,
-            config.vae.latent_dim,
+            config.encoder.latent_dim,
         )
     else:
         logger.info(
@@ -415,7 +365,7 @@ def load_trained_run(run_dir: Union[str, Path]) -> LoadedRun:
             run_dir,
             len(species),
             input_dim,
-            config.vae.latent_dim,
+            config.encoder.latent_dim,
         )
     return LoadedRun(
         run_dir=run_dir,
@@ -459,15 +409,6 @@ def encode_structures(loaded: LoadedRun, atoms_list: List[Atoms]) -> np.ndarray:
         )
         return np.asarray(loaded.model.encode(graph_batch))
 
-    if loaded.config.model_kind == "mace":
-        # Unlike cgcnn's raw (unstandardized) graph features, mace's
-        # dataset-cache path standardizes the pooled embedding the same way
-        # SOAP does (dim_red.pipeline.dataset_cache._compute_mace_and_standardize)
-        # -- new structures must go through that same standardization to
-        # land in a comparable space, not just the raw forward pass.
-        raw = np.asarray(loaded.model.encode(atoms_list))
-        return apply_standardization(raw, loaded.feature_mean, loaded.feature_std)
-
     if loaded.config.model_kind == "supcon_mace":
         # loaded.model here is the *trained* SupConEncoder (see _build_model),
         # not something that can featurize raw Atoms itself -- a separate,
@@ -487,9 +428,7 @@ def encode_structures(loaded: LoadedRun, atoms_list: List[Atoms]) -> np.ndarray:
 
     X_raw = _raw_soap_matrix(atoms_list, loaded.config.soap.as_kwargs(), loaded.species)
     X_std = apply_standardization(X_raw, loaded.feature_mean, loaded.feature_std)
-    is_vae = loaded.config.model_kind == "vae"
-    z = loaded.model.encode(X_std)[0] if is_vae else loaded.model.encode(X_std)
-    return np.asarray(z)
+    return np.asarray(loaded.model.encode(X_std))
 
 
 def plot_applied_in_latent_space(
@@ -623,216 +562,3 @@ def apply_model_to_structures(
     logger.info("Saved applied-structures latent-space plot to %s", plot_path)
 
     return output_dir
-
-
-def _sanitize_family_dirname(family: str) -> str:
-    """Turn a family label into the same filesystem-safe directory name
-    ``dim_red.pipeline.tail_training._train_hierarchical_tail`` used to name
-    ``tails/hierarchical/experts/<name>/`` -- duplicated here (not imported)
-    since ``tail_training`` itself imports ``load_run_embeddings`` from this
-    module, and importing back from ``tail_training`` would be circular.
-    """
-    safe = "".join(c if (c.isalnum() or c in "-_") else "_" for c in str(family))
-    return safe or "unknown"
-
-
-def load_classification_tail(
-    tail_params_path: Union[str, Path],
-    input_dim: int,
-    hidden_dim: int,
-    n_family_classes: Optional[int] = None,
-    n_spacegroup_classes: Optional[int] = None,
-    seed: int = 42,
-) -> ClassificationTail:
-    """Reconstruct a ``dim_red.supcon.tails.ClassificationTail`` and reload
-    its trained weights from a saved ``tail_params.msgpack`` -- the same
-    "rebuild architecture, then ``flax.serialization.from_bytes`` its
-    weights" pattern ``load_trained_run``'s ``_build_model`` uses for a
-    run's own ``model_params.msgpack``. The caller supplies the exact
-    architecture (``hidden_dim``/class counts) the tail was originally built
-    with -- ``tail_params.msgpack`` carries only its trained weights, not its
-    own shape.
-    """
-    tail = ClassificationTail(
-        input_dim=input_dim,
-        hidden_dim=hidden_dim,
-        n_family_classes=n_family_classes,
-        n_spacegroup_classes=n_spacegroup_classes,
-        seed=seed,
-    )
-    with open(tail_params_path, "rb") as f:
-        tail.params = serialization.from_bytes(tail.params, f.read())
-    return tail
-
-
-@dataclass
-class HierarchicalPrediction:
-    """Per-structure output of ``predict_hierarchical``, one entry per row
-    of the ``atoms_list`` it was called with, in the same order.
-
-    Attributes:
-        family_pred: Predicted family (stage 1's argmax class name).
-        family_probs: Stage 1's softmax probabilities, shape
-            ``(n, n_family_classes)``.
-        spacegroup_pred: Predicted spacegroup number -- stage 2's argmax
-            (mapped back through its expert's local vocabulary), or that
-            family's recorded fallback value when it has no dedicated
-            expert.
-        spacegroup_probs: Stage 2's softmax probabilities over its expert's
-            local vocabulary, or ``None`` for a row whose predicted family
-            fell back to a fixed majority value instead (there is no
-            distribution to report there -- see
-            ``dim_red.pipeline.tail_training._train_hierarchical_tail``'s
-            ``family_expert_status.yaml``).
-    """
-
-    family_pred: List[str]
-    family_probs: np.ndarray
-    spacegroup_pred: np.ndarray
-    spacegroup_probs: List[Optional[np.ndarray]]
-
-
-def predict_hierarchical(
-    run_dir: Union[str, Path],
-    atoms_list: List[Atoms],
-    hierarchical_subdir: str = "hierarchical",
-) -> HierarchicalPrediction:
-    """Apply a hierarchical tail (see
-    ``dim_red.pipeline.tail_training._train_hierarchical_tail``) to
-    brand-new structures: encode them through the run's frozen body
-    (``load_trained_run``/``encode_structures``), predict family with
-    stage 1, then route each structure to its *predicted* family's own
-    stage-2 expert (or that family's recorded majority-value fallback, if it
-    has none) to predict spacegroup -- the real, deployable two-stage
-    pipeline this tail was trained for, unlike ``tail_predictions.npz``
-    (computed only on the training run's own dataset).
-
-    Args:
-        run_dir: Path to a completed run directory that also has a trained
-            hierarchical tail under ``<run_dir>/tails/<hierarchical_subdir>/``.
-        atoms_list: New ASE ``Atoms`` to predict on -- same species
-            restriction as ``encode_structures``.
-        hierarchical_subdir: Which ``tails/`` subdirectory to load the
-            hierarchical tail from (``"hierarchical"`` by default, i.e. no
-            ``output_subdir`` override was used when it was trained).
-
-    Returns:
-        A ``HierarchicalPrediction``.
-
-    Raises:
-        FileNotFoundError: If no completed hierarchical tail is found at
-            that path.
-        ValueError: If ``atoms_list`` is empty.
-    """
-    run_dir = Path(run_dir)
-    tail_dir = run_dir / "tails" / hierarchical_subdir
-    family_dir = tail_dir / "family"
-    if not (family_dir / "tail_params.msgpack").exists():
-        raise FileNotFoundError(
-            f"{family_dir} has no tail_params.msgpack -- {tail_dir} doesn't "
-            "look like a completed hierarchical tail (see "
-            "dim_red.pipeline.tail_training.train_tail with "
-            "tail_kind='hierarchical')"
-        )
-
-    with np.load(tail_dir / "tail_predictions.npz") as npz:
-        family_classes = [str(c) for c in npz["family_classes"].tolist()]
-    with open(tail_dir / "family_expert_status.yaml") as f:
-        status_by_family = {
-            entry["family"]: entry for entry in yaml.safe_load(f)["families"]
-        }
-    with open(tail_dir / "tail_config.yaml") as f:
-        hierarchical_config = yaml.safe_load(f)["hierarchical"]
-    head_hidden_dim = int(hierarchical_config["head_hidden_dim"])
-    expert_input = hierarchical_config.get("expert_input", "body")
-    expert_hidden_dim = (
-        hierarchical_config.get("expert_head_hidden_dim") or head_hidden_dim
-    )
-
-    loaded = load_trained_run(run_dir)
-    r = encode_structures(loaded, atoms_list)
-    input_dim = r.shape[1]
-
-    # Stage-2 experts may have been trained on native SOAP instead of the
-    # body's own embedding (hierarchical.expert_input: "soap", the default
-    # since 2026-09-17 -- see dim_red.pipeline.config
-    # .HierarchicalTailConfig) -- recompute that same representation for
-    # these brand-new structures too, or every expert here would silently
-    # get the wrong input (raising a shape-mismatch error when loading its
-    # saved params, since the recorded architecture no longer matches).
-    if expert_input == "soap":
-        soap = loaded.config.soap
-        raw_expert_features = compute_soap(
-            atoms_list,
-            species=loaded.species,
-            r_cut=soap.r_cut,
-            n_max=soap.n_max,
-            l_max=soap.l_max,
-            sigma=soap.sigma,
-            element_agnostic=soap.element_agnostic,
-            average="outer",
-        )
-        r_expert = apply_standardization(
-            raw_expert_features, loaded.feature_mean, loaded.feature_std
-        )
-    else:
-        r_expert = r
-    expert_input_dim = r_expert.shape[1]
-
-    family_tail = load_classification_tail(
-        family_dir / "tail_params.msgpack",
-        input_dim=input_dim,
-        hidden_dim=head_hidden_dim,
-        n_family_classes=len(family_classes),
-    )
-    family_probs = np.asarray(jax.nn.softmax(family_tail.classify_family(r), axis=-1))
-    family_pred_ids = family_probs.argmax(axis=1)
-    family_pred = [family_classes[i] for i in family_pred_ids]
-
-    n = len(atoms_list)
-    spacegroup_pred = np.zeros(n, dtype=np.int64)
-    spacegroup_probs: List[Optional[np.ndarray]] = [None] * n
-    expert_cache: Dict[str, Any] = {}
-
-    for family_name in set(family_pred):
-        rows = [i for i, f in enumerate(family_pred) if f == family_name]
-        status = status_by_family[family_name]
-        if not status["expert"]:
-            fallback_value = int(status["fallback_spacegroup"])
-            for i in rows:
-                spacegroup_pred[i] = fallback_value
-            continue
-
-        if family_name not in expert_cache:
-            expert_dir = tail_dir / "experts" / _sanitize_family_dirname(family_name)
-            with open(expert_dir / "local_spacegroup_classes.yaml") as f:
-                local_classes = yaml.safe_load(f)["local_spacegroup_classes"]
-            expert_tail = load_classification_tail(
-                expert_dir / "tail_params.msgpack",
-                input_dim=expert_input_dim,
-                hidden_dim=expert_hidden_dim,
-                n_family_classes=len(local_classes),
-            )
-            expert_cache[family_name] = (expert_tail, local_classes)
-        expert_tail, local_classes = expert_cache[family_name]
-
-        local_probs = np.asarray(
-            jax.nn.softmax(expert_tail.classify_family(r_expert[rows]), axis=-1)
-        )
-        local_pred_ids = local_probs.argmax(axis=1)
-        for row_pos, i in enumerate(rows):
-            spacegroup_pred[i] = local_classes[local_pred_ids[row_pos]]
-            spacegroup_probs[i] = local_probs[row_pos]
-
-    logger.info(
-        "Predicted family+spacegroup for %d new structures via hierarchical "
-        "tail at %s",
-        n,
-        tail_dir,
-    )
-    return HierarchicalPrediction(
-        family_pred=family_pred,
-        family_probs=family_probs,
-        spacegroup_pred=spacegroup_pred,
-        spacegroup_probs=spacegroup_probs,
-    )

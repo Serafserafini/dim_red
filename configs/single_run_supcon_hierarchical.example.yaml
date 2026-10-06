@@ -1,11 +1,16 @@
 # Quick try-it-out config for the hierarchical (family -> per-family
-# spacegroup expert) tail: a small pyxtal -> SOAP -> SupCon body run with
-# tails.hierarchical enabled, so `dimred-run` trains the body AND the
-# hierarchical tail in one shot. Uses data_source: pyxtal (no MP_API_KEY
-# needed) since pyxtal's family is a deterministic function of spacegroup,
-# making the hierarchy easiest to sanity-check.
+# spacegroup expert) workflow: a small pyxtal -> SOAP -> SupCon body run with
+# a family classification tail and a visualization tail auto-trained right
+# after the body (``tails:`` below), so `dimred-run` produces the body and
+# both tails in one shot. Uses data_source: pyxtal (no MP_API_KEY needed)
+# since pyxtal's family is a deterministic function of spacegroup, making the
+# hierarchy easiest to sanity-check.
 # Run with: dimred-run configs/single_run_supcon_hierarchical.example.yaml
-# (or: python -m dim_red.pipeline.cli --config configs/single_run_supcon_hierarchical.example.yaml)
+#
+# The per-family spacegroup experts are then added to the finished run with
+# a hierarchical_supcon tail (one SupCon encoder + classifier + visualizer per
+# family, trained on that family's own rows):
+#   dimred-train-tail configs/tail_train_hierarchical_supcon_best_combo.example.yaml <run_dir>
 
 seed: 42
 output_dir: runs_hierarchical
@@ -26,33 +31,29 @@ soap:
   sigma: 0.5
   species: null
 
-vae:
+encoder:
   encoder_hidden_dim: [64, 32]
   latent_dim: 8
 
 supcon:
-  mode: family_and_spacegroup
+  mode: family_only
   tau: 0.1
   projection_dim: 32
 
 train:
   epochs: 10
   batch_size: 32
-  optimizer: adam
   val_ratio: 0.2
   device: cpu
 
-# The new bit: auto-train a hierarchical tail right after the body finishes.
-# hierarchical.expert_input defaults to "soap" (stage-2 experts recompute
-# and train on native SOAP instead of the body's own embedding, verified
-# to help substantially -- see HierarchicalTailConfig's docstring); fine
-# here since this run's own dataset.extxyz already exists by the time the
-# auto-attached tail trains.
+# Auto-train a family classification tail and a 2D visualization tail right
+# after the body finishes.
 tails:
-  hierarchical:
+  classification:
     head_hidden_dim: 16
-    min_samples_per_expert: 10
+  visualization:
+    viz_dim: 2
+    mode: family_only
   train:
     epochs: 20
     batch_size: 32
-    optimizer: adam

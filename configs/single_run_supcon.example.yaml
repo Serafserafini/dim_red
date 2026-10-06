@@ -8,7 +8,7 @@
 # see configs/tail_train_classification.example.yaml/
 # configs/tail_train_visualization.example.yaml and
 # dim_red.pipeline.tail_training. See CLAUDE.md/dim_red.supcon.
-# Run with: python -m dim_red.pipeline.cli --config configs/single_run_supcon.example.yaml
+# Run with: dimred-run configs/single_run_supcon.example.yaml
 # or:       dimred-run configs/single_run_supcon.example.yaml
 
 seed: 42
@@ -34,19 +34,16 @@ soap:
   l_max: 3
   sigma: 0.5
   element_agnostic: false
-  normalize_distances: false
   species: null # auto-detected from the generated structures
 
-# Same encoder-architecture schema as vae/autoencoder (decoder_hidden_dim/
-# mirror below are simply ignored for model: supcon -- there's no decoder).
-vae:
+# Encoder architecture (the MLP body). Formerly called "vae:" -- that name is
+# still read for older configs.
+encoder:
   encoder_hidden_dim: [128, 64]
-  decoder_hidden_dim: null
   latent_dim: 2
-  mirror: true
 
-# "aux_heads" (the vae/autoencoder classifier-head config block) is unused
-# for model: supcon -- omitted here, see "supcon" below instead.
+# "aux_heads" (the cgcnn classifier-head config block) is unused for model:
+# supcon -- omitted here, see "supcon" below instead.
 supcon:
   # Which label level(s) to contrast on: "family_only", "spacegroup_only",
   # or "family_and_spacegroup" (both, weighted below).
@@ -68,7 +65,7 @@ supcon:
   # redundant with distance: cosine.
   lambda_norm: 0.0
   # Size of the space the SupCon loss is actually computed in (Khosla et
-  # al. 2020 default, shown here) -- separate from vae.latent_dim above,
+  # al. 2020 default, shown here) -- separate from encoder.latent_dim above,
   # which stays the body's own representation width (saved to
   # embeddings.npz, reused by every downstream tail). The projection tail
   # is discarded after this run in the original paper; this codebase still
@@ -76,7 +73,7 @@ supcon:
   # reproducibility.
   projection_dim: 128
   # Widths of hidden layers in the projection tail's MLP. null (default,
-  # shown here) resolves to a single hidden layer matching vae.latent_dim.
+  # shown here) resolves to a single hidden layer matching encoder.latent_dim.
   projection_hidden_dim: null
 
 # How training batches are built (validation batches always stay random,
@@ -97,10 +94,7 @@ batching:
 train:
   epochs: 20
   batch_size: 32
-  learning_rate: 0.001 # Adam's learning rate (used when optimizer: adam,
-    # the default); unused when optimizer: velo
-  optimizer: adam # "adam" (default, fast) or "velo" (learned_optimization's
-    # pretrained VeLO meta-learned optimizer -- much slower to start, see CLAUDE.md)
+  learning_rate: 0.001 # Adam's learning rate
   val_ratio: 0.2
   device: cpu
   # Optional early stopping (same mechanism for vae/autoencoder/supcon):
@@ -122,10 +116,8 @@ train:
 # configs/tail_train_visualization.example.yaml show.
 # tails:
 #   classification:
-#     mode: family_and_spacegroup
 #   visualization:
 #     viz_dim: 2
 #   train:
 #     epochs: 20
 #     batch_size: 32
-#     optimizer: adam

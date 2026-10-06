@@ -18,17 +18,13 @@ pytest.importorskip("jax")
 
 from dim_red.pipeline.config import (
     AuxHeadsConfig,
+    EncoderConfig,
     FetchConfig,
     GraphConfig,
-    HierarchicalTailConfig,
     MaceConfig,
     RunConfig,
     SoapConfig,
-    SupConConfig,
-    TailTrainConfig,
-    TailTrainSettings,
     TrainSettings,
-    VAEArchConfig,
 )
 from dim_red.pipeline.inference import (
     LoadedRun,
@@ -37,10 +33,8 @@ from dim_red.pipeline.inference import (
     encode_structures,
     load_run_embeddings,
     load_trained_run,
-    predict_hierarchical,
 )
 from dim_red.pipeline.single_run import run_single
-from dim_red.pipeline.tail_training import train_tail
 
 N_TRAIN = 8
 N_FEATURES = 5
@@ -53,12 +47,12 @@ def _fake_atoms(symbol: str, material_id: str) -> Atoms:
 
 
 def _make_config(
-    tmp_path, model_kind="vae", latent_dim=2, name="base-run"
+    tmp_path, model_kind="supcon", latent_dim=2, name="base-run"
 ) -> RunConfig:
     return RunConfig(
         fetch=FetchConfig(crystal_systems=["cubic"], limit_per_system=N_TRAIN),
         soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=latent_dim),
+        encoder=EncoderConfig(encoder_hidden_dim=[4], latent_dim=latent_dim),
         train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
         aux_heads=AuxHeadsConfig(mode="none"),
         model_kind=model_kind,
@@ -116,7 +110,7 @@ def test_load_trained_run_reconstructs_model_and_standardization(tmp_path):
         loaded = load_trained_run(run_dir)
 
     assert isinstance(loaded, LoadedRun)
-    assert loaded.config.model_kind == "vae"
+    assert loaded.config.model_kind == "supcon"
     assert loaded.species == ["Cu"]
     assert loaded.feature_mean.shape == (N_FEATURES,)
     assert loaded.feature_std.shape == (N_FEATURES,)
@@ -207,7 +201,7 @@ def test_load_run_embeddings_reads_config_and_embeddings_only(tmp_path):
         loaded = load_run_embeddings(run_dir)
 
     assert isinstance(loaded, RunEmbeddings)
-    assert loaded.config.model_kind == "vae"
+    assert loaded.config.model_kind == "supcon"
     assert loaded.embeddings["embeddings"].shape == (N_TRAIN, 2)
 
 
@@ -349,7 +343,7 @@ def _train_a_cgcnn_run(tmp_path, name="cgcnn-run"):
     config = RunConfig(
         fetch=FetchConfig(crystal_systems=["cubic"], limit_per_system=N_TRAIN_CGCNN),
         soap=SoapConfig(),
-        vae=VAEArchConfig(encoder_hidden_dim=[4], latent_dim=4),
+        encoder=EncoderConfig(encoder_hidden_dim=[4], latent_dim=4),
         train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
         graph=GraphConfig(
             radius=3.0,
@@ -428,7 +422,7 @@ def test_apply_model_to_structures_cgcnn_writes_expected_artifacts(tmp_path):
         assert npz["material_ids"].tolist() == ["new-1", "new-2"]
 
 
-# --- model_kind == "mace" -----------------------------------------------------
+# --- model_kind == "supcon_mace" -----------------------------------------------------
 #
 # dim_red.mace.model.MaceEncoder requires mace_jax (not installed in every
 # test environment), so it's mocked out entirely here -- same pattern as
@@ -469,14 +463,14 @@ def _fake_mace_atoms(symbol: str, material_id: str) -> Atoms:
     return atoms
 
 
-def _train_a_mace_run(tmp_path, name="mace-run"):
+def _train_a_supcon_mace_run(tmp_path, name="supcon-mace-run"):
     config = RunConfig(
         fetch=FetchConfig(crystal_systems=["cubic"], limit_per_system=N_TRAIN_MACE),
         soap=SoapConfig(),
-        vae=VAEArchConfig(encoder_hidden_dim=[1], latent_dim=1),
-        train=TrainSettings(device="cpu"),
+        encoder=EncoderConfig(encoder_hidden_dim=[4], latent_dim=2),
+        train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25, device="cpu"),
         mace=MaceConfig(checkpoint_path="/fake/ckpt", r_max=5.0),
-        model_kind="mace",
+        model_kind="supcon_mace",
         seed=0,
         output_dir=str(tmp_path / "runs"),
         name=name,
@@ -493,12 +487,12 @@ def _train_a_mace_run(tmp_path, name="mace-run"):
     return run_dir
 
 
-def test_load_trained_run_mace(tmp_path):
-    run_dir = _train_a_mace_run(tmp_path)
+def test_load_trained_run_supcon_mace(tmp_path):
+    run_dir = _train_a_supcon_mace_run(tmp_path)
     with patch("dim_red.mace.model.MaceEncoder", _FakeMaceEncoder):
         loaded = load_trained_run(run_dir)
 
-    assert loaded.config.model_kind == "mace"
+    assert loaded.config.model_kind == "supcon_mace"
     assert loaded.species == []
     # Real (non-placeholder) standardization stats, unlike cgcnn's zeros/ones
     # -- mace embeddings are standardized the same way SOAP features are.
@@ -506,26 +500,26 @@ def test_load_trained_run_mace(tmp_path):
     assert loaded.feature_std.shape == (3,)
 
 
-def test_encode_structures_mace_applies_saved_standardization(tmp_path):
-    run_dir = _train_a_mace_run(tmp_path)
+def test_encode_structures_supcon_mace_applies_saved_standardization(tmp_path):
+    run_dir = _train_a_supcon_mace_run(tmp_path)
     with patch("dim_red.mace.model.MaceEncoder", _FakeMaceEncoder):
         loaded = load_trained_run(run_dir)
         z = encode_structures(loaded, [_fake_mace_atoms("Cu", "new-1")])
 
-    assert z.shape == (1, 3)
+    assert z.shape == (1, 2)  # latent_dim=2
     assert np.all(np.isfinite(z))
 
 
-def test_encode_structures_mace_rejects_empty_list(tmp_path):
-    run_dir = _train_a_mace_run(tmp_path)
+def test_encode_structures_supcon_mace_rejects_empty_list(tmp_path):
+    run_dir = _train_a_supcon_mace_run(tmp_path)
     with patch("dim_red.mace.model.MaceEncoder", _FakeMaceEncoder):
         loaded = load_trained_run(run_dir)
     with pytest.raises(ValueError, match="atoms_list is empty"):
         encode_structures(loaded, [])
 
 
-def test_apply_model_to_structures_mace_writes_expected_artifacts(tmp_path):
-    run_dir = _train_a_mace_run(tmp_path)
+def test_apply_model_to_structures_supcon_mace_writes_expected_artifacts(tmp_path):
+    run_dir = _train_a_supcon_mace_run(tmp_path)
 
     new_atoms = [_fake_mace_atoms("Cu", "new-1"), _fake_mace_atoms("Cu", "new-2")]
     structures_path = tmp_path / "new_mace_structures.extxyz"
@@ -539,200 +533,5 @@ def test_apply_model_to_structures_mace_writes_expected_artifacts(tmp_path):
     assert npz_path.exists()
     assert plot_path.exists()
     with np.load(npz_path) as npz:
-        assert npz["embeddings"].shape == (2, 3)
+        assert npz["embeddings"].shape == (2, 2)
         assert npz["material_ids"].tolist() == ["new-1", "new-2"]
-
-
-# --- predict_hierarchical -----------------------------------------------------
-
-
-def _fake_atoms_with_spacegroup(
-    symbol: str, material_id: str, spacegroup: int
-) -> Atoms:
-    atoms = Atoms(symbol, positions=[[0.0, 0.0, 0.0]])
-    atoms.info["material_id"] = material_id
-    atoms.info["spacegroup"] = spacegroup
-    return atoms
-
-
-def _train_a_supcon_run_with_hierarchical_tail(tmp_path, min_samples_per_expert=5):
-    """A completed model_kind='supcon' run (2 families, 2 spacegroups each,
-    mirroring test_pipeline_tail_training.py's _train_supcon_run) with a
-    hierarchical tail already trained on top of it.
-    """
-    config = RunConfig(
-        fetch=FetchConfig(crystal_systems=["cubic", "hexagonal"], limit_per_system=10),
-        soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        vae=VAEArchConfig(encoder_hidden_dim=[8], latent_dim=3),
-        train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
-        supcon=SupConConfig(mode="family_and_spacegroup", tau=0.1, projection_dim=6),
-        seed=0,
-        output_dir=str(tmp_path / "runs"),
-        model_kind="supcon",
-    )
-    spacegroup_offsets = {"cubic": 195, "hexagonal": 168}
-    rng = np.random.default_rng(0)
-
-    def fake_fetch(crystal_system, api_key=None, limit=10):
-        offset = spacegroup_offsets[crystal_system]
-        return [
-            _fake_atoms_with_spacegroup(
-                "Cu", f"mp-{crystal_system}-{i}", offset + (i % 2)
-            )
-            for i in range(limit)
-        ]
-
-    def fake_train_soap(atoms, **kwargs):
-        n = len(atoms) if isinstance(atoms, list) else 1
-        return rng.normal(size=(n, N_FEATURES)).astype(np.float32)
-
-    with (
-        patch(
-            "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
-            side_effect=fake_fetch,
-        ),
-        patch(
-            "dim_red.pipeline.dataset_cache.compute_soap", side_effect=fake_train_soap
-        ),
-    ):
-        run_dir = run_single(config)
-
-    tail_config = TailTrainConfig(
-        run_dir=str(run_dir),
-        tail_kind="hierarchical",
-        # expert_input="body" (the non-default option since it flipped to
-        # "soap") -- this helper is about predict_hierarchical's own
-        # routing/fallback logic, not about which representation experts
-        # train on (see test_pipeline_tail_training.py's dedicated
-        # expert_input tests for that); pinning it here keeps this test
-        # independent of a second, unpatched compute_soap call.
-        hierarchical=HierarchicalTailConfig(
-            head_hidden_dim=8,
-            min_samples_per_expert=min_samples_per_expert,
-            expert_input="body",
-        ),
-        train=TailTrainSettings(epochs=1, batch_size=4),
-    )
-    train_tail(tail_config)
-    return run_dir
-
-
-def test_predict_hierarchical_predicts_family_and_spacegroup_for_new_structures(
-    tmp_path,
-):
-    run_dir = _train_a_supcon_run_with_hierarchical_tail(tmp_path)
-    new_atoms = [Atoms("Cu", positions=[[0.0, 0.0, 0.0]]) for _ in range(3)]
-
-    def fake_new_soap(atoms, **kwargs):
-        n = len(atoms)
-        return np.random.default_rng(1).normal(size=(n, N_FEATURES)).astype(np.float32)
-
-    with patch("dim_red.pipeline.inference.compute_soap", side_effect=fake_new_soap):
-        prediction = predict_hierarchical(run_dir, new_atoms)
-
-    assert len(prediction.family_pred) == 3
-    assert set(prediction.family_pred) <= {"Cubic", "Hexagonal"}
-    assert prediction.family_probs.shape == (3, 2)
-    np.testing.assert_allclose(
-        prediction.family_probs.sum(axis=1), np.ones(3), atol=1e-4
-    )
-    assert prediction.spacegroup_pred.shape == (3,)
-    assert all(isinstance(sg, (int, np.integer)) for sg in prediction.spacegroup_pred)
-    assert len(prediction.spacegroup_probs) == 3
-    for family, probs in zip(prediction.family_pred, prediction.spacegroup_probs):
-        # Both families got a dedicated expert (min_samples_per_expert=5, see
-        # test_train_tail_hierarchical_writes_expected_artifacts) -- every
-        # row should have a real probability distribution, not a fallback.
-        assert probs is not None
-        np.testing.assert_allclose(probs.sum(), 1.0, atol=1e-4)
-
-
-def test_predict_hierarchical_recomputes_native_soap_for_soap_experts(tmp_path):
-    """expert_input="soap" (the default) means the saved experts expect
-    native SOAP, not the body's own embedding -- predict_hierarchical must
-    recompute that same representation for brand-new structures too, or
-    loading an expert's checkpoint against the wrong input_dim would raise
-    a shape-mismatch error.
-    """
-    config = RunConfig(
-        fetch=FetchConfig(crystal_systems=["cubic", "hexagonal"], limit_per_system=10),
-        soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        vae=VAEArchConfig(encoder_hidden_dim=[8], latent_dim=3),
-        train=TrainSettings(epochs=1, batch_size=4, val_ratio=0.25),
-        supcon=SupConConfig(mode="family_and_spacegroup", tau=0.1, projection_dim=6),
-        seed=0,
-        output_dir=str(tmp_path / "runs"),
-        model_kind="supcon",
-    )
-    spacegroup_offsets = {"cubic": 195, "hexagonal": 168}
-
-    def fake_fetch(crystal_system, api_key=None, limit=10):
-        offset = spacegroup_offsets[crystal_system]
-        return [
-            _fake_atoms_with_spacegroup(
-                "Cu", f"mp-{crystal_system}-{i}", offset + (i % 2)
-            )
-            for i in range(limit)
-        ]
-
-    def fake_soap(atoms, **kwargs):
-        n = len(atoms) if isinstance(atoms, list) else 1
-        return np.random.default_rng(0).normal(size=(n, N_FEATURES)).astype(np.float32)
-
-    with (
-        patch(
-            "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
-            side_effect=fake_fetch,
-        ),
-        patch("dim_red.pipeline.dataset_cache.compute_soap", side_effect=fake_soap),
-    ):
-        run_dir = run_single(config)
-
-    tail_config = TailTrainConfig(
-        run_dir=str(run_dir),
-        tail_kind="hierarchical",
-        hierarchical=HierarchicalTailConfig(
-            head_hidden_dim=8,
-            min_samples_per_expert=5,
-            expert_input="soap",
-            expert_head_hidden_dim=[16, 8],
-        ),
-        train=TailTrainSettings(epochs=1, batch_size=4),
-    )
-    with patch("dim_red.pipeline.tail_training.compute_soap", side_effect=fake_soap):
-        train_tail(tail_config)
-
-    new_atoms = [Atoms("Cu", positions=[[0.0, 0.0, 0.0]]) for _ in range(3)]
-    with patch("dim_red.pipeline.inference.compute_soap", side_effect=fake_soap):
-        prediction = predict_hierarchical(run_dir, new_atoms)
-
-    assert len(prediction.family_pred) == 3
-    assert prediction.spacegroup_pred.shape == (3,)
-    for probs in prediction.spacegroup_probs:
-        assert probs is not None
-        np.testing.assert_allclose(probs.sum(), 1.0, atol=1e-4)
-
-
-def test_predict_hierarchical_uses_fallback_for_low_sample_families(tmp_path):
-    run_dir = _train_a_supcon_run_with_hierarchical_tail(
-        tmp_path, min_samples_per_expert=100
-    )
-    new_atoms = [Atoms("Cu", positions=[[0.0, 0.0, 0.0]])]
-
-    def fake_new_soap(atoms, **kwargs):
-        n = len(atoms)
-        return np.random.default_rng(1).normal(size=(n, N_FEATURES)).astype(np.float32)
-
-    with patch("dim_red.pipeline.inference.compute_soap", side_effect=fake_new_soap):
-        prediction = predict_hierarchical(run_dir, new_atoms)
-
-    # Every family fell back (min_samples_per_expert=100 exceeds both
-    # families' training-row counts) -- no expert to report a distribution
-    # from.
-    assert prediction.spacegroup_probs == [None]
-
-
-def test_predict_hierarchical_raises_for_missing_tail(tmp_path):
-    run_dir, _ = _train_a_run(tmp_path, model_kind="vae")
-    with pytest.raises(FileNotFoundError, match="tail_params.msgpack"):
-        predict_hierarchical(run_dir, [_fake_atoms("Cu", "new-1")])

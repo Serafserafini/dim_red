@@ -14,6 +14,7 @@ from dim_red.pipeline.config import (
     BatchingConfig,
     ClassificationTailConfig,
     EarlyStoppingConfig,
+    EncoderConfig,
     FetchConfig,
     GraphConfig,
     MaceConfig,
@@ -23,7 +24,6 @@ from dim_red.pipeline.config import (
     SupConConfig,
     TailTrainSettings,
     TrainSettings,
-    VAEArchConfig,
     VisualizationTailConfig,
     expand_sweep,
     flatten_config_dict,
@@ -45,8 +45,8 @@ def _single_run_dict():
         "output_dir": "runs",
         "fetch": {"crystal_systems": ["cubic", "hexagonal"], "limit_per_system": 5},
         "soap": {"r_cut": 4.0, "n_max": 2, "l_max": 2},
-        "vae": {"encoder_hidden_dim": [16, 8], "latent_dim": 2},
-        "train": {"epochs": 3, "batch_size": 4, "beta": 0.5, "val_ratio": 0.25},
+        "encoder": {"encoder_hidden_dim": [16, 8], "latent_dim": 2},
+        "train": {"epochs": 3, "batch_size": 4, "val_ratio": 0.25},
     }
 
 
@@ -59,9 +59,8 @@ def test_load_run_config_roundtrip(tmp_path):
     assert config.fetch.limit_per_system == 5
     assert config.soap.r_cut == 4.0
     assert config.soap.n_max == 2
-    assert config.vae.encoder_hidden_dim == [16, 8]
-    assert config.vae.latent_dim == 2
-    assert config.vae.mirror is True
+    assert config.encoder.encoder_hidden_dim == [16, 8]
+    assert config.encoder.latent_dim == 2
     assert config.train.epochs == 3
     assert config.train.val_ratio == 0.25
 
@@ -69,27 +68,55 @@ def test_load_run_config_roundtrip(tmp_path):
     assert config.soap.sigma == 0.5
     assert config.train.device == "cpu"
 
-    # aux_heads defaults to mode="none" (plain VAE, current behavior) when
-    # the config doesn't mention it at all.
+    # aux_heads defaults to mode="none" when the config doesn't mention it
+    # at all.
     assert config.aux_heads == AuxHeadsConfig(mode="none")
 
-    # model_kind defaults to "vae" (current behavior, unchanged) when the
-    # config doesn't mention it at all.
-    assert config.model_kind == "vae"
+    # model_kind defaults to "supcon" when the config doesn't mention it at
+    # all.
+    assert config.model_kind == "supcon"
+
+
+def test_run_config_still_reads_the_legacy_vae_block_name(tmp_path):
+    """``encoder:`` was called ``vae:`` before the VAE/autoencoder model
+    kinds were removed -- older configs and saved config.yaml files must keep
+    loading, with the removed decoder-only keys ignored."""
+    d = _single_run_dict()
+    d["vae"] = {
+        "encoder_hidden_dim": [16, 8],
+        "latent_dim": 2,
+        "decoder_hidden_dim": [8, 16],
+        "mirror": False,
+    }
+    del d["encoder"]
+    d["train"]["beta"] = 0.5
+    d["train"]["optimizer"] = "velo"
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+    assert config.encoder.encoder_hidden_dim == [16, 8]
+    assert config.encoder.latent_dim == 2
 
 
 def test_run_config_parses_model_kind(tmp_path):
     d = _single_run_dict()
-    d["model"] = "autoencoder"
+    d["model"] = "cgcnn"
+    d["aux_heads"] = {"mode": "family_only"}
     config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
-    assert config.model_kind == "autoencoder"
+    assert config.model_kind == "cgcnn"
+
+
+@pytest.mark.parametrize("removed", ["vae", "autoencoder", "mace"])
+def test_run_config_rejects_removed_model_kinds(tmp_path, removed):
+    d = _single_run_dict()
+    d["model"] = removed
+    with pytest.raises(ValueError, match="model_kind must be one of"):
+        load_run_config(_write_yaml(tmp_path / "run.yaml", d))
 
 
 def test_run_config_rejects_invalid_model_kind():
     with pytest.raises(ValueError, match="model_kind must be one of"):
         RunConfig(
             soap=SoapConfig(),
-            vae=VAEArchConfig(encoder_hidden_dim=[8], latent_dim=2),
+            encoder=EncoderConfig(encoder_hidden_dim=[8], latent_dim=2),
             train=TrainSettings(),
             fetch=FetchConfig(crystal_systems=["cubic"]),
             model_kind="bogus",
@@ -98,12 +125,13 @@ def test_run_config_rejects_invalid_model_kind():
 
 def test_run_config_to_dict_roundtrips_model_kind(tmp_path):
     d = _single_run_dict()
-    d["model"] = "autoencoder"
+    d["model"] = "cgcnn"
+    d["aux_heads"] = {"mode": "family_only"}
     config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
     saved_path = _write_yaml(tmp_path / "saved.yaml", run_config_to_dict(config))
     reloaded = load_run_config(saved_path)
     assert reloaded == config
-    assert reloaded.model_kind == "autoencoder"
+    assert reloaded.model_kind == "cgcnn"
 
 
 def test_run_config_defaults_to_fetch_data_source(tmp_path):
@@ -118,7 +146,7 @@ def test_run_config_rejects_invalid_data_source():
     with pytest.raises(ValueError, match="data_source must be one of"):
         RunConfig(
             soap=SoapConfig(),
-            vae=VAEArchConfig(encoder_hidden_dim=[8], latent_dim=2),
+            encoder=EncoderConfig(encoder_hidden_dim=[8], latent_dim=2),
             train=TrainSettings(),
             fetch=FetchConfig(crystal_systems=["cubic"]),
             data_source="bogus",
@@ -129,7 +157,7 @@ def test_run_config_fetch_data_source_requires_fetch_block():
     with pytest.raises(ValueError, match="requires a 'fetch' config block"):
         RunConfig(
             soap=SoapConfig(),
-            vae=VAEArchConfig(encoder_hidden_dim=[8], latent_dim=2),
+            encoder=EncoderConfig(encoder_hidden_dim=[8], latent_dim=2),
             train=TrainSettings(),
             data_source="fetch",
         )
@@ -139,7 +167,7 @@ def test_run_config_pyxtal_data_source_requires_pyxtal_block():
     with pytest.raises(ValueError, match="requires a 'pyxtal' config block"):
         RunConfig(
             soap=SoapConfig(),
-            vae=VAEArchConfig(encoder_hidden_dim=[8], latent_dim=2),
+            encoder=EncoderConfig(encoder_hidden_dim=[8], latent_dim=2),
             train=TrainSettings(),
             data_source="pyxtal",
         )
@@ -242,16 +270,15 @@ def test_expand_sweep_can_vary_data_source(tmp_path):
 
 def test_expand_sweep_can_vary_model_kind(tmp_path):
     """The generic grid mechanism already supports this for free: sweeping
-    "model" produces both a VAE and an Autoencoder RunConfig, with no
-    special-casing needed in expand_sweep.
+    "model" produces a RunConfig per model kind, with no special-casing
+    needed in expand_sweep.
     """
-    sweep_dict = {
-        "base": _single_run_dict(),
-        "grid": {"model": ["vae", "autoencoder"]},
-    }
+    base = _single_run_dict()
+    base["aux_heads"] = {"mode": "family_only"}  # required by cgcnn
+    sweep_dict = {"base": base, "grid": {"model": ["supcon", "cgcnn"]}}
     sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
     runs = expand_sweep(sweep)
-    assert {r.model_kind for r in runs} == {"vae", "autoencoder"}
+    assert {r.model_kind for r in runs} == {"supcon", "cgcnn"}
 
 
 def test_run_config_to_dict_reloads_identically(tmp_path):
@@ -269,15 +296,15 @@ def test_flatten_config_dict_produces_dotted_paths():
         {
             "seed": 7,
             "fetch": {"crystal_systems": ["cubic"], "limit_per_system": 5},
-            "vae": {"encoder_hidden_dim": [16, 8], "latent_dim": 2},
+            "encoder": {"encoder_hidden_dim": [16, 8], "latent_dim": 2},
         }
     )
     assert flat == {
         "seed": 7,
         "fetch.crystal_systems": ["cubic"],
         "fetch.limit_per_system": 5,
-        "vae.encoder_hidden_dim": [16, 8],
-        "vae.latent_dim": 2,
+        "encoder.encoder_hidden_dim": [16, 8],
+        "encoder.latent_dim": 2,
     }
 
 
@@ -778,7 +805,7 @@ def _sweep_base():
         "output_dir": "runs",
         "fetch": {"crystal_systems": ["cubic"], "limit_per_system": 5},
         "soap": {"r_cut": 4.0, "n_max": 2, "l_max": 2},
-        "vae": {"encoder_hidden_dim": [16], "latent_dim": 3},
+        "encoder": {"encoder_hidden_dim": [16], "latent_dim": 3},
         "train": {"epochs": 1, "batch_size": 4},
     }
 
@@ -788,7 +815,7 @@ def test_load_sweep_config_and_expand(tmp_path):
         "base": _sweep_base(),
         "grid": {
             "fetch.crystal_systems": [["cubic"], ["cubic", "hexagonal"]],
-            "vae.encoder_hidden_dim": [[16], [16, 8]],
+            "encoder.encoder_hidden_dim": [[16], [16, 8]],
         },
     }
     config_path = _write_yaml(tmp_path / "sweep.yaml", sweep_dict)
@@ -804,7 +831,8 @@ def test_load_sweep_config_and_expand(tmp_path):
     assert all(isinstance(r, RunConfig) for r in runs)
 
     combos = {
-        (tuple(r.fetch.crystal_systems), tuple(r.vae.encoder_hidden_dim)) for r in runs
+        (tuple(r.fetch.crystal_systems), tuple(r.encoder.encoder_hidden_dim))
+        for r in runs
     }
     assert combos == {
         (("cubic",), (16,)),
@@ -813,11 +841,10 @@ def test_load_sweep_config_and_expand(tmp_path):
         (("cubic", "hexagonal"), (16, 8)),
     }
     # Non-swept settings are shared across every expanded run.
-    assert all(r.vae.latent_dim == 3 for r in runs)
+    assert all(r.encoder.latent_dim == 3 for r in runs)
     assert all(r.train.epochs == 1 for r in runs)
 
-    # No aux_heads block -> mode="none" for every expanded run, matching the
-    # plain-VAE default.
+    # No aux_heads block -> mode="none" for every expanded run.
     assert all(r.aux_heads == AuxHeadsConfig(mode="none") for r in runs)
 
 
@@ -836,7 +863,7 @@ def test_expand_sweep_with_empty_grid_returns_single_base_run(tmp_path):
 
     assert len(runs) == 1
     assert runs[0].fetch.crystal_systems == ["cubic"]
-    assert runs[0].vae.encoder_hidden_dim == [16]
+    assert runs[0].encoder.encoder_hidden_dim == [16]
 
 
 def test_expand_sweep_can_vary_any_dotted_path(tmp_path):
@@ -848,20 +875,20 @@ def test_expand_sweep_can_vary_any_dotted_path(tmp_path):
         "base": _sweep_base(),
         "grid": {
             "train.learning_rate": [0.001, 0.0005],
-            "train.beta": [1.0, 2.0],
+            "train.batch_size": [4, 8],
             "seed": [0, 1, 2],
         },
     }
     sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
     runs = expand_sweep(sweep)
 
-    # 2 learning rates x 2 betas x 3 seeds = 12 runs.
+    # 2 learning rates x 2 batch sizes x 3 seeds = 12 runs.
     assert len(runs) == 12
-    combos = {(r.train.learning_rate, r.train.beta, r.seed) for r in runs}
+    combos = {(r.train.learning_rate, r.train.batch_size, r.seed) for r in runs}
     assert len(combos) == 12
     assert {r.seed for r in runs} == {0, 1, 2}
     assert {r.train.learning_rate for r in runs} == {0.001, 0.0005}
-    assert {r.train.beta for r in runs} == {1.0, 2.0}
+    assert {r.train.batch_size for r in runs} == {4, 8}
     # Everything not in the grid stays shared across every expanded run.
     assert all(r.fetch.crystal_systems == ["cubic"] for r in runs)
 
@@ -918,47 +945,16 @@ def test_expand_sweep_family_and_spacegroup_expands_both_lambda_axes(tmp_path):
     assert combos == {(0.5, 0.1), (0.5, 0.2), (1.0, 0.1), (1.0, 0.2)}
 
 
-def test_run_config_defaults_optimizer_to_adam(tmp_path):
-    config_path = _write_yaml(tmp_path / "run.yaml", _single_run_dict())
-    config = load_run_config(config_path)
-    assert config.train.optimizer == "adam"
-
-
-def test_train_settings_rejects_invalid_optimizer():
-    with pytest.raises(ValueError, match="train.optimizer must be one of"):
-        TrainSettings(optimizer="bogus")
-
-
-@pytest.mark.parametrize("optimizer", ["adam", "velo"])
-def test_train_settings_accepts_valid_optimizers(optimizer):
-    assert TrainSettings(optimizer=optimizer).optimizer == optimizer
-
-
-def test_run_config_parses_train_optimizer(tmp_path):
+def test_removed_train_keys_are_ignored_without_failing(tmp_path):
+    """``train.optimizer`` (VeLO was removed, Adam is the only optimizer) and
+    ``train.beta`` (VAE-only) may still sit in older configs / saved
+    config.yaml files: they are ignored, not an error."""
     d = _single_run_dict()
     d["train"]["optimizer"] = "velo"
+    d["train"]["beta"] = 0.5
     config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
-    assert config.train.optimizer == "velo"
-
-
-def test_run_config_to_dict_roundtrips_optimizer(tmp_path):
-    d = _single_run_dict()
-    d["train"]["optimizer"] = "velo"
-    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
-
-    saved_path = _write_yaml(tmp_path / "saved.yaml", run_config_to_dict(config))
-    reloaded = load_run_config(saved_path)
-
-    assert reloaded == config
-    assert reloaded.train.optimizer == "velo"
-
-
-def test_expand_sweep_can_vary_train_optimizer(tmp_path):
-    base = _single_run_dict()
-    sweep_dict = {"base": base, "grid": {"train.optimizer": ["adam", "velo"]}}
-    sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
-    runs = expand_sweep(sweep)
-    assert {r.train.optimizer for r in runs} == {"adam", "velo"}
+    assert not hasattr(config.train, "optimizer")
+    assert not hasattr(config.train, "beta")
 
 
 def test_run_config_defaults_tails_to_none(tmp_path):
@@ -969,11 +965,11 @@ def test_run_config_defaults_tails_to_none(tmp_path):
 
 def test_run_config_parses_tails_classification_only(tmp_path):
     d = _single_run_dict()
-    d["tails"] = {"classification": {"mode": "family_only", "lambda_family": 2.0}}
+    d["tails"] = {"classification": {"head_hidden_dim": 32}}
     config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
 
     assert config.tails == AutoTailsConfig(
-        classification=ClassificationTailConfig(mode="family_only", lambda_family=2.0),
+        classification=ClassificationTailConfig(head_hidden_dim=32),
         visualization=None,
     )
 
@@ -1002,23 +998,21 @@ def test_run_config_parses_tails_visualization_only(tmp_path):
 def test_run_config_parses_tails_both(tmp_path):
     d = _single_run_dict()
     d["tails"] = {
-        "classification": {"mode": "family_and_spacegroup"},
+        "classification": {"head_hidden_dim": 8},
         "visualization": {"viz_dim": 2},
-        "train": {"epochs": 5, "optimizer": "velo"},
+        "train": {"epochs": 5},
     }
     config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
 
-    assert config.tails.classification == ClassificationTailConfig(
-        mode="family_and_spacegroup"
-    )
+    assert config.tails.classification == ClassificationTailConfig(head_hidden_dim=8)
     assert config.tails.visualization == VisualizationTailConfig(viz_dim=2)
-    assert config.tails.train == TailTrainSettings(epochs=5, optimizer="velo")
+    assert config.tails.train == TailTrainSettings(epochs=5)
 
 
 def test_run_config_to_dict_roundtrips_tails_block(tmp_path):
     d = _single_run_dict()
     d["tails"] = {
-        "classification": {"mode": "family_only"},
+        "classification": {"head_hidden_dim": 8},
         "visualization": {"viz_dim": 3},
         "train": {"epochs": 7},
     }
@@ -1028,7 +1022,7 @@ def test_run_config_to_dict_roundtrips_tails_block(tmp_path):
     reloaded = load_run_config(saved_path)
 
     assert reloaded == config
-    assert reloaded.tails.classification.mode == "family_only"
+    assert reloaded.tails.classification.head_hidden_dim == 8
     assert reloaded.tails.visualization.viz_dim == 3
     assert reloaded.tails.train.epochs == 7
 
@@ -1040,19 +1034,30 @@ def test_run_config_to_dict_omits_tails_block_when_none(tmp_path):
     assert "tails" not in saved
 
 
-def test_expand_sweep_can_vary_tails_classification_mode(tmp_path):
+def test_expand_sweep_can_vary_tails_classification_head_hidden_dim(tmp_path):
     base = _single_run_dict()
-    base["tails"] = {"classification": {"mode": "family_only"}}
+    base["tails"] = {"classification": {"head_hidden_dim": 8}}
     sweep_dict = {
         "base": base,
-        "grid": {"tails.classification.mode": ["family_only", "family_and_spacegroup"]},
+        "grid": {"tails.classification.head_hidden_dim": [8, 16, 32]},
     }
     sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
     runs = expand_sweep(sweep)
-    assert {r.tails.classification.mode for r in runs} == {
-        "family_only",
-        "family_and_spacegroup",
-    }
+    assert {r.tails.classification.head_hidden_dim for r in runs} == {8, 16, 32}
+
+
+def test_run_config_rejects_removed_single_stage_spacegroup_classification(tmp_path):
+    d = _single_run_dict()
+    d["tails"] = {"classification": {"mode": "family_and_spacegroup"}}
+    with pytest.raises(ValueError, match="hierarchical_supcon"):
+        load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+
+
+def test_run_config_rejects_removed_hierarchical_tails_block(tmp_path):
+    d = _single_run_dict()
+    d["tails"] = {"hierarchical": {"head_hidden_dim": 8}}
+    with pytest.raises(ValueError, match="tails.hierarchical was removed"):
+        load_run_config(_write_yaml(tmp_path / "run.yaml", d))
 
 
 # --- GraphConfig / model_kind == "cgcnn" ------------------------------------
@@ -1165,7 +1170,7 @@ def test_run_config_to_dict_roundtrips_graph_block(tmp_path):
 
 def test_run_config_to_dict_always_includes_graph_block(tmp_path):
     # Unlike fetch/pyxtal/augmentation/tails, "graph" is always serialized
-    # (same treatment as "vae"/"soap"), even for non-cgcnn model kinds.
+    # (same treatment as "soap"), even for non-cgcnn model kinds.
     config_path = _write_yaml(tmp_path / "run.yaml", _single_run_dict())
     config = load_run_config(config_path)
     saved = run_config_to_dict(config)
@@ -1181,12 +1186,12 @@ def test_expand_sweep_can_vary_graph_n_conv(tmp_path):
     assert all(r.model_kind == "cgcnn" for r in runs)
 
 
-# --- MaceConfig / model_kind == "mace" ---------------------------------------
+# --- MaceConfig / model_kind == "supcon_mace" ---------------------------------------
 
 
 def _mace_run_dict():
     d = _single_run_dict()
-    d["model"] = "mace"
+    d["model"] = "supcon_mace"
     d["mace"] = {"checkpoint_path": "/fake/ckpt", "r_max": 5.0}
     return d
 
@@ -1219,16 +1224,16 @@ def test_mace_config_rejects_invalid_values(kwargs):
         MaceConfig(**kwargs)
 
 
-def test_run_config_parses_model_kind_mace(tmp_path):
+def test_run_config_parses_model_kind_supcon_mace(tmp_path):
     config = load_run_config(_write_yaml(tmp_path / "run.yaml", _mace_run_dict()))
-    assert config.model_kind == "mace"
+    assert config.model_kind == "supcon_mace"
     assert config.mace.checkpoint_path == "/fake/ckpt"
     assert config.mace.r_max == 5.0
 
 
-def test_run_config_mace_requires_checkpoint_path(tmp_path):
+def test_run_config_supcon_mace_requires_checkpoint_path(tmp_path):
     d = _single_run_dict()
-    d["model"] = "mace"
+    d["model"] = "supcon_mace"
     with pytest.raises(ValueError, match="requires mace.checkpoint_path"):
         load_run_config(_write_yaml(tmp_path / "run.yaml", d))
 
@@ -1246,7 +1251,7 @@ def test_run_config_to_dict_roundtrips_mace_block(tmp_path):
 
 def test_run_config_to_dict_always_includes_mace_block(tmp_path):
     # Unlike fetch/pyxtal/augmentation/tails, "mace" is always serialized
-    # (same treatment as "vae"/"soap"/"graph"), even for non-mace model kinds.
+    # (same treatment as "soap"/"graph"), even for non-supcon_mace model kinds.
     config_path = _write_yaml(tmp_path / "run.yaml", _single_run_dict())
     config = load_run_config(config_path)
     saved = run_config_to_dict(config)
@@ -1259,4 +1264,4 @@ def test_expand_sweep_can_vary_mace_r_max(tmp_path):
     sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
     runs = expand_sweep(sweep)
     assert {r.mace.r_max for r in runs} == {4.0, 5.0, 6.0}
-    assert all(r.model_kind == "mace" for r in runs)
+    assert all(r.model_kind == "supcon_mace" for r in runs)

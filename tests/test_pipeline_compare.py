@@ -34,11 +34,11 @@ from dim_red.pipeline.compare import (
 )
 from dim_red.pipeline.config import (
     AuxHeadsConfig,
+    EncoderConfig,
     FetchConfig,
     RunConfig,
     SoapConfig,
     TrainSettings,
-    VAEArchConfig,
     run_config_to_dict,
 )
 
@@ -98,7 +98,7 @@ def _write_run(
     config = RunConfig(
         fetch=FetchConfig(crystal_systems=crystal_systems, limit_per_system=8),
         soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        vae=VAEArchConfig(encoder_hidden_dim=hidden_dim, latent_dim=latent_dim),
+        encoder=EncoderConfig(encoder_hidden_dim=hidden_dim, latent_dim=latent_dim),
         train=TrainSettings(
             epochs=3, batch_size=4, val_ratio=0.25, learning_rate=learning_rate
         ),
@@ -157,7 +157,7 @@ def test_discover_runs_raises_when_empty(tmp_path):
 
 def test_varying_hyperparams_detects_hidden_dim_only(sweep_dir):
     runs = load_runs(sweep_dir)
-    assert varying_hyperparams(runs) == ["vae.encoder_hidden_dim"]
+    assert varying_hyperparams(runs) == ["encoder.encoder_hidden_dim"]
 
 
 def test_varying_hyperparams_is_not_limited_to_named_axes(tmp_path):
@@ -206,7 +206,7 @@ def test_run_labels_abbreviates_crystal_systems_and_stays_short(tmp_path):
 
 
 def test_abbreviate_hyperparam_key_uses_short_forms():
-    assert _abbreviate_hyperparam_key("vae.encoder_hidden_dim") == "hd"
+    assert _abbreviate_hyperparam_key("encoder.encoder_hidden_dim") == "hd"
     assert _abbreviate_hyperparam_key("fetch.crystal_systems") == "cs"
     assert _abbreviate_hyperparam_key("aux_heads.lambda_family") == "lf"
     assert _abbreviate_hyperparam_key("train.learning_rate") == "lr"
@@ -311,7 +311,7 @@ def test_final_metric_groups_groups_multiple_runs_per_value(tmp_path):
 def test_plot_final_metric_vs_hyperparam_writes_file(sweep_dir, tmp_path):
     runs = load_runs(sweep_dir)
     out = tmp_path / "final_vs_hd.png"
-    plot_final_metric_vs_hyperparam(runs, "vae.encoder_hidden_dim", save_path=out)
+    plot_final_metric_vs_hyperparam(runs, "encoder.encoder_hidden_dim", save_path=out)
     assert out.exists()
 
 
@@ -319,12 +319,12 @@ def test_plot_final_metric_vs_hyperparam_writes_csv(sweep_dir, tmp_path):
     runs = load_runs(sweep_dir)
     out = tmp_path / "final_vs_hd.csv"
     plot_final_metric_vs_hyperparam(
-        runs, "vae.encoder_hidden_dim", metric="val_loss", csv_path=out
+        runs, "encoder.encoder_hidden_dim", metric="val_loss", csv_path=out
     )
     assert out.exists()
     with open(out, newline="") as f:
         rows = list(csv.DictReader(f))
-    assert set(rows[0]) == {"run", "vae.encoder_hidden_dim", "val_loss"}
+    assert set(rows[0]) == {"run", "encoder.encoder_hidden_dim", "val_loss"}
     assert len(rows) == len(runs)
 
 
@@ -398,7 +398,10 @@ def test_latent_grid_axes_picks_two_largest_cardinality_axes(tmp_path):
         for cs in (["cubic"], ["hexagonal"]):
             _write_run(d / f"hd-{hd[0]}_cs-{cs[0]}", hd, cs, 1.0)
     runs = load_runs(d)
-    assert latent_grid_axes(runs) == ("vae.encoder_hidden_dim", "fetch.crystal_systems")
+    assert latent_grid_axes(runs) == (
+        "encoder.encoder_hidden_dim",
+        "fetch.crystal_systems",
+    )
 
 
 def test_plot_latent_space_grid_lays_out_two_axes_as_rows_and_cols(tmp_path):
@@ -407,7 +410,10 @@ def test_plot_latent_space_grid_lays_out_two_axes_as_rows_and_cols(tmp_path):
         for lr in (0.01, 0.001, 0.0001):
             _write_run(d / f"hd-{hd[0]}_lr-{lr}", hd, ["cubic"], 1.0, learning_rate=lr)
     runs = load_runs(d)
-    assert latent_grid_axes(runs) == ("train.learning_rate", "vae.encoder_hidden_dim")
+    assert latent_grid_axes(runs) == (
+        "train.learning_rate",
+        "encoder.encoder_hidden_dim",
+    )
     out = tmp_path / "latent_grid.png"
     plot_latent_space_grid(runs, save_path=out)
     assert out.exists()
@@ -647,8 +653,12 @@ def test_generate_comparison_report_writes_expected_files(sweep_dir):
         "train_kl",
         "val_kl",
     ]:
-        assert (report_dir / f"final_{metric}_vs_vae_encoder_hidden_dim.png").exists()
-        assert (report_dir / f"final_{metric}_vs_vae_encoder_hidden_dim.csv").exists()
+        assert (
+            report_dir / f"final_{metric}_vs_encoder_encoder_hidden_dim.png"
+        ).exists()
+        assert (
+            report_dir / f"final_{metric}_vs_encoder_encoder_hidden_dim.csv"
+        ).exists()
     assert (report_dir / "spacegroup_histogram.png").exists()
     assert (report_dir / "spacegroup_histogram.csv").exists()
     assert (report_dir / "latent_space_grid.png").exists()
@@ -677,19 +687,22 @@ def test_generate_comparison_report_includes_aux_ce_metrics_when_active(tmp_path
     report_dir = generate_comparison_report(d)
 
     for metric in ["train_family_ce", "val_family_ce"]:
-        assert (report_dir / f"final_{metric}_vs_vae_encoder_hidden_dim.png").exists()
+        assert (
+            report_dir / f"final_{metric}_vs_encoder_encoder_hidden_dim.png"
+        ).exists()
     assert (report_dir / "aux_heads_accuracy.png").exists()
 
 
 def test_available_loss_metrics_orders_known_metrics_first(sweep_dir):
     runs = load_runs(sweep_dir)
+    # Known metrics first; any other column sorted after them.
     assert available_loss_metrics(runs) == [
         "train_loss",
         "val_loss",
-        "train_recon",
-        "val_recon",
         "train_kl",
+        "train_recon",
         "val_kl",
+        "val_recon",
     ]
 
 
@@ -700,12 +713,12 @@ def test_available_loss_metrics_includes_aux_ce_when_present(tmp_path):
     assert available_loss_metrics(runs) == [
         "train_loss",
         "val_loss",
-        "train_recon",
-        "val_recon",
-        "train_kl",
-        "val_kl",
         "train_family_ce",
         "val_family_ce",
+        "train_kl",
+        "train_recon",
+        "val_kl",
+        "val_recon",
     ]
 
 
@@ -718,10 +731,10 @@ def test_available_loss_metrics_intersects_across_runs_with_different_columns(tm
     assert available_loss_metrics(runs) == [
         "train_loss",
         "val_loss",
-        "train_recon",
-        "val_recon",
         "train_kl",
+        "train_recon",
         "val_kl",
+        "val_recon",
     ]
 
 

@@ -12,8 +12,6 @@ __all__ = [
     "compute_soap",
     "fetch_structures_by_crystal_system",
     "analysis",
-    "vae",
-    "autoencoder",
     "supcon",
     "cgcnn",
     "mace",
@@ -35,10 +33,6 @@ def __getattr__(name: str):
         return import_module("dim_red.generate")
     if name == "analysis":
         return import_module("dim_red.analysis")
-    if name == "vae":
-        return import_module("dim_red.vae")
-    if name == "autoencoder":
-        return import_module("dim_red.autoencoder")
     if name == "supcon":
         return import_module("dim_red.supcon")
     if name == "cgcnn":

@@ -26,7 +26,6 @@ from dim_red.pipeline.config import (
     SupConConfig,
     SweepConfig,
     TrainSettings,
-    VAEArchConfig,
     expand_sweep,
     flatten_config_dict,
     run_config_to_dict,
@@ -92,17 +91,15 @@ def _next_sweep_dir(output_dir: Path) -> Path:
 
 def _default_flat_config() -> dict:
     """Flattened ``{dotted_path: default_value}`` for every ``RunConfig`` leaf
-    that actually has a static default. ``vae.encoder_hidden_dim``/
-    ``vae.latent_dim`` are required (no default), so they're left out here
-    -- meaning they always show up as non-default below -- while
-    ``vae.decoder_hidden_dim``/``vae.mirror`` (which do have defaults) are
-    still included.
+    that actually has a static default. ``encoder.encoder_hidden_dim``/
+    ``encoder.latent_dim`` are required (no default), so they're left out
+    here -- meaning they always show up as non-default below.
     """
     defaults = {
         "seed": 42,
         "output_dir": "runs",
         "name": None,
-        "model": "vae",
+        "model": "supcon",
         "data_source": "fetch",
     }
     for prefix, cls in (
@@ -117,12 +114,6 @@ def _default_flat_config() -> dict:
     ):
         defaults.update(flatten_config_dict({prefix: dataclasses.asdict(cls())}))
 
-    vae_defaults = dataclasses.asdict(
-        VAEArchConfig(encoder_hidden_dim=[], latent_dim=0)
-    )
-    del vae_defaults["encoder_hidden_dim"]
-    del vae_defaults["latent_dim"]
-    defaults.update(flatten_config_dict({"vae": vae_defaults}))
     return defaults
 
 
@@ -233,7 +224,7 @@ def run_sweep(
             len(run_configs),
             config.data_source,
             data_scope,
-            config.vae.encoder_hidden_dim,
+            config.encoder.encoder_hidden_dim,
         )
         # Only the first run seen for a given dataset (crystal systems/pyxtal
         # config + SOAP settings + augmentation) gets its SOAP features saved

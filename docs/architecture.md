@@ -1,8 +1,12 @@
-# Architettura encoder/decoder condivisa
+# Architettura dell'encoder
 
-Blocco YAML `vae:`, usato da {bdg-primary}`vae` {bdg-info}`autoencoder` {bdg-warning}`supcon` (che ignora `decoder_hidden_dim`/`mirror`, non avendo decoder) e in parte da {bdg-success}`cgcnn` (solo `latent_dim`). Mantenuto con questo nome per compatibilità con sweep esistenti anche quando il `model_kind` non è `"vae"`.
+Blocco YAML `encoder:`, usato da {bdg-warning}`supcon` e {bdg-secondary}`supcon_mace` per dimensionare l'MLP del corpo, e da {bdg-success}`cgcnn` solo per `latent_dim` (la sua rete a grafo è dimensionata da `graph:`).
+
+```{note}
+Questo blocco si chiamava `vae:` quando esistevano i modelli VAE e autoencoder (rimossi). Il vecchio nome `vae:` viene ancora letto — e unito sotto `encoder:` — così le config e i `config.yaml` salvati dalle run precedenti continuano a caricarsi; le chiavi `decoder_hidden_dim` e `mirror` sono ignorate.
+```
 
 ```{eval-rst}
-.. autoclass:: dim_red.pipeline.config.VAEArchConfig
+.. autoclass:: dim_red.pipeline.config.EncoderConfig
 
 ```

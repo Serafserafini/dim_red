@@ -32,7 +32,6 @@ base:
     l_max: 6
     sigma: 0.5
     element_agnostic: true
-    normalize_distances: false
     species: null
 
   augmentation:
@@ -46,10 +45,9 @@ base:
     supercell_radius: 4.0
     seed: 42
 
-  vae:
+  encoder:
     encoder_hidden_dim: [128] # overridden by the grid below
     latent_dim: 8
-    mirror: true
 
   supcon:
     mode: family_only
@@ -65,12 +63,10 @@ base:
 
   tails:
     classification:
-      mode: family_only
       head_hidden_dim: 16
     train:
       epochs: 40
       batch_size: 32
-      optimizer: adam
       device: gpu
       early_stopping:
         enabled: true
@@ -82,7 +78,6 @@ base:
     epochs: 200 # was 100 in round 3
     batch_size: 128 # was 32 in round 3
     learning_rate: 0.001
-    optimizer: adam
     val_ratio: 0.2
     device: gpu
     early_stopping:
@@ -94,7 +89,7 @@ base:
 # 2 encoder shapes x 2 tau values x 2 distances x 2 batching strategies =
 # 16 runs -- same grid as round 3, only the training budget changed.
 grid:
-  vae.encoder_hidden_dim:
+  encoder.encoder_hidden_dim:
     - [64]
     - [128, 64]
   supcon.tau: [0.05, 0.1]

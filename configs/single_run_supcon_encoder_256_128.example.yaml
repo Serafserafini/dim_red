@@ -1,5 +1,5 @@
 # Round 15 follow-up: identical to round 7's reference body except
-# vae.encoder_hidden_dim: [256, 128] (was [128, 64]) -- a wider encoder
+# encoder.encoder_hidden_dim: [256, 128] (was [128, 64]) -- a wider encoder
 # trunk, latent_dim (8) and supcon.projection_dim (128) left at round 7's
 # own values so this isolates the encoder-width question alone, not
 # conflated with the latent_dim/projection_dim findings from the rest of
@@ -23,19 +23,16 @@ soap:
   l_max: 6
   sigma: 0.5
   element_agnostic: true
-  normalize_distances: false
   species: null
 
-vae:
+encoder:
   encoder_hidden_dim: [256, 128]
   latent_dim: 8
-  mirror: true
 
 train:
   epochs: 200
   batch_size: 128
   learning_rate: 0.001
-  optimizer: adam
   val_ratio: 0.2
   device: gpu
   early_stopping:
@@ -81,7 +78,6 @@ tails:
     epochs: 40
     batch_size: 32
     learning_rate: 0.001
-    optimizer: adam
     device: gpu
     early_stopping:
       enabled: true
@@ -89,6 +85,4 @@ tails:
       min_delta: 0.0001
       restore_best_weights: true
   classification:
-    mode: family_only
-    lambda_family: 1.0
     head_hidden_dim: 16
