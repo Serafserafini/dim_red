@@ -1,6 +1,6 @@
 # Refactor B — Stack unico per famiglia ed esperti
 
-Data: 2026-10-06. Stato: **bozza da rivedere** (nessuna modifica al codice; le decisioni D1–D5 sono da confermare).
+Data: 2026-10-06. Stato: **decisioni D1–D5 prese (2026-10-06), specifica da rivedere** (nessuna modifica al codice).
 Origine: `REFACTOR_TODO.md` §1, §2. Segue il refactor A (completato, `refactor/A-dedup-design.md`).
 
 ## Obiettivo (deciso dall'utente)
@@ -55,7 +55,7 @@ def train_stack(...)  # = train_body + encode + train_heads
 
 ### B2. Una sola config per lo stack
 
-`StackConfig` (specchio in `pipeline/config.py`, come `PyxtalConfig`/`AugmentationConfig`) è l'unica definizione dei campi. Il livello famiglia la costruisce da `encoder:`, `supcon:`, `tails.classification`, `tails.visualization`; gli esperti la leggono da un blocco `expert:` dentro `hierarchical_supcon:`. I default divergenti si riconciliano (quasi tutti già coincidono: corpo `tau 0.05`/`cosine`, viz `tau 0.1`/`euclidean`; `classifier_hidden_dim` 16 contro 32 resta distinto per livello perché i default attuali sono tarati su `best_combo`, vedi D3).
+`StackConfig` (specchio in `pipeline/config.py`, come `PyxtalConfig`/`AugmentationConfig`) è l'unica definizione dei campi. Il livello famiglia la costruisce da `encoder:`, `supcon:`, `tails.classification`, `tails.visualization`; gli esperti la leggono da un blocco `expert:` dentro `hierarchical_supcon:`. I default divergenti si riconciliano (quasi tutti già coincidono: corpo `tau 0.05`/`cosine`, viz `tau 0.1`/`euclidean`; `classifier_hidden_dim` 16 al livello famiglia contro 32 negli esperti resta distinto: sono i default attuali, tarati su `best_combo`, e non devono cambiare i risultati).
 
 ### B3. Layout degli artefatti e compatibilità (vedi D1, D2)
 
@@ -65,17 +65,13 @@ Il codice di lettura (benchmark, compare, inference, script, notebook) dipende d
 
 `pipeline/inference.py` guadagna `predict_hierarchical_supcon(run_dir, atoms, hierarchical_subdir)`, costruita sulle stesse funzioni di caricamento dello stack, e gli script `examples/evaluate_holdout_pyxtal.py` e `examples/evaluate_ns_trajectories.py` e il notebook delle traiettorie la usano al posto del codice scritto a mano. Con un test di confronto: stesso risultato di oggi sulle strutture di test.
 
-### B5. (opzionale, dopo B1–B4) Un solo ciclo di training
+## Decisioni (prese dall'utente, 2026-10-06)
 
-`training_first_phase` (~390 righe) e `train_visualization_tail` (~330 righe) ripetono quasi riga per riga la validazione degli argomenti, il batching random/balanced, il ciclo per epoche, l'early stopping e la history; `train_classification_tail` ha lo stesso ciclo con un'altra loss. Parametrizzare per "cosa è allenabile e quale loss": un solo `_run_epochs(...)`. È la parte a più alto rischio numerico (stesso ordine di batch, stessi RNG) e **non è necessaria** agli obiettivi B1–B4: va fatta solo con i test di equivalenza di B1 già in piedi.
-
-## Decisioni da confermare
-
-- **D1 — Layout degli artefatti.** (a, raccomandata) Tenere i percorsi e i nomi attuali, scritti da una sola funzione parametrizzata. (b) Uniformare ora (`body_params.msgpack`, `classifier_params.msgpack`, …): serve un lettore di compatibilità per le run esistenti e va aggiornato ogni consumatore.
-- **D2 — YAML degli esperti.** (a, raccomandata) Nuovo blocco annidato `hierarchical_supcon.expert:` con i campi di `StackConfig`; le chiavi `sg_*` già in uso (le config tracciate in `configs/` che le usano e i `tail_config.yaml` salvati nelle run) restano accettate e vengono tradotte, con un solo warning di deprecazione. (b) Rompere le vecchie chiavi.
-- **D3 — Stadio 1 di `hierarchical_supcon`.** Oggi riallena un proprio classificatore di famiglia (hidden 32) invece di riusare quello del livello famiglia (`tails/classification`, hidden 16). (a, raccomandata) Lasciarlo com'è in questo refactor: riusare quello esistente cambierebbe i numeri e obbligherebbe ad avere sempre un tail di classificazione. (b) Riusarlo (più pulito, ma cambia i risultati e le dipendenze tra tail).
-- **D4 — Dove vive lo stack.** (a, raccomandata) `src/dim_red/supcon/stack.py`, solo array/modelli; la pipeline si occupa di I/O, plot e log. (b) Dentro `pipeline/`.
-- **D5 — B5 (ciclo di training unico).** (a, raccomandata) Fuori da B: solo se serve, con una specifica a parte. (b) Dentro B, come ultimo passo.
+- **D1 — Layout degli artefatti: si tiene quello attuale.** Stessi percorsi e nomi dei file (`sg_body_params.msgpack`, `classifier_tail_params.msgpack`, …), scritti da una sola funzione parametrizzata; il layout si uniforma dopo, in un punto solo. Benchmark, compare, inference, script e notebook non cambiano.
+- **D2 — YAML degli esperti: nuovo blocco annidato `hierarchical_supcon.expert:`** con i campi di `StackConfig`; le chiavi `sg_*` delle config tracciate e dei `tail_config.yaml` già salvati restano accettate e vengono tradotte, con un solo warning di deprecazione.
+- **D3 — Stadio 1 di `hierarchical_supcon`: resta com'è.** Continua ad allenare il proprio classificatore di famiglia (`head_hidden_dim`, default 32): nessun cambio di risultati. Riusare il classificatore del livello famiglia è un'idea per il futuro, **non** parte di B.
+- **D4 — Dove vive lo stack: `src/dim_red/supcon/stack.py`**, solo array e modelli; la pipeline si occupa di I/O, plot e log.
+- **D5 — Il ciclo di training unico (le tre routine `training_first_phase`, `train_visualization_tail`, `train_classification_tail`) è fuori da B.** Resta una pulizia opzionale per dopo, con una specifica a parte e solo dopo i test di equivalenza di B.
 
 ## Verifica
 
@@ -92,7 +88,7 @@ Il codice di lettura (benchmark, compare, inference, script, notebook) dipende d
 
 ## Fuori perimetro
 
-`cgcnn` nello stack uniforme (refactor C), riorganizzazione dei file grandi e `slurm/_common.sh` (D), rinomina dei file di layout (se D1 = a), ciclo di training unico (B5, se D5 = a).
+`cgcnn` nello stack uniforme (refactor C), riorganizzazione dei file grandi e `slurm/_common.sh` (D), rinomina dei file di layout (D1), riuso del classificatore di famiglia nello stadio 1 (D3), ciclo di training unico (D5).
 
 ## Ordine di lavoro proposto
 
