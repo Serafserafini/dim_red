@@ -148,6 +148,13 @@ def log_prior_mass_weights(n_dead: int, n_live: int, n_cull: int) -> np.ndarray:
 # --------------------------------------------------------------------------
 
 
+def _load_classification_tail(tail: ClassificationTail, path: Path):
+    """Load a saved ``ClassificationTail`` (also accepts the legacy
+    ``{"family_head": ...}`` checkpoint layout)."""
+    tail.load_params_bytes(Path(path).read_bytes())
+    return tail
+
+
 def _load_params(module_wrapper, path: Path):
     with open(path, "rb") as f:
         module_wrapper.params = serialization.from_bytes(
@@ -159,18 +166,18 @@ def _load_params(module_wrapper, path: Path):
 def load_models(run_dir: Path, sg_viz_tune_dir: Path):
     """Everything needed to go from raw SOAP to every saved output."""
     loaded = load_trained_run(run_dir)
-    latent_dim = loaded.config.vae.latent_dim
+    latent_dim = loaded.config.encoder.latent_dim
     hier_dir = run_dir / "tails" / HIERARCHICAL_SUBDIR
     with open(hier_dir / "tail_config.yaml") as f:
         hs = yaml.safe_load(f)["hierarchical_supcon"]
     with np.load(hier_dir / "tail_predictions.npz", allow_pickle=True) as npz:
         family_classes = [str(c) for c in npz["family_classes"].tolist()]
 
-    family_tail = _load_params(
+    family_tail = _load_classification_tail(
         ClassificationTail(
             input_dim=latent_dim,
             hidden_dim=hs["head_hidden_dim"],
-            n_family_classes=len(family_classes),
+            n_classes=len(family_classes),
         ),
         hier_dir / "family" / "tail_params.msgpack",
     )
@@ -206,11 +213,11 @@ def load_models(run_dir: Path, sg_viz_tune_dir: Path):
             ),
             expert_dir / "sg_body_params.msgpack",
         )
-        classifier = _load_params(
+        classifier = _load_classification_tail(
             ClassificationTail(
                 input_dim=hs["sg_latent_dim"],
                 hidden_dim=hs["sg_classifier_hidden_dim"],
-                n_family_classes=len(local_classes),
+                n_classes=len(local_classes),
             ),
             expert_dir / "classifier_tail_params.msgpack",
         )
@@ -266,7 +273,7 @@ def evaluate_chunk(frames, loaded, family_tail, family_viz, experts) -> dict:
 
     X_std = apply_standardization(soap_mean, loaded.feature_mean, loaded.feature_std)
     r_main = np.asarray(loaded.model.encode(X_std))
-    family_logits = np.asarray(family_tail.classify_family(r_main))
+    family_logits = np.asarray(family_tail.classify(r_main))
     out = dict(
         soap_mean=soap_mean.astype(np.float32),
         soap_atom_msd=msd,
@@ -281,7 +288,7 @@ def evaluate_chunk(frames, loaded, family_tail, family_viz, experts) -> dict:
         r_sg = np.asarray(ex["body"].encode(X_std))
         out[f"r_sg__{family}"] = r_sg.astype(np.float32)
         out[f"sg_logits__{family}"] = np.asarray(
-            ex["classifier"].classify_family(r_sg)
+            ex["classifier"].classify(r_sg)
         ).astype(np.float32)
         out[f"z_sg__{family}"] = np.asarray(ex["viz"].project(r_sg)).astype(np.float32)
     return out
