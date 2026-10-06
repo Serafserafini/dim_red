@@ -3,14 +3,13 @@ Principal Component Analysis (PCA) module.
 """
 
 from typing import Optional
+
 import numpy as np
 from sklearn.decomposition import PCA as SklearnPCA
 
 
-
 class PCA:
-    """Principal Component Analysis (PCA) for dimensionality reduction.
-    """
+    """Principal Component Analysis (PCA) for dimensionality reduction."""
 
     def __init__(self, n_components: int):
         """Initializes the PCA estimator.
@@ -41,9 +40,11 @@ class PCA:
             ValueError: If n_components is greater than the number of features in X.
         """
         X_arr = np.asarray(X)
-        n_samples, n_features = X_arr.shape
+        n_features = X_arr.shape[1]
         if self.n_components > n_features:
-            raise ValueError(f"n_components must be <= number of features ({n_features})")
+            raise ValueError(
+                f"n_components must be <= number of features ({n_features})"
+            )
 
         self._pca = SklearnPCA(n_components=self.n_components)
         self._pca.fit(X_arr)

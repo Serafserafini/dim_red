@@ -1,9 +1,9 @@
 """
 Data augmentation for diversifying a database of crystal structures.
 
-Meant to sit immediately after ``dim_red.fetch.fetch_structures_by_crystal_system``:
-takes the fetched ``Atoms`` objects and produces additional, slightly perturbed
-copies of each one, either by applying a small random positional jitter to the
+Meant to sit right after structure generation/fetching
+(``dim_red.generate`` / ``dim_red.fetch``): takes the ``Atoms`` objects and
+produces additional, slightly perturbed copies of each one, either by applying a small random positional jitter to the
 atoms or by randomly deleting atoms (vacancies). Both mechanisms are
 independently configurable (probability of being applied, and the
 magnitude/probability of the perturbation itself) via ``AugmentationConfig``,
@@ -16,8 +16,6 @@ from typing import List, Optional, Sequence
 
 import numpy as np
 from ase import Atoms
-
-from dim_red.fetch import fetch_structures_by_crystal_system
 
 
 @dataclass
@@ -40,24 +38,7 @@ class AugmentationConfig:
         jitter_probability: Probability, per augmented copy, that positional
             jitter is applied to it at all.
         jitter_std: Standard deviation of the Gaussian noise added to atomic
-            positions when jitter is applied -- in Angstroms by default, or
-            as a fraction of the structure's own nearest-neighbor distance
-            when ``jitter_std_relative`` is True (see that field).
-        jitter_std_relative: If True, ``jitter_std`` is interpreted as a
-            fraction of each structure's own natural length scale (its
-            minimum pairwise atomic distance, computed before jitter/vacancy
-            is applied -- the same statistic
-            ``dim_red.soap._normalize_atoms_distances`` uses) rather than an
-            absolute Angstrom value. ``False`` (default) keeps the original
-            absolute-Angstrom behavior. Matters because a single fixed
-            absolute ``jitter_std`` is a wildly different *relative*
-            perturbation across structures of different natural scale (e.g.
-            a compact structure with ~0.6 A spacing vs. a looser one with
-            ~4 A spacing) -- this makes the perturbation magnitude
-            consistent, in proportion to each structure's own bond lengths,
-            regardless of its absolute scale. A single-atom structure (no
-            pairwise distance to measure) falls back to treating
-            ``jitter_std`` as absolute for that one structure.
+            positions when jitter is applied, in Angstroms.
         vacancy_probability: Probability, per augmented copy, that vacancy
             removal is applied to it at all.
         vacancy_atom_probability: Probability that any individual atom is
@@ -83,7 +64,6 @@ class AugmentationConfig:
     keep_original: bool = True
     jitter_probability: float = 0.5
     jitter_std: float = 0.05
-    jitter_std_relative: bool = False
     vacancy_probability: float = 0.0
     vacancy_atom_probability: float = 0.05
     max_vacancies: Optional[int] = None
@@ -148,25 +128,6 @@ def make_supercell_for_radius(atoms: Atoms, radius: float) -> Atoms:
             repeats.append(max(1, int(np.ceil(ratio - 1e-9))))
 
     return atoms.repeat(tuple(repeats))
-
-
-def _natural_length_scale(atoms: Atoms) -> float:
-    """Returns ``atoms``'s minimum pairwise distance between distinct atoms
-    (Angstroms) -- the same statistic ``dim_red.soap._normalize_atoms_distances``
-    uses to define a structure's own natural length scale, reused here (not
-    imported, to avoid pulling ``dim_red.soap``'s ``dscribe`` dependency into
-    this module) for ``AugmentationConfig.jitter_std_relative``. Returns 1.0
-    for a structure with fewer than 2 atoms or with all atoms coincident (no
-    meaningful pairwise distance to measure) -- a neutral fallback under
-    which a relative ``jitter_std`` behaves as if it were absolute for that
-    one structure.
-    """
-    if len(atoms) <= 1:
-        return 1.0
-    distances = atoms.get_all_distances(mic=True)
-    np.fill_diagonal(distances, np.inf)
-    min_dist = np.min(distances)
-    return float(min_dist) if min_dist > 1e-6 else 1.0
 
 
 def jitter_positions(atoms: Atoms, std: float, rng: np.random.Generator) -> Atoms:
@@ -239,10 +200,7 @@ def _augment_once(
     applied: List[str] = []
 
     if apply_jitter:
-        effective_jitter_std = config.jitter_std
-        if config.jitter_std_relative:
-            effective_jitter_std *= _natural_length_scale(atoms)
-        augmented = jitter_positions(augmented, effective_jitter_std, rng)
+        augmented = jitter_positions(augmented, config.jitter_std, rng)
         applied.append("jitter")
 
     if apply_vacancy:
@@ -297,19 +255,3 @@ def augment_structures(
         for _ in range(config.n_augmented):
             result.append(_augment_once(base, config, rng))
     return result
-
-
-def fetch_and_augment_structures(
-    crystal_system,
-    augmentation_config: AugmentationConfig,
-    api_key: Optional[str] = None,
-    limit: int = 10,
-) -> List[Atoms]:
-    """Fetches structures from Materials Project and immediately augments
-    them, i.e. ``augment_structures`` chained right after
-    ``fetch_structures_by_crystal_system``.
-    """
-    atoms_list = fetch_structures_by_crystal_system(
-        crystal_system=crystal_system, api_key=api_key, limit=limit
-    )
-    return augment_structures(atoms_list, augmentation_config)

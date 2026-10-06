@@ -2,18 +2,13 @@
 Unit tests for structure data augmentation (positional jitter and vacancies).
 """
 
-from unittest.mock import MagicMock, patch
-
 import numpy as np
 import pytest
 from ase import Atoms
-from pymatgen.core.lattice import Lattice
-from pymatgen.core.structure import Structure
 
 from dim_red.augmentation import (
     AugmentationConfig,
     augment_structures,
-    fetch_and_augment_structures,
     jitter_positions,
     make_supercell_for_radius,
     remove_random_atoms,
@@ -51,40 +46,9 @@ def test_jitter_positions_perturbs_by_expected_magnitude():
     assert 0.05 < np.std(diffs) < 0.2
 
 
-def test_augment_structures_jitter_std_relative_scales_with_spacing():
-    # Two structures with the same shape but a 4x difference in
-    # nearest-neighbor spacing (natural length scale) -- with
-    # jitter_std_relative=True, the same jitter_std should produce noise
-    # proportional to each structure's own spacing, not a fixed absolute
-    # magnitude.
-    compact = _make_atoms(n=300, spacing=1.0, material_id="compact")
-    loose = _make_atoms(n=300, spacing=4.0, material_id="loose")
-    config = AugmentationConfig(
-        n_augmented=1,
-        keep_original=False,
-        jitter_probability=1.0,
-        jitter_std=0.1,
-        jitter_std_relative=True,
-        seed=7,
-    )
-
-    compact_result = augment_structures([compact], config)[0]
-    loose_result = augment_structures([loose], config)[0]
-
-    compact_noise_std = np.std(compact_result.get_positions() - compact.get_positions())
-    loose_noise_std = np.std(loose_result.get_positions() - loose.get_positions())
-
-    # Expected: ~0.1 * spacing for each (nearest-neighbor distance == spacing here).
-    assert 0.05 < compact_noise_std < 0.2
-    assert 0.2 < loose_noise_std < 0.8
-    # The ratio between the two should track the 4x spacing ratio, not be ~1x
-    # (which is what a fixed absolute jitter_std would give instead).
-    assert 2.0 < (loose_noise_std / compact_noise_std) < 8.0
-
-
-def test_augment_structures_jitter_std_relative_false_is_absolute_by_default():
-    # Default (jitter_std_relative=False): the same jitter_std produces the
-    # same absolute noise magnitude regardless of structure spacing.
+def test_augment_structures_jitter_std_is_absolute_regardless_of_spacing():
+    # The same jitter_std produces the same absolute noise magnitude
+    # regardless of structure spacing.
     compact = _make_atoms(n=300, spacing=1.0, material_id="compact")
     loose = _make_atoms(n=300, spacing=4.0, material_id="loose")
     config = AugmentationConfig(
@@ -386,16 +350,3 @@ def test_augment_structures_does_not_mutate_input():
     )
     augment_structures(atoms_list, config)
     np.testing.assert_array_equal(atoms_list[0].get_positions(), original_positions)
-
-
-@patch("dim_red.augmentation.fetch_structures_by_crystal_system")
-def test_fetch_and_augment_structures_chains_fetch_and_augment(mock_fetch):
-    mock_fetch.return_value = [_make_atoms(n=10, material_id="mp-1")]
-    config = AugmentationConfig(n_augmented=2, keep_original=True, seed=5)
-
-    result = fetch_and_augment_structures(
-        "cubic", augmentation_config=config, api_key="dummy", limit=1
-    )
-
-    mock_fetch.assert_called_once_with(crystal_system="cubic", api_key="dummy", limit=1)
-    assert len(result) == 3

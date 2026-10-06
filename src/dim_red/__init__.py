@@ -5,12 +5,10 @@ dim_red - Dimensionality Reduction Package
 from importlib import import_module
 
 from dim_red.pca import PCA
-from dim_red.utils import standardize
 
 __version__ = "0.1.0"
 __all__ = [
     "PCA",
-    "standardize",
     "compute_soap",
     "fetch_structures_by_crystal_system",
     "analysis",

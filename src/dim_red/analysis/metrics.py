@@ -41,8 +41,8 @@ def embedding_quality_metrics(
     ``spacegroups`` (``dim_red.pipeline.single_run``), which is all this
     function needs.
 
-    Rows with a negative label (the sentinel ``dim_red.fetch`` uses for an
-    unknown Materials Project spacegroup) are excluded from that label set's
+    Rows with a negative label (the sentinel ``dim_red.pipeline.dataset_cache`` uses for
+    an unknown spacegroup) are excluded from that label set's
     metrics only, not from any other name's.
 
     For each name with >= 2 distinct valid labels and enough valid samples
@@ -71,8 +71,8 @@ def embedding_quality_metrics(
     for name, raw_labels in label_sets.items():
         raw_labels = np.asarray(raw_labels)
         # The negative-sentinel exclusion only applies to numeric label sets
-        # (e.g. spacegroup, where dim_red.fetch uses -1 for "unknown MP
-        # spacegroup"); a string label set (e.g. family, always known) has
+        # (e.g. spacegroup, where dim_red.pipeline.dataset_cache uses -1
+        # for "unknown spacegroup"); a string label set (e.g. family, always known) has
         # no such sentinel and `>= 0` isn't even a valid comparison for it.
         if np.issubdtype(raw_labels.dtype, np.number):
             valid = raw_labels >= 0

@@ -61,7 +61,24 @@ def _augmentation_payload(
     ``augmentation`` keeps producing the exact same cache key as before this
     feature existed.
     """
-    return dataclasses.asdict(augmentation) if augmentation is not None else None
+    if augmentation is None:
+        return None
+    payload = dataclasses.asdict(augmentation)
+    # ``jitter_std_relative`` no longer exists, but every cache built while it
+    # did hashed it (always False in practice) -- keep it in the payload so
+    # those existing, potentially multi-GB caches stay valid.
+    payload["jitter_std_relative"] = False
+    return payload
+
+
+def _soap_kwargs_payload(soap_kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Cache-key-safe SOAP kwargs: sorted, plus the removed
+    ``normalize_distances`` option pinned to its old default (``False``) so
+    caches built while that option existed keep the same hash.
+    """
+    payload = {k: soap_kwargs[k] for k in sorted(soap_kwargs)}
+    payload["normalize_distances"] = False
+    return payload
 
 
 def _cache_key(
@@ -76,7 +93,7 @@ def _cache_key(
     payload = {
         "crystal_systems": sorted(cs.lower() for cs in crystal_systems),
         "limit_per_system": limit_per_system,
-        "soap_kwargs": {k: soap_kwargs[k] for k in sorted(soap_kwargs)},
+        "soap_kwargs": _soap_kwargs_payload(soap_kwargs),
         "augmentation": _augmentation_payload(augmentation),
     }
     blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
@@ -97,7 +114,7 @@ def _pyxtal_cache_key(
     payload = {
         "pyxtal": dataclasses.asdict(pyxtal_config),
         "seed": seed,
-        "soap_kwargs": {k: soap_kwargs[k] for k in sorted(soap_kwargs)},
+        "soap_kwargs": _soap_kwargs_payload(soap_kwargs),
         "augmentation": _augmentation_payload(augmentation),
     }
     blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
@@ -440,7 +457,6 @@ def _resolve_augmentation(config: "RunConfig") -> Optional[AugmentationConfig]:
         keep_original=config.augmentation.keep_original,
         jitter_probability=config.augmentation.jitter_probability,
         jitter_std=config.augmentation.jitter_std,
-        jitter_std_relative=config.augmentation.jitter_std_relative,
         vacancy_probability=config.augmentation.vacancy_probability,
         vacancy_atom_probability=config.augmentation.vacancy_atom_probability,
         max_vacancies=config.augmentation.max_vacancies,

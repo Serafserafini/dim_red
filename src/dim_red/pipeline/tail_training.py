@@ -310,7 +310,6 @@ def _compute_native_soap_features(
         sigma=soap.sigma,
         element_agnostic=soap.element_agnostic,
         average="outer",
-        normalize_distances=soap.normalize_distances,
     )
     return apply_standardization(raw_features, feature_mean, feature_std)
 

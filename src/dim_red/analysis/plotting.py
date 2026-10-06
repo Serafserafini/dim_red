@@ -2,7 +2,6 @@
 Plotting utilities for visualization of reduced dimensional spaces.
 """
 
-import math
 from typing import Dict, List, Optional, Sequence
 
 import matplotlib.pyplot as plt
@@ -14,10 +13,10 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 def plot_reduced_space(
     X_reduced: np.ndarray,
     labels: List[str],
-    title: str = "PCA Projection of SOAP descriptors",
+    title: str = "2D Projection",
     save_path: Optional[str] = None,
-    xlabel: str = "Principal Component 1",
-    ylabel: str = "Principal Component 2",
+    xlabel: str = "Dimension 1",
+    ylabel: str = "Dimension 2",
     legend: bool = True,
 ) -> None:
     """Plots the 2D reduced dimensional space using Matplotlib.
@@ -260,23 +259,21 @@ def plot_spacegroup_histogram(
     xlabel: str = "Spacegroup number",
     ylabel: str = "Count",
 ) -> None:
-    """Bar chart of how many structures fall into each Materials Project
-    spacegroup number, one bar per spacegroup present in ``spacegroups``,
-    colored by the crystal family (crystal system) it belongs to.
+    """Bar chart of how many structures fall into each spacegroup number, one
+    bar per spacegroup present in ``spacegroups``, colored by the crystal
+    family it belongs to.
 
-    Meant to run right after fetching -- e.g. pairing
-    ``[a.info.get("spacegroup") for a in atoms_list]`` with the
-    crystal-system label each ``Atoms`` object was fetched under, the same
-    "family" grouping ``dim_red.analysis.workflow.run_pca_reduction`` and the
-    ``aux_heads`` family-classification head use elsewhere in this package --
-    but works equally from a previously saved dataset's ``spacegroups``/
-    ``labels`` arrays (e.g. ``dim_red.pipeline.dataset_cache``'s output).
+    Works from ``[a.info.get("spacegroup") for a in atoms_list]`` paired with
+    each structure's family label (e.g. ``a.info["family"]`` for structures
+    from ``dim_red.generate``), or from a previously saved dataset's
+    ``spacegroups``/``labels`` arrays (e.g. ``dim_red.pipeline.dataset_cache``'s
+    output).
 
     Args:
         spacegroups: Spacegroup number (1-230) per structure, same length and
             order as ``families``. ``None`` or a non-positive value (e.g. the
-            ``-1`` sentinel this package uses elsewhere for structures MP
-            returned no symmetry data for) is grouped into an "Unknown" bar.
+            ``-1`` sentinel this package uses for structures with no known
+            spacegroup) is grouped into an "Unknown" bar.
         families: Crystal family/system label per structure, same length and
             order as ``spacegroups``.
         title: The plot title.
@@ -715,64 +712,3 @@ def plot_reliability_diagram(
         plt.show()
 
     plt.close()
-
-
-def plot_image_grid(
-    image_paths: Sequence[str],
-    titles: Optional[Sequence[str]] = None,
-    save_path: Optional[str] = None,
-    ncols: int = 2,
-    suptitle: Optional[str] = None,
-) -> None:
-    """Composites a set of already-rendered PNGs into one grid figure.
-
-    Each image is embedded as-is (no recomputation) -- meant for stitching
-    together plots that are each already a complete, independently-styled
-    figure (e.g. ``plot_confusion_matrix`` output, which has its own
-    colorbar and tick-thinning/sizing logic per class count), where
-    re-deriving a shared-axes subplot version would mean duplicating that
-    logic. For plots built from raw per-point coordinates (e.g.
-    ``plot_reduced_space``), prefer a real ``plt.subplots`` grid over raw
-    data instead of stitching PNGs.
-
-    Args:
-        image_paths: Paths to the source PNGs, in the order they should
-            appear (row-major).
-        titles: Optional per-cell title, same length as ``image_paths``.
-        save_path: If provided, saves the grid to this filepath; otherwise
-            shown interactively/inline.
-        ncols: Number of columns in the grid.
-        suptitle: Optional figure-level title.
-    """
-    n = len(image_paths)
-    if n == 0:
-        raise ValueError("image_paths must be non-empty.")
-    if titles is not None and len(titles) != n:
-        raise ValueError("titles must be the same length as image_paths.")
-
-    nrows = math.ceil(n / ncols)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(7 * ncols, 6 * nrows))
-    axes = np.atleast_1d(axes).flatten()
-
-    for i, path in enumerate(image_paths):
-        img = plt.imread(path)
-        axes[i].imshow(img)
-        axes[i].axis("off")
-        if titles is not None:
-            axes[i].set_title(titles[i], fontsize=12, fontweight="bold")
-
-    for ax in axes[n:]:
-        ax.axis("off")
-
-    if suptitle:
-        fig.suptitle(suptitle, fontsize=14, fontweight="bold")
-
-    fig.tight_layout(rect=[0, 0, 1, 0.96] if suptitle else None)
-
-    if save_path:
-        fig.savefig(save_path, dpi=200)
-        print(f"Plot saved successfully to {save_path}")
-    else:
-        plt.show()
-
-    plt.close(fig)

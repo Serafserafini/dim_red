@@ -9,32 +9,6 @@ from ase import Atoms
 from dscribe.descriptors import SOAP
 
 
-def _normalize_atoms_distances(atoms: Atoms) -> Atoms:
-    """Scales the Atoms object positions (and cell, if periodic) so that
-    the minimum distance between any pair of distinct atoms is 1.0.
-    """
-    if len(atoms) <= 1:
-        return atoms
-
-    # Calculate all pairwise distances using Minimum Image Convention if periodic
-    distances = atoms.get_all_distances(mic=True)
-
-    # Fill diagonal with infinity to ignore self-distances
-    np.fill_diagonal(distances, np.inf)
-
-    min_dist = np.min(distances)
-    if min_dist < 1e-6:
-        return atoms
-
-    scaled_atoms = atoms.copy()
-    if scaled_atoms.cell and scaled_atoms.cell.any():
-        scaled_atoms.set_cell(atoms.get_cell() / min_dist, scale_atoms=True)
-    else:
-        scaled_atoms.set_positions(atoms.get_positions() / min_dist)
-
-    return scaled_atoms
-
-
 def compute_soap(
     atoms: Union[Atoms, List[Atoms]],
     species: Optional[List[str]] = None,
@@ -45,8 +19,6 @@ def compute_soap(
     periodic: Optional[bool] = None,
     element_agnostic: bool = False,
     average: str = "off",
-    sparse: bool = False,
-    normalize_distances: bool = False,
 ) -> np.ndarray:
     """Computes the SOAP descriptor for one or more ASE Atoms objects.
 
@@ -65,19 +37,10 @@ def compute_soap(
         average: Average type, e.g., 'off', 'inner', 'outer'. Use 'outer' to
             get a single global descriptor per structure, computed as the
             average of the per-atom SOAP vectors.
-        sparse: Whether to return a sparse matrix.
-        normalize_distances: If True, normalizes the distances of each Atoms object
-            such that the nearest-neighbor distance is scaled to 1.0.
 
     Returns:
-        The SOAP descriptor representation (numpy array or sparse matrix).
+        The SOAP descriptor representation (numpy array).
     """
-    if normalize_distances:
-        if isinstance(atoms, Atoms):
-            atoms = _normalize_atoms_distances(atoms)
-        else:
-            atoms = [_normalize_atoms_distances(a) for a in atoms]
-
     if species is None:
         if isinstance(atoms, Atoms):
             species = sorted(list(set(atoms.get_chemical_symbols())))
@@ -104,7 +67,6 @@ def compute_soap(
         periodic=periodic,
         compression=compression,
         average=average,
-        sparse=sparse,
     )
 
     return soap.create(atoms)

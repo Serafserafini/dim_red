@@ -37,7 +37,6 @@ class SoapConfig:
     l_max: int = 3
     sigma: float = 0.5
     element_agnostic: bool = False
-    normalize_distances: bool = False
     species: Optional[List[str]] = None
 
     def as_kwargs(self) -> Dict[str, Any]:
@@ -48,7 +47,6 @@ class SoapConfig:
             "l_max": self.l_max,
             "sigma": self.sigma,
             "element_agnostic": self.element_agnostic,
-            "normalize_distances": self.normalize_distances,
             "species": self.species,
         }
 
@@ -308,17 +306,7 @@ class AugmentationConfig:
         jitter_probability: Probability, per augmented copy, that positional
             jitter (thermal noise) is applied to it at all.
         jitter_std: Standard deviation of the Gaussian noise added to atomic
-            positions when jitter is applied -- in Angstroms by default, or
-            as a fraction of each structure's own nearest-neighbor distance
-            when ``jitter_std_relative`` is True.
-        jitter_std_relative: If True, ``jitter_std`` is a fraction of each
-            structure's own natural length scale (minimum pairwise atomic
-            distance) instead of an absolute Angstrom value -- see
-            ``dim_red.augmentation.AugmentationConfig.jitter_std_relative``
-            for the full rationale (a fixed absolute jitter is a wildly
-            different relative perturbation across structures of different
-            natural scale). ``False`` (default) keeps the original
-            absolute-Angstrom behavior.
+            positions when jitter is applied, in Angstroms.
         vacancy_probability: Probability, per augmented copy, that vacancy
             removal is applied to it at all.
         vacancy_atom_probability: Probability that any individual atom is
@@ -342,7 +330,6 @@ class AugmentationConfig:
     keep_original: bool = True
     jitter_probability: float = 0.5
     jitter_std: float = 0.05
-    jitter_std_relative: bool = False
     vacancy_probability: float = 0.0
     vacancy_atom_probability: float = 0.05
     max_vacancies: Optional[int] = None
@@ -804,12 +791,24 @@ class SweepConfig:
         return self.base.get("fetch", {}).get("api_key")
 
 
+# Keys that older configs / saved ``config.yaml`` files may still carry for
+# features that no longer exist. Ignored silently (debug log only) so existing
+# runs stay loadable without a warning for every one of them.
+_DEPRECATED_KEYS = frozenset({"normalize_distances", "jitter_std_relative"})
+
+
 def _dataclass_from_dict(cls, d: Dict[str, Any]):
     """Build a dataclass instance from a dict, ignoring unknown keys (with a
-    warning, to surface config typos without hard-failing).
+    warning, to surface config typos without hard-failing). Keys in
+    ``_DEPRECATED_KEYS`` are dropped without a warning.
     """
     known = {f.name for f in dataclasses.fields(cls)}
-    unknown = set(d) - known
+    deprecated = (set(d) - known) & _DEPRECATED_KEYS
+    if deprecated:
+        logger.debug(
+            "Ignoring deprecated %s config keys: %s", cls.__name__, sorted(deprecated)
+        )
+    unknown = set(d) - known - _DEPRECATED_KEYS
     if unknown:
         logger.warning(
             "Ignoring unknown %s config keys: %s", cls.__name__, sorted(unknown)

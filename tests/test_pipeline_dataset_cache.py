@@ -1112,3 +1112,39 @@ def test_build_mace_dataset_for_run_dispatches_to_pyxtal(tmp_path):
         build_mace_dataset_for_run(config, cache_dir=tmp_path)
 
     assert mock_generate.call_count == 1
+
+
+def test_cache_key_is_unchanged_by_removed_soap_and_augmentation_fields():
+    """``normalize_distances`` / ``jitter_std_relative`` no longer exist, but
+    every dataset cache built while they did hashed them (always ``False`` in
+    practice); the key must stay identical so those caches remain valid.
+    """
+    import dataclasses
+    import hashlib
+    import json
+
+    from dim_red.augmentation import AugmentationConfig
+    from dim_red.pipeline.dataset_cache import _cache_key
+
+    soap_kwargs = {
+        "r_cut": 5.0,
+        "n_max": 4,
+        "l_max": 3,
+        "sigma": 0.5,
+        "element_agnostic": True,
+        "species": None,
+    }
+    augmentation = AugmentationConfig(n_augmented=2, seed=1)
+
+    legacy_augmentation = dataclasses.asdict(augmentation)
+    legacy_augmentation["jitter_std_relative"] = False
+    legacy_payload = {
+        "crystal_systems": ["cubic"],
+        "limit_per_system": 10,
+        "soap_kwargs": {**soap_kwargs, "normalize_distances": False},
+        "augmentation": legacy_augmentation,
+    }
+    blob = json.dumps(legacy_payload, sort_keys=True, default=str).encode("utf-8")
+    expected = hashlib.sha256(blob).hexdigest()[:16]
+
+    assert _cache_key(["cubic"], 10, soap_kwargs, augmentation) == expected

@@ -1,5 +1,5 @@
 """
-Utility functions for data preprocessing and matrix operations.
+Utility functions for feature standardization.
 """
 
 from typing import Tuple
@@ -10,12 +10,12 @@ import numpy as np
 def fit_standardization(
     X: np.ndarray, eps: float = 1e-12
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Computes the per-feature mean/std ``standardize`` normalizes by.
+    """Computes the per-feature mean/std used for z-score standardization.
 
-    Split out from ``standardize`` so the same statistics fit on one array
-    (e.g. a model's training set) can be reapplied to a different array via
-    ``apply_standardization`` (e.g. new structures encoded with an already-
-    trained model) -- see ``dim_red.pipeline.inference``.
+    Kept separate from ``apply_standardization`` so the same statistics fit
+    on one array (e.g. a model's training set) can be reapplied to a
+    different array (e.g. new structures encoded with an already-trained
+    model) -- see ``dim_red.pipeline.inference``.
 
     Args:
         X: Input array of shape (n_samples, n_features).
@@ -58,20 +58,3 @@ def apply_standardization(
     if X.ndim != 2:
         raise ValueError(f"Expected 2D array, got {X.ndim}D array instead.")
     return (X - mean) / std
-
-
-def standardize(X: np.ndarray, eps: float = 1e-12) -> np.ndarray:
-    """Standardizes features by centering mean to 0 and scaling variance to 1.
-
-    Args:
-        X: Input array of shape (n_samples, n_features).
-        eps: Small constant to prevent division by zero for constant features.
-
-    Returns:
-        Standardized numpy array of the same shape.
-
-    Raises:
-        ValueError: If X is not a 2D numpy array.
-    """
-    mean, std = fit_standardization(X, eps=eps)
-    return apply_standardization(X, mean, std)

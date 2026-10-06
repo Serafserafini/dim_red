@@ -771,7 +771,6 @@ def predict_hierarchical(
             sigma=soap.sigma,
             element_agnostic=soap.element_agnostic,
             average="outer",
-            normalize_distances=soap.normalize_distances,
         )
         r_expert = apply_standardization(
             raw_expert_features, loaded.feature_mean, loaded.feature_std
