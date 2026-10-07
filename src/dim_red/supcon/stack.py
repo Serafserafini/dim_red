@@ -258,20 +258,19 @@ class SingleStack:
             )
 
     @classmethod
-    def load_body(cls, directory) -> "SingleStack":
+    def load_body(cls, directory, device: Optional[str] = None) -> "SingleStack":
+        """``device`` overrides the device the params were trained on (e.g.
+        ``"cpu"`` to open a GPU-trained stack on a CPU-only machine)."""
         directory = Path(directory)
         with open(directory / "stack.yaml") as f:
             meta = yaml.safe_load(f)
         stack = cls(meta["input_dim"], stack_config_from_dict(meta["config"]))
+        where = device or stack.config.body_train.device
         stack.encoder.params = _read_params(
-            directory / "encoder_params.msgpack",
-            stack.encoder.params,
-            stack.config.body_train.device,
+            directory / "encoder_params.msgpack", stack.encoder.params, where
         )
         stack.projection.params = _read_params(
-            directory / "projection_params.msgpack",
-            stack.projection.params,
-            stack.config.body_train.device,
+            directory / "projection_params.msgpack", stack.projection.params, where
         )
         return stack
 
@@ -291,7 +290,7 @@ class SingleStack:
                 sort_keys=False,
             )
 
-    def load_heads(self, directory) -> None:
+    def load_heads(self, directory, device: Optional[str] = None) -> None:
         directory = Path(directory)
         with open(directory / "heads.yaml") as f:
             meta = yaml.safe_load(f)
@@ -300,10 +299,10 @@ class SingleStack:
         self.classifier.params = _read_params(
             directory / "classifier_params.msgpack",
             self.classifier.params,
-            heads.classifier_train.device,
+            device or heads.classifier_train.device,
         )
         self.visualizer.params = _read_params(
             directory / "viz_params.msgpack",
             self.visualizer.params,
-            heads.viz_train.device,
+            device or heads.viz_train.device,
         )

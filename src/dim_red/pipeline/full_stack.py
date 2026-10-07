@@ -394,8 +394,15 @@ class FullStack:
             )
 
     # -- loading ---------------------------------------------------------
-    def load_stack(self, name: str, heads_name: Optional[str] = None) -> SingleStack:
-        stack = SingleStack.load_body(self._stack_dir(name) / "body")
+    def load_stack(
+        self,
+        name: str,
+        heads_name: Optional[str] = None,
+        device: Optional[str] = None,
+    ) -> SingleStack:
+        stack = SingleStack.load_body(self._stack_dir(name) / "body", device=device)
         if heads_name is not None:
-            stack.load_heads(self._stack_dir(name) / "heads" / heads_name)
+            stack.load_heads(
+                self._stack_dir(name) / "heads" / heads_name, device=device
+            )
         return stack

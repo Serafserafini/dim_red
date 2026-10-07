@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+import yaml
 
 pytest.importorskip("jax")
 
@@ -180,3 +181,36 @@ def test_save_and_load_roundtrip(tmp_path):
     np.testing.assert_array_equal(loaded.predict_proba(X), stack.predict_proba(X))
     np.testing.assert_array_equal(loaded.visualize(X), stack.visualize(X))
     assert loaded.n_classes == 3
+
+
+def _gpu_available():
+    try:
+        return bool(jax.devices("gpu"))
+    except RuntimeError:
+        return False
+
+
+def test_device_override_loads_a_gpu_trained_stack_on_cpu(tmp_path):
+    X, y, tr, va = _toy()
+    stack = SingleStack(X.shape[1], _config())
+    stack.fit_body(X[tr], X[va], y[tr], y[va])
+    stack.fit_heads(X[tr], X[va], y[tr], y[va], n_classes=3)
+    stack.save_body(tmp_path / "body")
+    stack.save_heads(tmp_path / "heads")
+    expected = stack.visualize(X)
+
+    # Pretend it was trained on a GPU: only the recorded device changes.
+    for name in ("body/stack.yaml", "heads/heads.yaml"):
+        path = tmp_path / name
+        meta = yaml.safe_load(path.read_text())
+        for train_key in ("body_train", "classifier_train", "viz_train"):
+            meta["config"][train_key]["device"] = "gpu"
+        path.write_text(yaml.safe_dump(meta, sort_keys=False))
+
+    if not _gpu_available():
+        with pytest.raises(Exception):
+            SingleStack.load_body(tmp_path / "body")
+
+    loaded = SingleStack.load_body(tmp_path / "body", device="cpu")
+    loaded.load_heads(tmp_path / "heads", device="cpu")
+    np.testing.assert_allclose(loaded.visualize(X), expected, rtol=1e-5, atol=1e-6)
