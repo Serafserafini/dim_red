@@ -1,11 +1,19 @@
+import csv
+
 import numpy as np
 import pytest
 from ase import Atoms
+from ase.io import write
 
 pytest.importorskip("jax")
 
 from dim_red.pipeline import full_stack as fs_mod
-from dim_red.pipeline.full_stack import FullStack, Prediction, StackPrediction
+from dim_red.pipeline.full_stack import (
+    FullStack,
+    Prediction,
+    StackPrediction,
+    apply_to_structures,
+)
 from dim_red.pipeline.run_layout import FAMILY
 from tests.fullstack_helpers import SYSTEM_SPACEGROUPS, make_run
 
@@ -122,3 +130,43 @@ def test_predict_rejects_empty_input(tmp_path, monkeypatch, featurize_calls):
     fs = FullStack.open(make_run(tmp_path, monkeypatch).run_dir)
     with pytest.raises(ValueError, match="empty"):
         fs.predict([])
+
+
+def test_apply_writes_predictions_csv_and_viz(tmp_path, monkeypatch, featurize_calls):
+    run = make_run(tmp_path, monkeypatch).run_dir
+    path = tmp_path / "new.extxyz"
+    atoms = _structures(3)
+    atoms[0].info["material_id"] = "mine-0"
+    write(str(path), atoms, format="extxyz")
+
+    out = apply_to_structures(run, path)
+
+    assert out == run / "applied"
+    rows = list(csv.DictReader(open(out / "new_predictions.csv")))
+    assert [r["material_id"] for r in rows] == ["mine-0", "new-1", "new-2"]
+    assert set(rows[0]) == {
+        "material_id",
+        "family",
+        "family_proba",
+        "expert",
+        "spacegroup",
+        "spacegroup_proba",
+    }
+    for r in rows:
+        assert r["family"] in {"Cubic", "Tetragonal", "Hexagonal"}
+        if r["expert"] == "":
+            assert r["spacegroup"] == "" and r["spacegroup_proba"] == ""
+        else:
+            assert int(r["spacegroup"]) in SYSTEM_SPACEGROUPS[r["expert"]]
+    with np.load(out / "new_viz.npz") as npz:
+        assert npz["viz_family"].shape == (3, 2)
+        assert npz["viz_expert"].shape == (3, 2)
+        assert list(npz["material_ids"]) == ["mine-0", "new-1", "new-2"]
+
+
+def test_apply_rejects_an_empty_structure_file(tmp_path, monkeypatch, featurize_calls):
+    run = make_run(tmp_path, monkeypatch).run_dir
+    empty = tmp_path / "empty.extxyz"
+    empty.write_text("")
+    with pytest.raises(ValueError, match="No structures"):
+        apply_to_structures(run, empty)

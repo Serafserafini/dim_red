@@ -15,6 +15,7 @@ Layout (``<run_dir>``)::
                                         predictions.npz, viz_embeddings.npz, viz_plot.png
 """
 
+import csv
 import dataclasses
 import json
 import logging
@@ -559,3 +560,71 @@ class FullStack:
             viz_family=fam.viz,
             viz_expert=viz_expert,
         )
+
+
+def apply_to_structures(
+    run_dir: Union[str, Path],
+    structures_path: Union[str, Path],
+    output_dir: Optional[Union[str, Path]] = None,
+    heads_name: Optional[str] = None,
+    device: str = "cpu",
+) -> Path:
+    """Predict every structure in an extended-XYZ file with an already-trained
+    run and write ``<stem>_predictions.csv`` and ``<stem>_viz.npz`` to
+    ``output_dir`` (default ``<run_dir>/applied``)."""
+    from ase.io import read as read_atoms
+
+    run_dir = Path(run_dir)
+    structures = read_atoms(str(structures_path), index=":", format="extxyz")
+    if not structures:
+        raise ValueError(f"No structures found in {structures_path}")
+    prediction = FullStack.open(run_dir).predict(
+        structures, heads_name=heads_name, device=device
+    )
+
+    stem = Path(structures_path).stem
+    out = Path(output_dir) if output_dir else run_dir / "applied"
+    out.mkdir(parents=True, exist_ok=True)
+    material_ids = [
+        a.info.get("material_id", f"{stem}-{i}") for i, a in enumerate(structures)
+    ]
+    with open(out / f"{stem}_predictions.csv", "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [
+                "material_id",
+                "family",
+                "family_proba",
+                "expert",
+                "spacegroup",
+                "spacegroup_proba",
+            ]
+        )
+        for i, mid in enumerate(material_ids):
+            has_expert = prediction.expert[i] is not None
+            writer.writerow(
+                [
+                    mid,
+                    prediction.family[i],
+                    f"{prediction.family_proba[i]:.6f}",
+                    prediction.expert[i] if has_expert else "",
+                    prediction.spacegroup[i] if has_expert else "",
+                    f"{prediction.spacegroup_proba[i]:.6f}" if has_expert else "",
+                ]
+            )
+    viz_dim = prediction.viz_family.shape[1]
+    dim = max([len(z) for z in prediction.viz_expert if z is not None] + [viz_dim])
+    viz_expert = np.full((len(structures), dim), np.nan, dtype=np.float32)
+    for i, z in enumerate(prediction.viz_expert):
+        if z is not None:
+            viz_expert[i, : len(z)] = z
+    np.savez(
+        out / f"{stem}_viz.npz",
+        material_ids=np.asarray(material_ids),
+        viz_family=prediction.viz_family,
+        viz_expert=viz_expert,
+    )
+    logger.info(
+        "Applied %s to %d structures; saved to %s", run_dir, len(structures), out
+    )
+    return out
