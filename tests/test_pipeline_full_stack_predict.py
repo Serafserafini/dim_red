@@ -70,8 +70,22 @@ def test_features_are_computed_once_per_distinct_data_config(
     tmp_path, monkeypatch, featurize_calls
 ):
     fs = FullStack.open(make_run(tmp_path, monkeypatch).run_dir)
-    fs.predict(_structures(5))
-    assert featurize_calls == [5]  # family + both experts share one featurization
+    real = FullStack._predict_stack
+
+    def stub(self, name, structures, heads_name, device, cache, rows=None):
+        if name == FAMILY:  # force both experts to run
+            proba = np.eye(3)[[0, 2, 0, 2, 0]]
+            return StackPrediction(
+                classes=["Cubic", "Hexagonal", "Tetragonal"],
+                proba=proba,
+                viz=np.zeros((5, 2)),
+            )
+        return real(self, name, structures, heads_name, device, cache, rows)
+
+    monkeypatch.setattr(FullStack, "_predict_stack", stub)
+    pred = fs.predict(_structures(5))
+    assert set(pred.expert) == {"cubic", "tetragonal"}
+    assert featurize_calls == [5]  # both experts share one featurization
 
 
 def test_predict_stack_works_alone_and_without_a_family_stack(
