@@ -1,15 +1,14 @@
 """
 Evaluate EVERY frame of a set of nested-sampling (NS) replica trajectories
-with the round 15 "best combo" SupCon body + its round 15
-``hierarchical_supcon`` tail (+ round 16's per-family SG visualizers), and
-save everything needed to later compute NS partition-function-weighted
-thermal averages (e.g. P(family | T, P)) without ever touching the model or
-the trajectories again.
+with a trained ``FullStack`` run (family stack + per-crystal-system expert
+stacks, one heads set), and save everything needed to later compute NS
+partition-function-weighted thermal averages (e.g. P(family | T, P)) without
+ever touching the model or the trajectories again.
 
-Companion to ``examples/ns_grid_from_trajectories.ipynb`` (``mace_embedding``
-branch), which only classifies ONE representative frame per (T, P) -- the one
-whose enthalpy is closest to <H>(T). Here every frame gets classified, so the
-thermal average can be done properly afterwards:
+Companion to ``examples/ns_grid_from_trajectories.ipynb``, which only
+classifies ONE representative frame per (T, P) -- the one whose enthalpy is
+closest to <H>(T). Here every frame gets classified, so the thermal average
+can be done properly afterwards:
 
     P(f | T) = sum_i w_i exp(-H_i / kT) 1[f_i = f] / sum_i w_i exp(-H_i / kT)
 
@@ -26,19 +25,27 @@ checkpointed per chunk of frames (``<output-dir>/ns.<i>.chunks/``) so a job
 that gets killed resumes where it stopped; the chunk directory is removed
 once the merged file is written.
 
-Every family's SG expert (and SG visualizer) is run on EVERY frame -- not just
-on the frames predicted to belong to that family -- so the SG distribution
-can later be marginalized softly over the family probabilities instead of
-only through the hard family prediction.
+Every trained expert stack (classifier and visualization head) is run on
+EVERY frame -- not just on the frames predicted to belong to its crystal
+system -- so the SG distribution can later be marginalized softly over the
+family probabilities instead of only through the hard family prediction. The
+hard prediction (``family_pred_idx``, ``sg_pred``) routes exactly like
+``FullStack.predict``: argmax family, then that family's expert (``sg_pred``
+is ``-1`` for a frame whose predicted family has no trained expert).
+``family_logits`` / ``sg_logits__<Family>`` are log class probabilities
+(softmax-equivalent to the classifier logits).
 
 Run with (from repo root, ``dmred`` active):
     python examples/evaluate_ns_trajectories.py --replica 0 \
+        --run-dir runs/<full_stack_run> \
         --input-dir experiments/test_strucutres/ti_trajs \
         --output-dir runs/ns_traj_eval/ti_trajs
 """
 
 import argparse
+import dataclasses
 import datetime
+import json
 import logging
 import shutil
 import subprocess
@@ -49,43 +56,13 @@ import ase.io
 import jax
 import numpy as np
 import yaml
-from flax import serialization
 
-from dim_red.pipeline.inference import load_trained_run
+from dim_red.pipeline.featurize import featurize_structures, standardize
+from dim_red.pipeline.full_stack import FullStack
+from dim_red.pipeline.run_layout import EXPERT_NAMES, FAMILY, resolve_heads_name
 from dim_red.soap import compute_soap
-from dim_red.supcon.model import SupConEncoder
-from dim_red.supcon.tails import ClassificationTail, VisualizationTail
-from dim_red.utils import apply_standardization
 
 logger = logging.getLogger("evaluate_ns_trajectories")
-
-DEFAULT_RUN_DIR = (
-    "runs/experiment_pipeline_best_combo/"
-    "model-supcon_hd-256-128_pyxtal-cub-hex-mon-ort-tet-tri-tri_nsp1_supcon-family_only_tau0.05_lf1"
-)
-# Per-family tuned visualizers: <dir>/<family>/<tag>/visualization_tail_params.msgpack,
-# as written by examples/tune_sg_visualization_hidden_dims.py (--out-dir).
-DEFAULT_SG_VIZ_TUNE_DIR = "runs/experiment_viz_tune_orthorhombic_tetragonal"
-HIERARCHICAL_SUBDIR = "hierarchical_supcon_best_combo"
-FAMILY_VIZ_SUBDIR = "visualization_family_only_euclidean"
-
-# Round 16's winning per-family SG-visualizer hidden_dim (see
-# experiments/round16_sg_viz_tuning_notes.md). Cubic was never tuned -- it
-# keeps best_combo's own baseline visualizer from sg_experts/Cubic.
-SG_VIZ_WINNER_TAG = {
-    "Hexagonal": "64_32_16",
-    "Monoclinic": "64_32_16",
-    "Orthorhombic": "64_32_16",
-    "Tetragonal": "128_64",
-    "Triclinic": "64_32_16",
-    "Trigonal": "64_32_16",
-}
-CANDIDATE_HIDDEN_DIMS = {
-    "64_32": [64, 32],
-    "128_64": [128, 64],
-    "64_32_16": [64, 32, 16],
-    "128_64_32": [128, 64, 32],
-}
 
 # Legacy .extxyz info keys copied per frame when present (NaN otherwise).
 FRAME_INFO_KEYS = (
@@ -150,104 +127,46 @@ def log_prior_mass_weights(n_dead: int, n_live: int, n_cull: int) -> np.ndarray:
 # --------------------------------------------------------------------------
 
 
-def _load_classification_tail(tail: ClassificationTail, path: Path):
-    """Load a saved ``ClassificationTail`` (also accepts the legacy
-    ``{"family_head": ...}`` checkpoint layout)."""
-    tail.load_params_bytes(Path(path).read_bytes())
-    return tail
+def _log_proba(proba: np.ndarray) -> np.ndarray:
+    return np.log(np.clip(proba, 1e-12, 1.0)).astype(np.float32)
 
 
-def _load_params(module_wrapper, path: Path):
-    with open(path, "rb") as f:
-        module_wrapper.params = serialization.from_bytes(
-            module_wrapper.params, f.read()
+def load_models(run_dir: Path, heads_name, device: str) -> dict:
+    """Every trained stack of a FullStack run, loaded once: the same
+    ``SingleStack`` (body + heads), class list and feature standardization
+    ``FullStack.predict`` uses -- held in memory so each chunk of frames
+    doesn't reload them."""
+    full_stack = FullStack.open(run_dir)
+    trained = full_stack.stack_names()
+    if FAMILY not in trained:
+        raise ValueError(f"{run_dir}: family stack is not trained")
+    stacks = {}
+    for name in trained:
+        stack_dir = run_dir / "stacks" / name
+        heads = resolve_heads_name(stack_dir, heads_name)
+        with open(stack_dir / "classes.yaml") as f:
+            classes = yaml.safe_load(f)["classes"]
+        with np.load(stack_dir / "embeddings.npz") as npz:
+            mean, std = npz["feature_mean"], npz["feature_std"]
+        stacks[name] = dict(
+            stack=full_stack.load_stack(name, heads, device=device),
+            heads_name=heads,
+            classes=[str(c) for c in classes] if name == FAMILY else classes,
+            mean=mean,
+            std=std,
+            data=full_stack.config.stacks[name].data,
         )
-    return module_wrapper
-
-
-def load_models(run_dir: Path, sg_viz_tune_dir: Path):
-    """Everything needed to go from raw SOAP to every saved output."""
-    loaded = load_trained_run(run_dir)
-    latent_dim = loaded.config.encoder.latent_dim
-    hier_dir = run_dir / "tails" / HIERARCHICAL_SUBDIR
-    with open(hier_dir / "tail_config.yaml") as f:
-        hs = yaml.safe_load(f)["hierarchical_supcon"]
-    with np.load(hier_dir / "tail_predictions.npz", allow_pickle=True) as npz:
-        family_classes = [str(c) for c in npz["family_classes"].tolist()]
-
-    family_tail = _load_classification_tail(
-        ClassificationTail(
-            input_dim=latent_dim,
-            hidden_dim=hs["head_hidden_dim"],
-            n_classes=len(family_classes),
-        ),
-        hier_dir / "family" / "tail_params.msgpack",
+    for name in EXPERT_NAMES:
+        if name not in stacks:
+            logger.warning("no expert stack %r in %s -- skipped", name, run_dir)
+    return dict(
+        run_dir=run_dir,
+        model_kind=full_stack.config.model_kind,
+        family_classes=stacks[FAMILY]["classes"],
+        family=stacks[FAMILY],
+        # Family label (e.g. "Cubic") -> its expert stack.
+        experts={n.capitalize(): s for n, s in stacks.items() if n in EXPERT_NAMES},
     )
-
-    family_viz_dir = run_dir / "tails" / FAMILY_VIZ_SUBDIR
-    with open(family_viz_dir / "tail_config.yaml") as f:
-        viz_cfg = yaml.safe_load(f)["visualization"]
-    family_viz = _load_params(
-        VisualizationTail(
-            input_dim=latent_dim,
-            hidden_dim=viz_cfg["hidden_dim"],
-            output_dim=viz_cfg["viz_dim"],
-        ),
-        family_viz_dir / "tail_params.msgpack",
-    )
-
-    input_dim = int(loaded.feature_mean.shape[0])
-    experts = {}
-    for family in family_classes:
-        expert_dir = hier_dir / "sg_experts" / family
-        if not (expert_dir / "sg_body_params.msgpack").exists():
-            logger.warning("no SG expert for %s (%s) -- skipped", family, expert_dir)
-            continue
-        with open(expert_dir / "local_spacegroup_classes.yaml") as f:
-            local_classes = [
-                int(c) for c in yaml.safe_load(f)["local_spacegroup_classes"]
-            ]
-        body = _load_params(
-            SupConEncoder(
-                input_dim=input_dim,
-                encoder_hidden_dim=hs["sg_encoder_hidden_dim"],
-                latent_dim=hs["sg_latent_dim"],
-            ),
-            expert_dir / "sg_body_params.msgpack",
-        )
-        classifier = _load_classification_tail(
-            ClassificationTail(
-                input_dim=hs["sg_latent_dim"],
-                hidden_dim=hs["sg_classifier_hidden_dim"],
-                n_classes=len(local_classes),
-            ),
-            expert_dir / "classifier_tail_params.msgpack",
-        )
-        if family in SG_VIZ_WINNER_TAG:
-            viz_tag = SG_VIZ_WINNER_TAG[family]
-            viz_hidden = CANDIDATE_HIDDEN_DIMS[viz_tag]
-            viz_params_path = (
-                sg_viz_tune_dir / family / viz_tag / "visualization_tail_params.msgpack"
-            )
-        else:
-            viz_tag = "best_combo_baseline"
-            viz_hidden = hs["sg_visualization_hidden_dim"]
-            viz_params_path = expert_dir / "visualization_tail_params.msgpack"
-        viz = _load_params(
-            VisualizationTail(
-                input_dim=hs["sg_latent_dim"], hidden_dim=viz_hidden, output_dim=2
-            ),
-            viz_params_path,
-        )
-        experts[family] = dict(
-            local_classes=local_classes,
-            body=body,
-            classifier=classifier,
-            viz=viz,
-            viz_tag=viz_tag,
-            viz_hidden_dim=list(viz_hidden),
-        )
-    return loaded, family_classes, family_tail, family_viz, experts
 
 
 # --------------------------------------------------------------------------
@@ -255,14 +174,16 @@ def load_models(run_dir: Path, sg_viz_tune_dir: Path):
 # --------------------------------------------------------------------------
 
 
-def evaluate_chunk(frames, loaded, family_tail, family_viz, experts) -> dict:
+def evaluate_chunk(frames, models) -> dict:
     """All per-frame outputs for one chunk of trajectory frames."""
-    soap_kwargs = dict(loaded.config.soap.as_kwargs())
-    soap_kwargs["species"] = loaded.species
+    family = models["family"]
+    soap_kwargs = dict(family["data"].soap.as_kwargs())
+    present = {s for a in frames for s in a.get_chemical_symbols()}
+    soap_kwargs["species"] = sorted(present | set(soap_kwargs.get("species") or []))
     soap_kwargs["average"] = "off"
-    # Per-atom SOAP; its mean over atoms is bit-identical to dscribe's
-    # average="outer" (the model's actual input), and the spread around that
-    # mean is a free, classifier-independent local-order parameter
+    # Per-atom SOAP (the family stack's settings); its mean over atoms is
+    # dscribe's average="outer" (the model's actual input), and the spread
+    # around that mean is a free, classifier-independent local-order parameter
     # (small for a -- even hot -- crystal, large for a liquid).
     per_atom = np.asarray(compute_soap(frames, **soap_kwargs))  # (n, n_atoms, D)
     soap_mean = per_atom.mean(axis=1)
@@ -273,27 +194,59 @@ def evaluate_chunk(frames, loaded, family_tail, family_viz, experts) -> dict:
         np.linalg.norm(per_atom, axis=-1) * norm_mean[:, None]
     )
 
-    X_std = apply_standardization(soap_mean, loaded.feature_mean, loaded.feature_std)
-    r_main = np.asarray(loaded.model.encode(X_std))
-    family_logits = np.asarray(family_tail.classify(r_main))
+    # Raw model input per distinct featurizer config: the per-atom mean above
+    # when a stack uses the family stack's own SOAP settings, otherwise
+    # featurize_structures (other SOAP settings, or MACE).
+    raw_cache = {}
+
+    def raw_features(data):
+        if models["model_kind"] != "supcon_mace" and data.soap == family["data"].soap:
+            return soap_mean
+        key = json.dumps(dataclasses.asdict(data), sort_keys=True, default=str)
+        if key not in raw_cache:
+            raw_cache[key] = featurize_structures(frames, models["model_kind"], data)
+        return raw_cache[key]
+
+    def run(entry):
+        X = standardize(raw_features(entry["data"]), entry["mean"], entry["std"])
+        stack = entry["stack"]
+        return (
+            stack.encode(X).astype(np.float32),
+            _log_proba(stack.predict_proba(X)),
+            stack.visualize(X).astype(np.float32),
+        )
+
+    r_main, family_logits, z_family = run(family)
     out = dict(
         soap_mean=soap_mean.astype(np.float32),
         soap_atom_msd=msd,
         soap_atom_msd_rel=msd / norm_mean**2,
         soap_atom_cos_mean=cos_to_mean.mean(axis=1),
         soap_atom_cos_min=cos_to_mean.min(axis=1),
-        r_main=r_main.astype(np.float32),
-        family_logits=family_logits.astype(np.float32),
-        z_family=np.asarray(family_viz.project(r_main)).astype(np.float32),
+        r_main=r_main,
+        family_logits=family_logits,
+        z_family=z_family,
     )
-    for family, ex in experts.items():
-        r_sg = np.asarray(ex["body"].encode(X_std))
-        out[f"r_sg__{family}"] = r_sg.astype(np.float32)
-        out[f"sg_logits__{family}"] = np.asarray(
-            ex["classifier"].classify(r_sg)
-        ).astype(np.float32)
-        out[f"z_sg__{family}"] = np.asarray(ex["viz"].project(r_sg)).astype(np.float32)
+    for fam, entry in models["experts"].items():
+        r_sg, sg_logits, z_sg = run(entry)
+        out[f"r_sg__{fam}"] = r_sg
+        out[f"sg_logits__{fam}"] = sg_logits
+        out[f"z_sg__{fam}"] = z_sg
     return out
+
+
+def routed_prediction(frames_data: dict, models) -> tuple:
+    """``(family_pred_idx, sg_pred)``, routed like ``FullStack.predict``:
+    argmax family, then that family's own expert; ``-1`` without one."""
+    family_pred_idx = frames_data["family_logits"].argmax(axis=1)
+    sg_pred = np.full(len(family_pred_idx), -1, dtype=np.int64)
+    for fi, fam in enumerate(models["family_classes"]):
+        rows = family_pred_idx == fi
+        if fam not in models["experts"] or not rows.any():
+            continue
+        local = np.asarray(models["experts"][fam]["classes"], dtype=np.int64)
+        sg_pred[rows] = local[frames_data[f"sg_logits__{fam}"][rows].argmax(axis=1)]
+    return family_pred_idx, sg_pred
 
 
 def frame_scalars(frames, pressure_eva3: float) -> dict:
@@ -360,7 +313,7 @@ def _iter_chunks(traj_path: Path, chunk_size: int, stride: int, max_frames):
 
 
 def evaluate_replica(args, replica: int, models) -> Path:
-    loaded, family_classes, family_tail, family_viz, experts = models
+    family_classes, experts = models["family_classes"], models["experts"]
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -412,7 +365,7 @@ def evaluate_replica(args, replica: int, models) -> Path:
         tc = time.time()
         data = frame_scalars(frames, pressure_eva3)
         data["traj_index"] = traj_idx
-        data.update(evaluate_chunk(frames, loaded, family_tail, family_viz, experts))
+        data.update(evaluate_chunk(frames, models))
         tmp = chunk_path.with_suffix(".tmp.npz")
         np.savez(tmp, **data)
         tmp.rename(chunk_path)
@@ -451,14 +404,7 @@ def evaluate_replica(args, replica: int, models) -> Path:
     )
 
     # Hierarchical prediction: family argmax, then that family's own SG expert.
-    family_pred_idx = frames_data["family_logits"].argmax(axis=1)
-    sg_pred = np.zeros(len(family_pred_idx), dtype=np.int64)
-    for fi, family in enumerate(family_classes):
-        rows = family_pred_idx == fi
-        if family not in experts or not rows.any():
-            continue
-        local = np.asarray(experts[family]["local_classes"])
-        sg_pred[rows] = local[frames_data[f"sg_logits__{family}"][rows].argmax(axis=1)]
+    family_pred_idx, sg_pred = routed_prediction(frames_data, models)
 
     np.savez(
         final_path,
@@ -485,7 +431,7 @@ def evaluate_replica(args, replica: int, models) -> Path:
         n_atoms=n_atoms,
         replica=replica,
         **{
-            f"local_sg_classes__{f}": np.asarray(ex["local_classes"], dtype=np.int64)
+            f"local_sg_classes__{f}": np.asarray(ex["classes"], dtype=np.int64)
             for f, ex in experts.items()
         },
     )
@@ -494,16 +440,14 @@ def evaluate_replica(args, replica: int, models) -> Path:
         pressure_gpa=pressure_gpa,
         input_dir=str(input_dir.resolve()),
         run_dir=str(Path(args.run_dir).resolve()),
-        hierarchical_subdir=HIERARCHICAL_SUBDIR,
-        family_viz_subdir=FAMILY_VIZ_SUBDIR,
-        sg_viz_tune_dir=str(Path(args.sg_viz_tune_dir).resolve()),
-        sg_viz={
-            f: dict(tag=ex["viz_tag"], hidden_dim=ex["viz_hidden_dim"])
-            for f, ex in experts.items()
-        },
-        soap=dict(loaded.config.soap.as_kwargs(), species=list(loaded.species)),
+        heads_name=models["family"]["heads_name"],
+        model_kind=models["model_kind"],
+        soap=models["family"]["data"].soap.as_kwargs(),
         family_classes=family_classes,
-        local_sg_classes={f: ex["local_classes"] for f, ex in experts.items()},
+        local_sg_classes={
+            f: [int(c) for c in ex["classes"]] for f, ex in experts.items()
+        },
+        expert_heads_name={f: ex["heads_name"] for f, ex in experts.items()},
         n_frames=int(len(frames_data["iter"])),
         stride=args.stride,
         max_frames=args.max_frames,
@@ -536,8 +480,15 @@ def main():
     )
     parser.add_argument("--input-dir", required=True)
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--run-dir", default=DEFAULT_RUN_DIR)
-    parser.add_argument("--sg-viz-tune-dir", default=DEFAULT_SG_VIZ_TUNE_DIR)
+    parser.add_argument("--run-dir", required=True, help="FullStack run directory")
+    parser.add_argument(
+        "--heads-name",
+        default=None,
+        help="heads set to use (default: the only one each stack has)",
+    )
+    parser.add_argument(
+        "--device", default="cpu", help="jax backend for the params (cpu/gpu)"
+    )
     parser.add_argument("--file-prefix", default="ns")
     parser.add_argument("--chunk-size", type=int, default=2000)
     parser.add_argument("--stride", type=int, default=1, help="keep every n-th frame")
@@ -554,7 +505,7 @@ def main():
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
     logger.info("jax devices: %s", jax.devices())
-    models = load_models(Path(args.run_dir), Path(args.sg_viz_tune_dir))
+    models = load_models(Path(args.run_dir), args.heads_name, args.device)
     for replica in args.replica:
         evaluate_replica(args, replica, models)
 

@@ -13,7 +13,7 @@
 
 seed: 42
 output_dir: runs
-model: cgcnn # "supcon" (default), "supcon_mace", or "cgcnn"
+model: cgcnn # only "cgcnn" here; supcon/supcon_mace use the FullStack schema (configs/full_stack*.example.yaml)
 data_source: pyxtal # pyxtal recommended: guarantees a known family/spacegroup
 # label for every generated structure, exactly what aux_heads needs. "fetch"
 # (Materials Project) works too, but MP structures are missing spacegroup
@@ -91,17 +91,7 @@ train:
     min_delta: 0.0
     restore_best_weights: true
 
-# Optional -- automatically train a classification and/or visualization
-# tail on this run's frozen body right after phase-1 training finishes
-# (the same dim_red.pipeline.tail_training.train_tail entry point
-# dimred-train-tail uses manually). Both are allowed for model: cgcnn (not
-# just model: supcon) -- classification-tail is redundant with CGCNN's own
-# built-in heads above but harmless, useful for ablation/comparison;
-# visualization-tail is genuinely useful since latent_dim above need not be 2.
-# tails:
-#   classification:
-#   visualization:
-#     viz_dim: 2
-#   train:
-#     epochs: 20
-#     batch_size: 32
+# Classification / visualization tails on this run's frozen body are trained
+# afterwards with dimred-train-tail <tail config> <run_dir> (see
+# configs/tail_train_*.example.yaml); the top-level tails: block that used to
+# auto-train them here was removed and is now rejected.
