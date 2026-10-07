@@ -31,8 +31,8 @@ Vedi Obiettivo. Nodo di design: una run vecchia era un modello con un solo spazi
 
 `open_run(run_dir)` restituisce una vista con `stacks: {nome → StackView}`; ogni `StackView` espone config risolta, `loss_history`, `embeddings.npz`, predizioni e embedding viz delle head, file dei pesi. Un solo layout (`stacks/<nome>/`, `heads/<nome>/`); le directory `.*.tmp` sono ignorate. Nessuna traduzione di nomi vecchi.
 
-- **`compare`:** la suite di plot gira **una volta per nome di stack**, sulle run che hanno quello stack, e scrive in `comparison/<stack>/`. Le run senza quello stack sono saltate con una riga di log. Le etichette delle loss vengono dal ruolo dello stack (B6).
-- **`benchmark`:** una riga per coppia (run, stack), colonna `stack`; nessuna aggregazione tra stack né scelta automatica di una "migliore" (metriche come colonne).
+- **`compare`:** la suite di plot gira **una volta per nome di stack**, sulle run che hanno quello stack, e scrive in `comparison/<stack>/`. Le run senza quello stack sono saltate con una riga di log. Le etichette delle loss vengono dal ruolo dello stack (B6). I plot di `compare` usano il solo `loss_history.csv` del corpo di ogni stack; le head servono per i grafici di accuratezza e per la viz 2D. Se per una run esiste più di un set di head serve `--heads-name`; se non ne esiste nessuno i grafici di accuratezza sono saltati.
+- **`benchmark`:** una riga per coppia (run, stack), colonna `stack`; nessuna aggregazione tra stack né scelta automatica di una "migliore" (metriche come colonne). La colonna `wall_clock_seconds` sparisce (le nuove run non scrivono `run.log`). Per gli stack esperti le metriche di qualità `family_*` non esistono (solo `spacegroup_*`).
 - `cgcnn` non passa dal lettore (B3).
 
 ## Sezione 3 — Predizione e inferenza
@@ -42,17 +42,17 @@ Vedi Obiettivo. Nodo di design: una run vecchia era un modello con un solo spazi
 - **Output** per struttura: sistema e probabilità, esperto usato, spacegroup e probabilità, coordinate viz di family ed esperto.
 - **Device:** `load(..., device="cpu")` esplicito (problema 1).
 - **`mu2` obbligatorio** nel parser di `FullStackConfig` (B4): una config con `soap.element_agnostic: false` è rifiutata prima di costruire qualunque dataset, con un messaggio che indica la correzione. È un amendment al Task 2 del piano A, con test.
-- `dimred-apply` su una run nuova usa `predict`; non ha più il ramo supcon.
+- `dimred-apply` su una run nuova scrive `<stem>_predictions.csv` e `<stem>_viz.npz` in `<run_dir>/applied` (o `--output-dir`); non disegna più il grafico nello spazio latente.
 
 ## Sezione 4 — Comandi ed eliminazioni
 
 - **`dimred-run <config>`:** guarda la chiave del YAML. `model_kind` → `load_full_stack_config`, `FullStack.create`, `fit_body` e `fit_heads` su tutti gli stack elencati; `model:` (cgcnn) → `run_single` come oggi.
 - **`dimred-rerun`:** rilegge `config.yaml` della run e la rilancia in una cartella nuova.
-- **`dimred-sweep`:** espande percorsi puntati sul YAML completo (`family.encoder.latent_dim`, `experts.cubic.train.epochs`) e lancia un `FullStack` per combinazione. La regola "salva le feature solo per il primo run con lo stesso dataset" passa a livello di stack.
-- **`dimred-train-heads <config> <run_dir> [--stacks a,b]`** (nuovo): allena un set di head su corpi già salvati. Sostituisce `dimred-train-tail` per supcon; `dimred-train-tail` resta per cgcnn.
+- **`dimred-sweep`:** espande percorsi puntati sul YAML completo (`family.encoder.latent_dim`, `experts.cubic.train.epochs`) e lancia un `FullStack` per combinazione. `fit_heads` ricalcola le head dalle `features` salvate in `embeddings.npz` di ogni stack, quindi le feature si salvano sempre; la deduplicazione dello spazio su disco per dataset condiviso non si porta nel nuovo layout. Lo sweep scrive `sweep.yaml` (base + grid) nella cartella dello sweep al posto del README con le differenze dai default.
+- **`dimred-train-heads <config> <run_dir> [--stacks a,b]`** (nuovo): allena un set di head su corpi già salvati. Sostituisce `dimred-train-tail` per supcon; `dimred-train-tail` resta per cgcnn. Il YAML ha lo stesso schema di `dimred-run`; di ogni stack elencato si leggono solo i blocchi `classifier`/`viz`/`seed` (gli altri devono esserci per la validazione ma sono ignorati). `--heads-name` è obbligatorio.
 - **`dimred-compare`, `dimred-benchmark`:** solo `FullStack` (sezione 2).
 
-**Si cancella** (dopo rilettura dei rami condivisi con cgcnn, un ramo alla volta): i rami supcon/supcon_mace di `run_single` e l'auto-tail `RunConfig.tails`; `_train_hierarchical_supcon` e i rami supcon di `train_tail`; `HierarchicalSupconTailConfig` con i campi `sg_*`. Prima della cancellazione `_classifier_eval_plots` si sposta in un modulo condiviso.
+**Si cancella** (dopo rilettura dei rami condivisi con cgcnn, un ramo alla volta): i rami supcon/supcon_mace di `run_single` e l'auto-tail `RunConfig.tails`; `_train_hierarchical_supcon` e i rami supcon di `train_tail`; `HierarchicalSupconTailConfig` con i campi `sg_*`. `_classifier_eval_plots` resta in `tail_training.py`: lo usa ancora `train_tail` per cgcnn. `FullStack` non produce matrici di confusione (fuori perimetro).
 
 ## Sezione 5 — Migrazione e verifica
 
