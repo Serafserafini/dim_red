@@ -20,11 +20,9 @@ _AUX_HEADS_MODES = ("none", "family_only", "family_and_spacegroup")
 # (VisualizationTailConfig), which cgcnn tails still use.
 _SUPCON_MODES = ("family_only", "spacegroup_only", "family_and_spacegroup")
 _SUPCON_DISTANCES = ("euclidean", "cosine")
-# "supcon"/"supcon_mace" stay constructible as dataclasses only because
-# dim_red.pipeline.dataset_cache's SOAP/MACE builders still take a RunConfig;
-# run_config_from_dict only ever produces "cgcnn" (supcon/supcon_mace configs
-# use the FullStack schema, dim_red.pipeline.full_stack_config).
-_MODEL_KINDS = ("supcon", "cgcnn", "supcon_mace")
+# RunConfig is cgcnn-only; supcon/supcon_mace configs use the FullStack
+# schema (dim_red.pipeline.full_stack_config).
+_MODEL_KINDS = ("cgcnn",)
 _DATA_SOURCES = ("fetch", "pyxtal")
 
 
@@ -163,10 +161,10 @@ class GraphConfig:
 
 @dataclass(frozen=True)
 class MaceConfig:
-    """Config for ``RunConfig.model_kind == "supcon_mace"``: a frozen,
-    pretrained MACE (equivariant message-passing, 3-body/angular
-    interactions) feature extractor -- used *instead of* ``soap`` for that
-    model kind. ``mace`` never trains: ``checkpoint_path`` points to an
+    """Config for a ``supcon_mace`` FullStack's ``data.mace`` block
+    (``dim_red.pipeline.full_stack_config``): a frozen, pretrained MACE
+    (equivariant message-passing, 3-body/angular interactions) feature
+    extractor -- used *instead of* SOAP for that model kind. ``mace`` never trains: ``checkpoint_path`` points to an
     already-pretrained, already-converted checkpoint, and its architecture
     (and therefore its output width) is whatever that checkpoint says, not
     something this config chooses. The SupCon body trained on top of its
@@ -523,11 +521,8 @@ class RunConfig:
             graph-construction + architecture hyperparameters from ``graph``
             (only ``encoder.latent_dim`` is read from ``encoder``) and its
             classification-head settings from ``aux_heads``.
-            ``run_config_from_dict`` rejects every other model; supcon/
-            supcon_mace configs use the FullStack schema
-            (``dim_red.pipeline.full_stack_config``). ``"supcon"``/
-            ``"supcon_mace"`` remain constructible directly only for
-            ``dim_red.pipeline.dataset_cache``'s SOAP/MACE dataset builders.
+            Every other model is rejected; supcon/supcon_mace configs use the
+            FullStack schema (``dim_red.pipeline.full_stack_config``).
         data_source: How the dataset is built: ``"fetch"``
             (default -- the ``fetch`` config block queries Materials
             Project) or ``"pyxtal"`` (the ``pyxtal`` config block builds a
@@ -549,7 +544,6 @@ class RunConfig:
     train: TrainSettings
     aux_heads: AuxHeadsConfig = field(default_factory=AuxHeadsConfig)
     graph: GraphConfig = field(default_factory=GraphConfig)
-    mace: MaceConfig = field(default_factory=MaceConfig)
     seed: int = 42
     output_dir: str = "runs"
     name: Optional[str] = None
@@ -562,7 +556,9 @@ class RunConfig:
     def __post_init__(self):
         if self.model_kind not in _MODEL_KINDS:
             raise ValueError(
-                f"model_kind must be one of {_MODEL_KINDS}, got {self.model_kind!r}"
+                f"model_kind must be one of {_MODEL_KINDS}, got "
+                f"{self.model_kind!r}; supcon/supcon_mace runs use "
+                "dim_red.pipeline.full_stack.FullStack"
             )
         if self.data_source not in _DATA_SOURCES:
             raise ValueError(
@@ -576,12 +572,6 @@ class RunConfig:
             raise ValueError(
                 "model_kind='cgcnn' requires aux_heads.mode != 'none' "
                 "(family classification is CGCNN's only training objective)"
-            )
-        if self.model_kind == "supcon_mace" and not self.mace.checkpoint_path:
-            raise ValueError(
-                "model_kind='supcon_mace' requires mace.checkpoint_path to be "
-                "set (its raw input features come from a frozen MACE forward "
-                "pass)"
             )
 
 
@@ -621,11 +611,11 @@ _DEPRECATED_KEYS = frozenset(
 )
 
 # Top-level RunConfig blocks of removed features. Every config.yaml saved by
-# run_single before their removal carries "supcon"/"batching" (they were
-# always serialized, cgcnn runs included), so they are ignored rather than
-# rejected -- otherwise no existing cgcnn run could be reloaded
+# run_single before their removal carries "supcon"/"batching"/"mace" (they
+# were always serialized, cgcnn runs included), so they are ignored rather
+# than rejected -- otherwise no existing cgcnn run could be reloaded
 # (dimred-rerun/dimred-apply/dimred-train-tail).
-_REMOVED_RUN_BLOCKS = frozenset({"supcon", "batching"})
+_REMOVED_RUN_BLOCKS = frozenset({"supcon", "batching", "mace"})
 
 
 def _dataclass_from_dict(cls, d: Dict[str, Any]):
@@ -747,7 +737,6 @@ def run_config_from_dict(d: Dict[str, Any]) -> RunConfig:
     train = _parse_train_settings(TrainSettings, d.get("train", {}))
     aux_heads = _dataclass_from_dict(AuxHeadsConfig, d.get("aux_heads", {}))
     graph = _dataclass_from_dict(GraphConfig, d.get("graph", {}))
-    mace = _dataclass_from_dict(MaceConfig, d.get("mace", {}))
     pyxtal_config = (
         _dataclass_from_dict(PyxtalConfig, d["pyxtal"]) if "pyxtal" in d else None
     )
@@ -782,7 +771,6 @@ def run_config_from_dict(d: Dict[str, Any]) -> RunConfig:
         train=train,
         aux_heads=aux_heads,
         graph=graph,
-        mace=mace,
         seed=int(d.get("seed", 42)),
         output_dir=str(d.get("output_dir", "runs")),
         name=d.get("name"),
@@ -813,7 +801,6 @@ def run_config_to_dict(config: RunConfig) -> Dict[str, Any]:
         "train": dataclasses.asdict(config.train),
         "aux_heads": dataclasses.asdict(config.aux_heads),
         "graph": dataclasses.asdict(config.graph),
-        "mace": dataclasses.asdict(config.mace),
     }
     if config.fetch is not None:
         result["fetch"] = dataclasses.asdict(config.fetch)

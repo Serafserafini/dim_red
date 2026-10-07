@@ -1,30 +1,31 @@
 """
-Caching layer for the dataset -> SOAP -> standardize construction step, so
-that a hidden-layer sweep (axis A) does not repeat the (Materials Project
-fetch or pyxtal generation) + SOAP computation for every combination that
-shares the same dataset-defining subset (axis B).
+Caching layer for the dataset -> features construction step, so that a sweep
+does not repeat the (Materials Project fetch or pyxtal generation) +
+featurization for every combination that shares the same dataset-defining
+settings.
 
-Two data sources are supported, selected by ``RunConfig.data_source``:
-``get_or_build_dataset`` (``"fetch"``, Materials Project) and
-``get_or_build_pyxtal_dataset`` (``"pyxtal"``, synthetic generation via
-``dim_red.generate`` -- imported lazily, only when actually used, since
-``pyxtal`` isn't a hard dim_red dependency). ``build_dataset_for_run``
-dispatches between the two from a ``RunConfig``.
+Two structure sources are supported: Materials Project fetch
+(``get_or_build_dataset``/``get_or_build_cgcnn_dataset``/
+``get_or_build_mace_dataset``) and synthetic pyxtal generation
+(``get_or_build_pyxtal_dataset``/``get_or_build_pyxtal_cgcnn_dataset``/
+``get_or_build_pyxtal_mace_dataset``, via ``dim_red.generate`` -- imported
+lazily, only when actually used, since ``pyxtal`` isn't a hard dim_red
+dependency). FullStack (``dim_red.pipeline.stack_data``) uses the pyxtal
+SOAP/MACE builders; cgcnn's ``run_single`` uses ``build_graph_dataset_for_run``,
+which dispatches between the two graph builders from a ``RunConfig``.
 
-Both data sources optionally run their structures through
+Every builder optionally runs its structures through
 ``dim_red.augmentation.augment_structures`` (thermal-noise-style positional
-jitter and/or vacancy removal) right after fetch/generation and before SOAP,
-when ``RunConfig.augmentation`` is set -- see ``_resolve_augmentation``. The
-augmentation settings are folded into the cache key (``_cache_key``/
-``_pyxtal_cache_key``) so different augmentation configs don't collide.
+jitter and/or vacancy removal) right after fetch/generation and before
+featurization -- see ``resolve_augmentation``. The augmentation settings are
+folded into the cache key (``_cache_key``/``_pyxtal_cache_key``/...) so
+different augmentation configs don't collide.
 
-For ``RunConfig.model_kind == "cgcnn"``, ``build_graph_dataset_for_run`` (and
-its own ``get_or_build_cgcnn_dataset``/``get_or_build_pyxtal_cgcnn_dataset``)
-is used *instead of* ``build_dataset_for_run`` -- it reuses the exact same
+The cgcnn graph builders reuse the exact same
 fetch/generate/augment/cache-raw-structures-to-``<hash>.extxyz`` plumbing
 (all of it operates on plain ``ase.Atoms``, agnostic to downstream
-featurization) but replaces SOAP with
-``dim_red.cgcnn.graph.atoms_list_to_graph_arrays`` and caches a different
+featurization) but replace SOAP with
+``dim_red.cgcnn.graph.atoms_list_to_graph_arrays`` and cache a different
 array schema (``_GRAPH_CACHE_ARRAY_KEYS``, keyed by graph hyperparameters
 instead of SOAP ones) -- see ``dim_red.cgcnn``.
 
@@ -223,9 +224,8 @@ def _compute_soap_and_standardize(
     """Returns ``(X_std, feature_mean, feature_std)`` -- unlike
     ``dim_red.utils.standardize`` (fit+apply in one, discarding the fitted
     statistics), the mean/std are also returned here so they can be cached
-    and, ultimately, saved into a completed run's ``embeddings.npz`` --
-    letting ``dim_red.pipeline.inference.load_trained_run`` standardize new
-    structures without ever recomputing SOAP on the training set again.
+    alongside the features and reused to standardize new structures the
+    same way, without ever recomputing SOAP on the training set again.
 
     All three are cast to float32 before being returned -- this is the one
     place a run's full SOAP feature matrix (potentially several GB at
@@ -234,8 +234,8 @@ def _compute_soap_and_standardize(
     anyway: nothing in this codebase enables jax's x64 mode, so `X`
     ends up truncated to float32 the moment training converts it to a jnp
     array regardless of what dtype it's stored as; `dim_red.pipeline.compare`
-    (PCA/UMAP) and `dim_red.pipeline.inference` (standardizing new points)
-    have no precision requirement beyond that either. Fitting mean/std in
+    (PCA/UMAP) and standardizing new points have no precision requirement
+    beyond that either. Fitting mean/std in
     float64 first (inside fit_standardization/apply_standardization) and
     only downcasting the final result, rather than computing in float32
     throughout, avoids compounding rounding error across ~35000+ summed
@@ -287,9 +287,8 @@ def get_or_build_dataset(
         number (``-1`` when unavailable), ``structures_path`` is the cached
         extended-XYZ file with the exact ``Atoms`` (same order), and
         ``feature_mean``/``feature_std`` are the standardization statistics
-        ``X_std`` was derived from, cached so
-        ``dim_red.pipeline.inference.load_trained_run`` never needs to
-        recompute SOAP.
+        ``X_std`` was derived from, cached so they never need to be
+        recomputed.
     """
     key = _cache_key(crystal_systems, limit_per_system, soap_kwargs, augmentation)
     return _get_or_build(
@@ -317,7 +316,8 @@ def get_or_build_pyxtal_dataset(
         pyxtal_config: Generation settings (``dim_red.pipeline.config.PyxtalConfig``).
         seed: The *effective* seed to generate with, taking priority over
             ``pyxtal_config.seed`` (resolving ``pyxtal_config.seed or
-            RunConfig.seed`` is the caller's job, see ``build_dataset_for_run``).
+            RunConfig.seed`` is the caller's job, e.g.
+            ``dim_red.pipeline.stack_data``).
         soap_kwargs: Keyword arguments for ``compute_soap`` minus ``average``.
         cache_dir: Directory where cached datasets live.
         augmentation: Optional ``dim_red.augmentation.AugmentationConfig``
@@ -582,8 +582,8 @@ def resolve_augmentation(
 ) -> Optional[AugmentationConfig]:
     """Converts the pipeline's own ``AugmentationConfig`` (see
     ``dim_red.pipeline.config``, independent of ``dim_red.augmentation``) into
-    the real ``dim_red.augmentation.AugmentationConfig`` that
-    ``get_or_build_dataset``/``get_or_build_pyxtal_dataset`` actually use.
+    the real ``dim_red.augmentation.AugmentationConfig`` that the
+    ``get_or_build_*`` builders actually use.
     ``None`` when augmentation is disabled; ``seed`` falls back to
     ``default_seed`` when ``augmentation.seed`` is ``None``."""
     if augmentation is None:
@@ -606,39 +606,6 @@ def _resolve_augmentation(config: "RunConfig") -> Optional[AugmentationConfig]:
     """``resolve_augmentation`` applied to ``RunConfig.augmentation`` with
     ``RunConfig.seed`` as the fallback seed."""
     return resolve_augmentation(config.augmentation, config.seed)
-
-
-def build_dataset_for_run(
-    config: "RunConfig", cache_dir: Union[str, Path]
-) -> Tuple[np.ndarray, List[str], List[str], List[int], Path, np.ndarray, np.ndarray]:
-    """Dispatches to ``get_or_build_dataset`` or ``get_or_build_pyxtal_dataset``
-    per ``config.data_source`` -- the single entry point
-    ``dim_red.pipeline.single_run.run_single`` uses, so callers don't need to
-    know which data source a run uses. Same 7-element return shape as both:
-    ``(X_std, labels, material_ids, spacegroups, structures_path,
-    feature_mean, feature_std)``.
-    """
-    augmentation = _resolve_augmentation(config)
-    if config.data_source == "pyxtal":
-        # config.pyxtal.seed (if set) pins the generated dataset independently
-        # of config.seed, so sweeping config.seed (e.g. repeated-seed training
-        # runs) or other hyperparameters doesn't change the dataset underneath.
-        seed = config.pyxtal.seed if config.pyxtal.seed is not None else config.seed
-        return get_or_build_pyxtal_dataset(
-            pyxtal_config=config.pyxtal,
-            seed=seed,
-            soap_kwargs=config.soap.as_kwargs(),
-            cache_dir=cache_dir,
-            augmentation=augmentation,
-        )
-    return get_or_build_dataset(
-        crystal_systems=config.fetch.crystal_systems,
-        soap_kwargs=config.soap.as_kwargs(),
-        limit_per_system=config.fetch.limit_per_system,
-        cache_dir=cache_dir,
-        api_key=config.fetch.api_key,
-        augmentation=augmentation,
-    )
 
 
 # --- CGCNN graph dataset caching (RunConfig.model_kind == "cgcnn" only) ----
@@ -884,12 +851,9 @@ def build_graph_dataset_for_run(
 ]:
     """Dispatches to ``get_or_build_cgcnn_dataset`` or
     ``get_or_build_pyxtal_cgcnn_dataset`` per ``config.data_source`` --
-    the graph-based counterpart to ``build_dataset_for_run``, called by
-    ``dim_red.pipeline.single_run.run_single`` only when
-    ``config.model_kind == "cgcnn"``. Additive: ``build_dataset_for_run``'s
-    own contract is untouched. Returns the 5-element graph-shaped tuple
-    ``(graph_arrays, labels, material_ids, spacegroups, structures_path)``
-    instead of the 7-element SOAP-shaped one.
+    called by ``dim_red.pipeline.single_run.run_single`` (cgcnn). Returns
+    the 5-element graph-shaped tuple ``(graph_arrays, labels, material_ids,
+    spacegroups, structures_path)``.
     """
     augmentation = _resolve_augmentation(config)
     graph_kwargs = config.graph.graph_kwargs()
@@ -912,7 +876,7 @@ def build_graph_dataset_for_run(
     )
 
 
-# --- MACE dataset caching (RunConfig.model_kind == "mace" or "supcon_mace") --
+# --- MACE dataset caching (supcon_mace stacks, via dim_red.pipeline.stack_data)
 #
 # Unlike the CGCNN graph path above, MACE's body is frozen/pretrained -- there
 # is no training loop to feed padded per-atom graph arrays into, so this
@@ -970,19 +934,16 @@ def _compute_mace_and_standardize(
     atoms_list: list, mace_kwargs: Dict[str, Any]
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Returns ``(X_std, feature_mean, feature_std)`` -- the MACE counterpart
-    to ``_compute_soap_and_standardize``, used *instead of* it when
-    ``RunConfig.model_kind`` is ``"mace"`` (a frozen body, these ARE its
-    embeddings) or ``"supcon_mace"`` (a trained SupCon body, these are its
-    raw *input* features, standardized the exact same way SOAP's raw input
-    features are for plain ``"supcon"`` -- model_kind-agnostic either way,
-    since this function only ever runs a frozen MACE forward pass regardless
-    of what trains on its output afterward). Runs a frozen, pretrained
+    to ``_compute_soap_and_standardize``, used *instead of* it for
+    ``supcon_mace`` stacks (a trained SupCon body, these are its raw *input*
+    features, standardized the exact same way SOAP's raw input features are
+    for plain ``supcon``). Runs a frozen, pretrained
     ``dim_red.mace.model.MaceEncoder`` forward pass over every structure
     (no training, no gradient), then standardizes the resulting embedding
     matrix the same way SOAP features are -- kept for consistency with
-    ``dim_red.pipeline.benchmark``'s kNN/silhouette metrics and so
-    ``dim_red.pipeline.inference`` can standardize newly-applied structures
-    the same way without ever recomputing anything on the training set.
+    ``dim_red.pipeline.benchmark``'s kNN/silhouette metrics and so newly
+    applied structures can be standardized the same way without ever
+    recomputing anything on the training set.
 
     ``mace_kwargs`` is imported lazily inside this function (not at module
     top) since ``dim_red.mace.model.MaceEncoder`` requires ``mace_jax``, not
@@ -1050,38 +1011,4 @@ def get_or_build_pyxtal_mace_dataset(
         mace_kwargs,
         cache_dir,
         augmentation,
-    )
-
-
-def build_mace_dataset_for_run(
-    config: "RunConfig", cache_dir: Union[str, Path]
-) -> Tuple[np.ndarray, List[str], List[str], List[int], Path, np.ndarray, np.ndarray]:
-    """Dispatches to ``get_or_build_mace_dataset`` or
-    ``get_or_build_pyxtal_mace_dataset`` per ``config.data_source`` -- the
-    MACE-based counterpart to ``build_dataset_for_run``, called by
-    ``dim_red.pipeline.single_run.run_single`` only when
-    ``config.model_kind == "supcon_mace"``. Same 7-element SOAP-shaped return as
-    ``build_dataset_for_run`` (unlike ``build_graph_dataset_for_run``'s
-    5-element shape) -- MACE's body is frozen, so there is no per-atom graph
-    batch to carry forward for training; the final pooled embedding is all
-    any downstream step needs.
-    """
-    augmentation = _resolve_augmentation(config)
-    mace_kwargs = config.mace.mace_kwargs()
-    if config.data_source == "pyxtal":
-        seed = config.pyxtal.seed if config.pyxtal.seed is not None else config.seed
-        return get_or_build_pyxtal_mace_dataset(
-            pyxtal_config=config.pyxtal,
-            seed=seed,
-            mace_kwargs=mace_kwargs,
-            cache_dir=cache_dir,
-            augmentation=augmentation,
-        )
-    return get_or_build_mace_dataset(
-        crystal_systems=config.fetch.crystal_systems,
-        mace_kwargs=mace_kwargs,
-        limit_per_system=config.fetch.limit_per_system,
-        cache_dir=cache_dir,
-        api_key=config.fetch.api_key,
-        augmentation=augmentation,
     )

@@ -628,14 +628,8 @@ def test_run_config_to_dict_always_includes_graph_block(tmp_path):
 
 # --- MaceConfig ----------------------------------------------------------------
 #
-# RunConfig.mace stays only for dim_red.pipeline.dataset_cache's MACE dataset
-# builder; run_config_from_dict never produces a supcon_mace RunConfig.
-
-
-def test_run_config_defaults_mace_block(tmp_path):
-    config_path = _write_yaml(tmp_path / "run.yaml", _single_run_dict())
-    config = load_run_config(config_path)
-    assert config.mace == MaceConfig()
+# No longer a RunConfig field; still the data.mace block of a supcon_mace
+# FullStack (dim_red.pipeline.full_stack_config).
 
 
 def test_mace_config_mace_kwargs():
@@ -658,26 +652,6 @@ def test_mace_config_mace_kwargs():
 def test_mace_config_rejects_invalid_values(kwargs):
     with pytest.raises(ValueError):
         MaceConfig(**kwargs)
-
-
-def test_run_config_supcon_mace_requires_checkpoint_path():
-    with pytest.raises(ValueError, match="requires mace.checkpoint_path"):
-        RunConfig(
-            soap=SoapConfig(),
-            encoder=EncoderConfig(encoder_hidden_dim=[8], latent_dim=2),
-            train=TrainSettings(),
-            fetch=FetchConfig(crystal_systems=["cubic"]),
-            model_kind="supcon_mace",
-        )
-
-
-def test_run_config_to_dict_always_includes_mace_block(tmp_path):
-    # Unlike fetch/pyxtal/augmentation/tails, "mace" is always serialized
-    # (same treatment as "soap"/"graph"), even for non-supcon_mace model kinds.
-    config_path = _write_yaml(tmp_path / "run.yaml", _single_run_dict())
-    config = load_run_config(config_path)
-    saved = run_config_to_dict(config)
-    assert "mace" in saved
 
 
 # --- removed features: explicit errors / tolerated leftovers ------------------
@@ -710,13 +684,14 @@ def test_run_config_rejects_top_level_tails_block(tmp_path):
         load_run_config(_write_yaml(tmp_path / "run.yaml", d))
 
 
-def test_run_config_ignores_removed_supcon_and_batching_blocks(tmp_path):
-    """Every config.yaml run_single saved before supcon/batching were
-    removed carries both blocks (cgcnn runs included), so they must still
-    load -- the blocks are ignored, not an error."""
+def test_run_config_ignores_removed_supcon_batching_and_mace_blocks(tmp_path):
+    """Every config.yaml run_single saved before supcon/batching/mace were
+    removed carries all three blocks (cgcnn runs included), so they must
+    still load -- the blocks are ignored, not an error."""
     d = _single_run_dict()
     d["supcon"] = {"mode": "family_only", "tau": 0.05, "projection_dim": 128}
     d["batching"] = {"strategy": "balanced", "balanced_params": {"K": 4}}
+    d["mace"] = {"checkpoint_path": None, "r_max": 5.0, "pooling": "mean"}
     config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
 
     assert config == load_run_config(
@@ -725,6 +700,7 @@ def test_run_config_ignores_removed_supcon_and_batching_blocks(tmp_path):
     saved = run_config_to_dict(config)
     assert "supcon" not in saved
     assert "batching" not in saved
+    assert "mace" not in saved
     assert "tails" not in saved
 
 
@@ -738,3 +714,16 @@ def test_load_sweep_config_reads_base_and_grid(tmp_path):
     assert sweep.output_dir == "sweeps"
     assert sweep.base["fetch"]["crystal_systems"] == ["cubic", "hexagonal"]
     assert sweep.grid == {"encoder.encoder_hidden_dim": [[16], [16, 8]], "seed": [0, 1]}
+
+
+@pytest.mark.parametrize("model_kind", ["supcon", "supcon_mace"])
+def test_run_config_dataclass_refuses_supcon_models_with_a_pointer(model_kind):
+    with pytest.raises(ValueError, match="model_kind must be one of.*FullStack"):
+        RunConfig(
+            soap=SoapConfig(),
+            encoder=EncoderConfig(encoder_hidden_dim=[8], latent_dim=2),
+            train=TrainSettings(),
+            fetch=FetchConfig(crystal_systems=["cubic"]),
+            aux_heads=AuxHeadsConfig(mode="family_only"),
+            model_kind=model_kind,
+        )

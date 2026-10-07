@@ -1,4 +1,12 @@
-"""Regenerate the golden references. Run ONCE, against the pre-FullStack code:
+"""PROVENANCE ONLY -- this script no longer runs. It was run once against the
+pre-FullStack code (commit a693fa2) to produce ``tests/golden/data/``; it
+imports classes (``SupConConfig``, ``HierarchicalSupconTailConfig``) and code
+paths (supcon ``run_single``, ``hierarchical_supcon`` tails) that were removed
+when FullStack became the only supcon training path. It is kept solely as the
+record of how the golden data was generated; do not try to make it importable.
+
+Original description: regenerate the golden references. Run ONCE, against the
+pre-FullStack code:
 
     PYTHONPATH=src:. python tests/golden/make_golden.py
 

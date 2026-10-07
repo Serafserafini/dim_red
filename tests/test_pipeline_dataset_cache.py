@@ -4,6 +4,7 @@ avoid repeating expensive network + SOAP work across hidden-layer configs
 that share the same crystal-system subset.
 """
 
+import dataclasses
 from unittest.mock import patch
 
 import numpy as np
@@ -355,10 +356,7 @@ from dim_red.pipeline.config import (
     SoapConfig,
     TrainSettings,
 )
-from dim_red.pipeline.dataset_cache import (
-    build_dataset_for_run,
-    get_or_build_pyxtal_dataset,
-)
+from dim_red.pipeline.dataset_cache import get_or_build_pyxtal_dataset
 
 
 def _fake_generated_atoms(symbol, material_id, spacegroup, family):
@@ -473,74 +471,6 @@ def test_get_or_build_pyxtal_dataset_raises_when_nothing_generated(tmp_path):
             get_or_build_pyxtal_dataset(pyxtal_config, 0, {}, tmp_path)
 
 
-def _run_config(data_source="fetch", pyxtal_config=None, augmentation_config=None):
-    return RunConfig(
-        fetch=(
-            FetchConfig(crystal_systems=["cubic"], limit_per_system=2)
-            if data_source == "fetch"
-            else None
-        ),
-        soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        encoder=EncoderConfig(encoder_hidden_dim=[4], latent_dim=2),
-        train=TrainSettings(),
-        seed=0,
-        data_source=data_source,
-        pyxtal=pyxtal_config,
-        augmentation=augmentation_config,
-        # build_dataset_for_run is the SOAP path; RunConfig's default
-        # model_kind is now "cgcnn" (which would require aux_heads).
-        model_kind="supcon",
-    )
-
-
-def test_build_dataset_for_run_dispatches_to_fetch(tmp_path):
-    fake_atoms = [_fake_atoms("Cu", "mp-1", 225)]
-    fake_soap = np.array([[1.0, 2.0]])
-    config = _run_config(data_source="fetch")
-
-    with (
-        patch(
-            "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
-            return_value=fake_atoms,
-        ) as mock_fetch,
-        patch("dim_red.pipeline.dataset_cache.compute_soap", return_value=fake_soap),
-        patch("dim_red.generate.generate_structures") as mock_generate,
-    ):
-        build_dataset_for_run(config, cache_dir=tmp_path)
-
-    assert mock_fetch.call_count == 1
-    mock_generate.assert_not_called()
-
-
-def test_build_dataset_for_run_dispatches_to_pyxtal(tmp_path):
-    fake_atoms = [_fake_generated_atoms("Cu", "pyxtal-225-0", 225, "Cubic")]
-    fake_soap = np.array([[1.0, 2.0]])
-    config = _run_config(
-        data_source="pyxtal",
-        pyxtal_config=PyxtalConfig(spacegroups=[225], structures_per_spacegroup=1),
-    )
-
-    with (
-        patch(
-            "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system"
-        ) as mock_fetch,
-        patch("dim_red.pipeline.dataset_cache.compute_soap", return_value=fake_soap),
-        patch(
-            "dim_red.generate.generate_structures", return_value=fake_atoms
-        ) as mock_generate,
-    ):
-        X, labels, ids, sg, structures_path, mean, std = build_dataset_for_run(
-            config, cache_dir=tmp_path
-        )
-
-    assert mock_generate.call_count == 1
-    mock_fetch.assert_not_called()
-    assert labels == ["Cubic"]
-    assert ids == ["pyxtal-225-0"]
-    assert sg == [225]
-    assert structures_path.exists()
-
-
 def test_get_or_build_pyxtal_dataset_accepts_pyxtal_config_with_seed_set(tmp_path):
     """PyxtalConfig.seed must not collide with the "seed" kwarg passed to
     GenerationConfig (regression test: dataclasses.asdict(pyxtal_config)
@@ -560,172 +490,6 @@ def test_get_or_build_pyxtal_dataset_accepts_pyxtal_config_with_seed_set(tmp_pat
             pyxtal_config=pyxtal_config, seed=999, soap_kwargs={}, cache_dir=tmp_path
         )
     assert labels == ["Cubic"]
-
-
-def test_build_dataset_for_run_pyxtal_seed_falls_back_to_run_seed(tmp_path):
-    config = _run_config(
-        data_source="pyxtal",
-        pyxtal_config=PyxtalConfig(spacegroups=[225], structures_per_spacegroup=1),
-    )
-    assert config.pyxtal.seed is None
-
-    with patch(
-        "dim_red.pipeline.dataset_cache.get_or_build_pyxtal_dataset"
-    ) as mock_get:
-        mock_get.return_value = (
-            np.zeros((1, 1)),
-            ["Cubic"],
-            ["id"],
-            [225],
-            tmp_path / "fake.extxyz",
-            np.zeros(1),
-            np.ones(1),
-        )
-        build_dataset_for_run(config, cache_dir=tmp_path)
-
-    _, kwargs = mock_get.call_args
-    assert kwargs["seed"] == config.seed
-
-
-def test_build_dataset_for_run_pyxtal_seed_overrides_run_seed(tmp_path):
-    config = _run_config(
-        data_source="pyxtal",
-        pyxtal_config=PyxtalConfig(
-            spacegroups=[225], structures_per_spacegroup=1, seed=999
-        ),
-    )
-
-    with patch(
-        "dim_red.pipeline.dataset_cache.get_or_build_pyxtal_dataset"
-    ) as mock_get:
-        mock_get.return_value = (
-            np.zeros((1, 1)),
-            ["Cubic"],
-            ["id"],
-            [225],
-            tmp_path / "fake.extxyz",
-            np.zeros(1),
-            np.ones(1),
-        )
-        build_dataset_for_run(config, cache_dir=tmp_path)
-
-    _, kwargs = mock_get.call_args
-    assert kwargs["seed"] == 999
-    assert kwargs["seed"] != config.seed
-
-
-def test_build_dataset_for_run_augmentation_defaults_to_none(tmp_path):
-    config = _run_config(data_source="fetch")
-    assert config.augmentation is None
-
-    with patch("dim_red.pipeline.dataset_cache.get_or_build_dataset") as mock_get:
-        mock_get.return_value = (
-            np.zeros((1, 1)),
-            ["Cubic"],
-            ["id"],
-            [225],
-            tmp_path / "fake.extxyz",
-            np.zeros(1),
-            np.ones(1),
-        )
-        build_dataset_for_run(config, cache_dir=tmp_path)
-
-    _, kwargs = mock_get.call_args
-    assert kwargs["augmentation"] is None
-
-
-def test_build_dataset_for_run_forwards_augmentation_to_fetch(tmp_path):
-    fake_atoms = [_fake_atoms("Cu", "mp-1", 225)]
-    fake_soap = np.array([[1.0, 2.0], [3.0, 4.0]])
-    config = _run_config(
-        data_source="fetch",
-        augmentation_config=PipelineAugmentationConfig(
-            n_augmented=1, jitter_probability=1.0, seed=5
-        ),
-    )
-
-    with (
-        patch(
-            "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
-            return_value=fake_atoms,
-        ) as mock_fetch,
-        patch("dim_red.pipeline.dataset_cache.compute_soap", return_value=fake_soap),
-    ):
-        X, labels, ids, sg, structures_path, mean, std = build_dataset_for_run(
-            config, cache_dir=tmp_path
-        )
-
-    assert mock_fetch.call_count == 1
-    assert X.shape == (2, 2)  # 1 fetched x (1 original + 1 augmented copy)
-
-
-def test_build_dataset_for_run_augmentation_seed_falls_back_to_run_seed(tmp_path):
-    config = _run_config(
-        data_source="fetch",
-        augmentation_config=PipelineAugmentationConfig(n_augmented=1),
-    )
-    assert config.augmentation.seed is None
-
-    with patch("dim_red.pipeline.dataset_cache.get_or_build_dataset") as mock_get:
-        mock_get.return_value = (
-            np.zeros((1, 1)),
-            ["Cubic"],
-            ["id"],
-            [225],
-            tmp_path / "fake.extxyz",
-            np.zeros(1),
-            np.ones(1),
-        )
-        build_dataset_for_run(config, cache_dir=tmp_path)
-
-    _, kwargs = mock_get.call_args
-    assert kwargs["augmentation"].seed == config.seed
-
-
-def test_build_dataset_for_run_augmentation_seed_overrides_run_seed(tmp_path):
-    config = _run_config(
-        data_source="fetch",
-        augmentation_config=PipelineAugmentationConfig(n_augmented=1, seed=999),
-    )
-
-    with patch("dim_red.pipeline.dataset_cache.get_or_build_dataset") as mock_get:
-        mock_get.return_value = (
-            np.zeros((1, 1)),
-            ["Cubic"],
-            ["id"],
-            [225],
-            tmp_path / "fake.extxyz",
-            np.zeros(1),
-            np.ones(1),
-        )
-        build_dataset_for_run(config, cache_dir=tmp_path)
-
-    _, kwargs = mock_get.call_args
-    assert kwargs["augmentation"].seed == 999
-
-
-def test_build_dataset_for_run_forwards_supercell_radius(tmp_path):
-    config = _run_config(
-        data_source="fetch",
-        augmentation_config=PipelineAugmentationConfig(
-            n_augmented=1, supercell_radius=5.0
-        ),
-    )
-
-    with patch("dim_red.pipeline.dataset_cache.get_or_build_dataset") as mock_get:
-        mock_get.return_value = (
-            np.zeros((1, 1)),
-            ["Cubic"],
-            ["id"],
-            [225],
-            tmp_path / "fake.extxyz",
-            np.zeros(1),
-            np.ones(1),
-        )
-        build_dataset_for_run(config, cache_dir=tmp_path)
-
-    _, kwargs = mock_get.call_args
-    assert kwargs["augmentation"].supercell_radius == 5.0
 
 
 # --- CGCNN graph dataset (model_kind == "cgcnn") ----------------------------
@@ -919,6 +683,79 @@ def test_build_graph_dataset_for_run_dispatches_to_pyxtal(tmp_path):
     assert mock_generate.call_count == 1
 
 
+# build_graph_dataset_for_run's seed/augmentation resolution (ported from the
+# removed SOAP build_dataset_for_run, which shared the exact same logic).
+
+
+def _resolved_graph_call_kwargs(config, tmp_path):
+    target = (
+        "get_or_build_pyxtal_cgcnn_dataset"
+        if config.data_source == "pyxtal"
+        else "get_or_build_cgcnn_dataset"
+    )
+    with patch(f"dim_red.pipeline.dataset_cache.{target}") as mock_get:
+        build_graph_dataset_for_run(config, cache_dir=tmp_path)
+    _, kwargs = mock_get.call_args
+    return kwargs
+
+
+def test_build_graph_dataset_for_run_pyxtal_seed_falls_back_to_run_seed(tmp_path):
+    config = _cgcnn_run_config(
+        data_source="pyxtal",
+        pyxtal_config=PyxtalConfig(spacegroups=[225], structures_per_spacegroup=1),
+    )
+    assert config.pyxtal.seed is None
+    assert _resolved_graph_call_kwargs(config, tmp_path)["seed"] == config.seed
+
+
+def test_build_graph_dataset_for_run_pyxtal_seed_overrides_run_seed(tmp_path):
+    config = _cgcnn_run_config(
+        data_source="pyxtal",
+        pyxtal_config=PyxtalConfig(
+            spacegroups=[225], structures_per_spacegroup=1, seed=999
+        ),
+    )
+    kwargs = _resolved_graph_call_kwargs(config, tmp_path)
+    assert kwargs["seed"] == 999
+    assert kwargs["seed"] != config.seed
+
+
+def test_build_graph_dataset_for_run_augmentation_defaults_to_none(tmp_path):
+    config = _cgcnn_run_config(data_source="fetch")
+    assert config.augmentation is None
+    assert _resolved_graph_call_kwargs(config, tmp_path)["augmentation"] is None
+
+
+def test_build_graph_dataset_for_run_augmentation_seed_falls_back_to_run_seed(
+    tmp_path,
+):
+    config = dataclasses.replace(
+        _cgcnn_run_config(data_source="fetch"),
+        augmentation=PipelineAugmentationConfig(n_augmented=1),
+    )
+    assert config.augmentation.seed is None
+    kwargs = _resolved_graph_call_kwargs(config, tmp_path)
+    assert kwargs["augmentation"].seed == config.seed
+
+
+def test_build_graph_dataset_for_run_augmentation_seed_overrides_run_seed(tmp_path):
+    config = dataclasses.replace(
+        _cgcnn_run_config(data_source="fetch"),
+        augmentation=PipelineAugmentationConfig(n_augmented=1, seed=999),
+    )
+    kwargs = _resolved_graph_call_kwargs(config, tmp_path)
+    assert kwargs["augmentation"].seed == 999
+
+
+def test_build_graph_dataset_for_run_forwards_supercell_radius(tmp_path):
+    config = dataclasses.replace(
+        _cgcnn_run_config(data_source="fetch"),
+        augmentation=PipelineAugmentationConfig(n_augmented=1, supercell_radius=5.0),
+    )
+    kwargs = _resolved_graph_call_kwargs(config, tmp_path)
+    assert kwargs["augmentation"].supercell_radius == 5.0
+
+
 # --- MACE dataset (model_kind == "supcon_mace") -------------------------------------
 #
 # Unlike the CGCNN graph tests above, dim_red.mace.model.MaceEncoder itself
@@ -932,7 +769,6 @@ from dim_red.pipeline.config import MaceConfig
 from dim_red.pipeline.dataset_cache import (
     _mace_cache_key,
     _pyxtal_mace_cache_key,
-    build_mace_dataset_for_run,
     get_or_build_mace_dataset,
     get_or_build_pyxtal_mace_dataset,
 )
@@ -1056,65 +892,6 @@ def test_pyxtal_mace_cache_key_prefixed():
     mace_kwargs = MaceConfig(checkpoint_path="/fake/ckpt").mace_kwargs()
     key = _pyxtal_mace_cache_key(pyxtal_config, 0, mace_kwargs)
     assert key.startswith("mace-pyxtal-")
-
-
-def _mace_run_config(data_source="fetch", pyxtal_config=None):
-    return RunConfig(
-        fetch=(
-            FetchConfig(crystal_systems=["cubic"], limit_per_system=2)
-            if data_source == "fetch"
-            else None
-        ),
-        soap=SoapConfig(),
-        encoder=EncoderConfig(encoder_hidden_dim=[4], latent_dim=2),
-        train=TrainSettings(),
-        mace=MaceConfig(checkpoint_path="/fake/ckpt", r_max=5.0),
-        seed=0,
-        model_kind="supcon_mace",
-        data_source=data_source,
-        pyxtal=pyxtal_config,
-    )
-
-
-def test_build_mace_dataset_for_run_dispatches_to_fetch(tmp_path):
-    fake_atoms = [_fake_atoms("Cu", "mp-1", 225)]
-    fake_embeddings = np.array([[1.0, 2.0]])
-    config = _mace_run_config(data_source="fetch")
-
-    with (
-        patch(
-            "dim_red.pipeline.dataset_cache.fetch_structures_by_crystal_system",
-            return_value=fake_atoms,
-        ) as mock_fetch,
-        patch(
-            "dim_red.mace.model.MaceEncoder",
-            side_effect=_mock_mace_encoder(fake_embeddings),
-        ),
-    ):
-        build_mace_dataset_for_run(config, cache_dir=tmp_path)
-
-    assert mock_fetch.call_count == 1
-
-
-def test_build_mace_dataset_for_run_dispatches_to_pyxtal(tmp_path):
-    pytest.importorskip("pyxtal")
-    fake_atoms = [_fake_generated_atoms("Cu", "pyxtal-225-0", 225, "Cubic")]
-    fake_embeddings = np.array([[1.0, 2.0]])
-    pyxtal_config = PyxtalConfig(spacegroups=[225], structures_per_spacegroup=1)
-    config = _mace_run_config(data_source="pyxtal", pyxtal_config=pyxtal_config)
-
-    with (
-        patch(
-            "dim_red.generate.generate_structures", return_value=fake_atoms
-        ) as mock_generate,
-        patch(
-            "dim_red.mace.model.MaceEncoder",
-            side_effect=_mock_mace_encoder(fake_embeddings),
-        ),
-    ):
-        build_mace_dataset_for_run(config, cache_dir=tmp_path)
-
-    assert mock_generate.call_count == 1
 
 
 def test_cache_key_is_unchanged_by_removed_soap_and_augmentation_fields():

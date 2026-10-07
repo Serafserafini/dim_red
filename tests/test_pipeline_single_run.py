@@ -10,6 +10,7 @@ go through ``dim_red.pipeline.full_stack.FullStack``.
 
 import csv
 import dataclasses
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -27,7 +28,6 @@ from dim_red.pipeline.config import (
     EncoderConfig,
     FetchConfig,
     GraphConfig,
-    MaceConfig,
     PyxtalConfig,
     RunConfig,
     SoapConfig,
@@ -97,10 +97,11 @@ def _make_cgcnn_config(tmp_path, aux_mode="family_only") -> RunConfig:
 
 @pytest.mark.parametrize("model_kind", ["supcon", "supcon_mace"])
 def test_run_single_refuses_supcon_with_a_pointer_to_fullstack(tmp_path, model_kind):
-    config = dataclasses.replace(
-        _make_cgcnn_config(tmp_path),
-        model_kind=model_kind,
-        mace=MaceConfig(checkpoint_path="/fake/ckpt", r_max=5.0),
+    # RunConfig itself can no longer hold a non-cgcnn model_kind (see
+    # tests/test_pipeline_config.py), so the run_single guard -- defense in
+    # depth -- is exercised with a minimal stand-in config.
+    config = SimpleNamespace(
+        model_kind=model_kind, output_dir=str(tmp_path / "runs"), name=None
     )
     with pytest.raises(ValueError, match="FullStack"):
         run_single(config)

@@ -46,7 +46,7 @@ similarity is already bounded to ``[-1, 1]`` by the L2-normalization, so
 ``lambda_norm`` is typically unnecessary there).
 ``lambda_norm`` follows the same "config-layer input, not part of
 ``TrainConfig``" placement as ``lambda_family``/``lambda_spacegroup`` (see
-``dim_red.pipeline.config.SupConConfig.lambda_norm``) since it's a loss-term
+the ``contrastive:`` block of ``dim_red.pipeline.full_stack_config``) since it's a loss-term
 weight, not a training-loop mechanic like ``tau``/``epochs``/``device``.
 """
 
@@ -82,10 +82,10 @@ class TrainConfig:
 
     Deliberately does *not* hold ``lambda_family``/``lambda_spacegroup``
     (unlike ``cgcnn.training.TrainConfig``):
-    those live in ``dim_red.pipeline.config.SupConConfig`` instead and are
-    passed to ``training_first_phase`` as explicit arguments, since ``mode``
-    (which label level(s) are active) lives there too and the two are best
-    kept together at the config layer.
+    callers (``dim_red.supcon.stack.SingleStack``) choose them and pass them
+    to ``training_first_phase`` as explicit arguments, since which label
+    level(s) are active is the caller's decision too and the two are best
+    kept together.
 
     Attributes:
         epochs: Number of full passes over training data.

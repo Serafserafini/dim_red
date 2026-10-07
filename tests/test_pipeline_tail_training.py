@@ -290,15 +290,20 @@ def test_train_tail_rejects_a_non_cgcnn_run(tmp_path):
     before any tail directory is created."""
     run_dir = tmp_path / "supcon-run"
     run_dir.mkdir()
-    supcon_config = RunConfig(
-        fetch=FetchConfig(crystal_systems=["cubic"], limit_per_system=4),
-        soap=SoapConfig(),
-        encoder=EncoderConfig(encoder_hidden_dim=[4], latent_dim=2),
-        train=TrainSettings(epochs=1, batch_size=4),
-        model_kind="supcon",
+    # A config.yaml as run_single wrote it for a supcon run: same shape as a
+    # cgcnn one, with "model: supcon".
+    saved = run_config_to_dict(
+        RunConfig(
+            fetch=FetchConfig(crystal_systems=["cubic"], limit_per_system=4),
+            soap=SoapConfig(),
+            encoder=EncoderConfig(encoder_hidden_dim=[4], latent_dim=2),
+            train=TrainSettings(epochs=1, batch_size=4),
+            aux_heads=AuxHeadsConfig(mode="family_only"),
+        )
     )
+    saved["model"] = "supcon"
     with open(run_dir / "config.yaml", "w") as f:
-        yaml.safe_dump(run_config_to_dict(supcon_config), f, sort_keys=False)
+        yaml.safe_dump(saved, f, sort_keys=False)
     np.savez(
         run_dir / "embeddings.npz",
         embeddings=np.zeros((4, 2), dtype=np.float32),
