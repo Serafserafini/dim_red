@@ -7,12 +7,11 @@ needing any real training to run again.
 """
 
 import csv
+import dataclasses
 import math
-from datetime import datetime, timedelta
 
 import numpy as np
 import pytest
-import yaml
 
 from dim_red.analysis.metrics import embedding_quality_metrics
 from dim_red.pipeline.benchmark import (
@@ -24,19 +23,9 @@ from dim_red.pipeline.benchmark import (
     plot_2d_quality_by_model_kind,
     plot_classification_accuracy_by_model_kind,
     run_classification_accuracies,
-    run_wall_clock_seconds,
 )
-from dim_red.pipeline.compare import load_run
-from dim_red.pipeline.config import (
-    AuxHeadsConfig,
-    EncoderConfig,
-    FetchConfig,
-    MaceConfig,
-    RunConfig,
-    SoapConfig,
-    TrainSettings,
-    run_config_to_dict,
-)
+from dim_red.pipeline.run_layout import open_stack
+from tests.fullstack_helpers import write_fake_run
 
 pytest.importorskip("sklearn")
 matplotlib = pytest.importorskip("matplotlib")
@@ -91,183 +80,43 @@ def test_embedding_quality_metrics_excludes_negative_sentinel_labels():
     assert math.isnan(metrics["spacegroup_knn_accuracy"])
 
 
-# --- helpers to fabricate on-disk run/tail directories ---------------------
+# --- helpers ------------------------------------------------------------------
 
 
-def _write_loss_history(path, epochs=3):
-    with open(path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["epoch", "train_loss", "val_loss"])
-        writer.writeheader()
-        for epoch in range(1, epochs + 1):
-            writer.writerow(
-                {"epoch": epoch, "train_loss": 1.0 / epoch, "val_loss": 1.2 / epoch}
-            )
+def _open(run_dir, stack="family"):
+    return open_stack(run_dir, stack, allow_no_heads=True)
 
 
-def _write_run(
-    run_dir,
-    model_kind="supcon",
-    n=8,
-    n_classes=2,
-    latent_dim=2,
-    with_aux=False,
-):
-    run_dir.mkdir(parents=True)
-    aux_heads = (
-        AuxHeadsConfig(mode="family_only", lambda_family=1.0, head_hidden_dim=4)
-        if with_aux
-        else AuxHeadsConfig()
-    )
-    config = RunConfig(
-        model_kind=model_kind,
-        fetch=FetchConfig(crystal_systems=["cubic"], limit_per_system=8),
-        soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        encoder=EncoderConfig(encoder_hidden_dim=[4], latent_dim=latent_dim),
-        train=TrainSettings(epochs=3, batch_size=4, val_ratio=0.25),
-        aux_heads=aux_heads,
-        mace=MaceConfig(checkpoint_path="/fake/ckpt"),
-        seed=0,
-        output_dir=str(run_dir.parent),
-        name=run_dir.name,
-    )
-    with open(run_dir / "config.yaml", "w") as f:
-        yaml.safe_dump(run_config_to_dict(config), f, sort_keys=False)
-    _write_loss_history(run_dir / "loss_history.csv")
-
-    rng = np.random.default_rng(0)
-    class_labels = np.arange(n) % n_classes
-    centers = rng.normal(scale=10.0, size=(n_classes, latent_dim))
-    embeddings = centers[class_labels] + rng.normal(scale=0.1, size=(n, latent_dim))
-    payload = dict(
-        embeddings=embeddings.astype(np.float32),
-        labels=class_labels.astype(np.int64),
-        material_ids=np.array([f"mp-{i}" for i in range(n)]),
-        spacegroups=np.full(n, -1, dtype=np.int64),
-        split=np.array(["train"] * (n - 1) + ["val"]),
-    )
-    if with_aux:
-        family_probs = np.eye(n_classes, dtype=np.float32)[class_labels]
-        payload["family_probs"] = family_probs
-        payload["family_classes"] = np.arange(n_classes, dtype=np.int64)
-    np.savez(run_dir / "embeddings.npz", **payload)
-    return run_dir
+def _run(path, model_kind="supcon", **kw):
+    kw.setdefault("families", ("Cubic", "Hexagonal"))
+    return write_fake_run(path, model_kind=model_kind, **kw)
 
 
-def _write_tail_predictions(run_dir, n=8, n_classes=2, tail_name="classification"):
-    tail_dir = run_dir / "tails" / tail_name
-    tail_dir.mkdir(parents=True)
-    class_labels = np.arange(n) % n_classes
-    family_probs = np.eye(n_classes, dtype=np.float32)[class_labels]
-    np.savez(
-        tail_dir / "tail_predictions.npz",
-        material_ids=np.array([f"mp-{i}" for i in range(n)]),
-        split=np.array(["train"] * (n - 1) + ["val"]),
-        family_probs=family_probs,
-        family_classes=np.arange(n_classes, dtype=np.int64),
-        labels=class_labels.astype(np.int64),
-    )
-    return tail_dir
+# --- run_classification_accuracies -------------------------------------------
 
 
-def _write_visualization_tail(run_dir, n=8, n_classes=2, viz_dim=2, separated=True):
-    tail_dir = run_dir / "tails" / "visualization"
-    tail_dir.mkdir(parents=True)
-    rng = np.random.default_rng(0)
-    class_labels = np.arange(n) % n_classes
-    if separated:
-        centers = rng.normal(scale=10.0, size=(n_classes, viz_dim))
-        embeddings = centers[class_labels] + rng.normal(scale=0.1, size=(n, viz_dim))
-    else:
-        embeddings = rng.normal(size=(n, viz_dim))
-    np.savez(tail_dir / "tail_embeddings.npz", embeddings=embeddings.astype(np.float32))
-    return tail_dir
-
-
-def _write_log(path, timestamps):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        for ts in timestamps:
-            f.write(f"{ts.strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]} [INFO] tick\n")
-
-
-# --- run_classification_accuracies -----------------------------------------
-
-
-def test_run_classification_accuracies_finds_a_hierarchical_supcon_tail(tmp_path):
-    """A hierarchical_supcon tail writes to ``tails/<output_subdir>`` (e.g. a
-    custom ``hierarchical_supcon_round19_baseline``), not a fixed name."""
-    run_dir = _write_run(tmp_path / "run", model_kind="supcon", with_aux=False)
-    _write_tail_predictions(run_dir, tail_name="hierarchical_supcon_round19_baseline")
-    run = load_run(run_dir)
+def test_run_classification_accuracies_reads_heads_predictions(tmp_path):
+    run = _open(_run(tmp_path / "run"))
 
     accs = run_classification_accuracies(run)
 
     assert accs["family"] == pytest.approx(1.0)
 
 
-def test_run_classification_accuracies_reads_embeddings_npz(tmp_path):
-    run_dir = _write_run(tmp_path / "run", model_kind="supcon", with_aux=True)
-    run = load_run(run_dir)
-
-    accs = run_classification_accuracies(run)
-
-    assert accs["family"] == pytest.approx(1.0)
-
-
-def test_run_classification_accuracies_falls_back_to_tail_predictions(tmp_path):
-    run_dir = _write_run(tmp_path / "run", model_kind="supcon", with_aux=False)
-    _write_tail_predictions(run_dir)
-    run = load_run(run_dir)
-
-    accs = run_classification_accuracies(run)
-
-    assert accs["family"] == pytest.approx(1.0)
-
-
-def test_run_classification_accuracies_empty_when_neither_present(tmp_path):
-    run_dir = _write_run(tmp_path / "run", model_kind="supcon", with_aux=False)
-    run = load_run(run_dir)
+def test_run_classification_accuracies_empty_when_no_heads(tmp_path):
+    run = _open(_run(tmp_path / "run", heads=()))
 
     assert run_classification_accuracies(run) == {}
 
 
-# --- run_wall_clock_seconds --------------------------------------------------
-
-
-def test_run_wall_clock_seconds_from_log_span(tmp_path):
-    run_dir = tmp_path / "run"
-    start = datetime(2026, 1, 1, 12, 0, 0)
-    _write_log(run_dir / "run.log", [start, start + timedelta(seconds=30)])
-
-    assert run_wall_clock_seconds(run_dir) == pytest.approx(30.0, abs=0.01)
-
-
-def test_run_wall_clock_seconds_subtracts_nested_tail_span(tmp_path):
-    run_dir = tmp_path / "run"
-    start = datetime(2026, 1, 1, 12, 0, 0)
-    _write_log(run_dir / "run.log", [start, start + timedelta(seconds=100)])
-    _write_log(
-        run_dir / "tails" / "classification" / "run.log",
-        [start + timedelta(seconds=60), start + timedelta(seconds=100)],
-    )
-
-    assert run_wall_clock_seconds(run_dir) == pytest.approx(60.0, abs=0.01)
-
-
-def test_run_wall_clock_seconds_none_when_log_missing(tmp_path):
-    assert run_wall_clock_seconds(tmp_path / "nonexistent_run") is None
-
-
-# --- collect_run_dirs --------------------------------------------------------
+# --- collect_run_dirs ---------------------------------------------------------
 
 
 def test_collect_run_dirs_mixes_and_dedups_run_and_sweep_dirs(tmp_path):
     sweep_dir = tmp_path / "sweep"
-    run_a = _write_run(sweep_dir / "run-a", model_kind="supcon")
-    run_b = _write_run(sweep_dir / "run-b", model_kind="supcon")
-    standalone = _write_run(
-        tmp_path / "standalone_run", model_kind="cgcnn", with_aux=True
-    )
+    run_a = _run(sweep_dir / "run-a")
+    run_b = _run(sweep_dir / "run-b")
+    standalone = _run(tmp_path / "standalone_run", model_kind="cgcnn")
 
     result = collect_run_dirs([sweep_dir, standalone, sweep_dir])
 
@@ -277,23 +126,17 @@ def test_collect_run_dirs_mixes_and_dedups_run_and_sweep_dirs(tmp_path):
 # --- _resolve_2d_embedding ---------------------------------------------------
 
 
-def test_resolve_2d_embedding_prefers_visualization_tail_when_present(tmp_path):
-    run_dir = _write_run(tmp_path / "run", model_kind="supcon", latent_dim=8)
-    _write_visualization_tail(run_dir, viz_dim=2)
-    run = load_run(run_dir)
+def test_resolve_2d_embedding_prefers_viz_head_when_present(tmp_path):
+    run = _open(_run(tmp_path / "run", latent_dim=8))
 
     result = _resolve_2d_embedding(run)
 
     assert result.shape == (8, 2)
-    tail_embeddings = np.load(
-        run_dir / "tails" / "visualization" / "tail_embeddings.npz"
-    )["embeddings"]
-    np.testing.assert_array_equal(result, tail_embeddings)
+    np.testing.assert_array_equal(result, run.viz_embeddings)
 
 
 def test_resolve_2d_embedding_passthrough_when_native_is_2d(tmp_path):
-    run_dir = _write_run(tmp_path / "run", model_kind="supcon", latent_dim=2)
-    run = load_run(run_dir)
+    run = _open(_run(tmp_path / "run", latent_dim=2, heads=()))
 
     result = _resolve_2d_embedding(run)
 
@@ -301,41 +144,30 @@ def test_resolve_2d_embedding_passthrough_when_native_is_2d(tmp_path):
 
 
 def test_resolve_2d_embedding_pca_fallback_for_higher_dim(tmp_path):
-    run_dir = _write_run(tmp_path / "run", model_kind="supcon", latent_dim=8)
-    run = load_run(run_dir)
+    run = _open(_run(tmp_path / "run", latent_dim=8, heads=()))
 
-    result = _resolve_2d_embedding(run)
-
-    assert result.shape == (8, 2)
+    assert _resolve_2d_embedding(run).shape == (8, 2)
 
 
 def test_resolve_2d_embedding_none_when_native_is_1d(tmp_path):
-    run_dir = _write_run(tmp_path / "run", model_kind="supcon", latent_dim=1)
-    run = load_run(run_dir)
+    run = _open(_run(tmp_path / "run", latent_dim=1, heads=()))
 
     assert _resolve_2d_embedding(run) is None
 
 
-def test_resolve_2d_embedding_ignores_non_2d_visualization_tail(tmp_path):
-    run_dir = _write_run(tmp_path / "run", model_kind="supcon", latent_dim=8)
-    _write_visualization_tail(run_dir, viz_dim=3)
-    run = load_run(run_dir)
+def test_resolve_2d_embedding_ignores_non_2d_viz_embeddings(tmp_path):
+    run = _open(_run(tmp_path / "run", latent_dim=8))
+    run = dataclasses.replace(run, viz_embeddings=np.zeros((8, 3), dtype=np.float32))
 
-    result = _resolve_2d_embedding(run)
-
-    # Falls through to the PCA fallback on the native (8D) embedding, since
-    # the tail's own embeddings are 3D, not the requested 2D view.
-    assert result.shape == (8, 2)
+    # Falls through to the PCA fallback on the native (8D) embedding.
+    assert _resolve_2d_embedding(run).shape == (8, 2)
 
 
 # --- benchmark_row / generate_benchmark_table --------------------------------
 
 
 def test_benchmark_row_leads_with_headline_quality_columns(tmp_path):
-    run_dir = _write_run(
-        tmp_path / "run", model_kind="cgcnn", with_aux=True, latent_dim=8
-    )
-    row = benchmark_row(load_run(run_dir))
+    row = benchmark_row(_open(_run(tmp_path / "run", model_kind="cgcnn", latent_dim=8)))
 
     keys = list(row.keys())
     assert keys[0] == "family"
@@ -344,53 +176,54 @@ def test_benchmark_row_leads_with_headline_quality_columns(tmp_path):
 
 
 def test_benchmark_row_has_model_kind_and_metrics(tmp_path):
-    run_dir = _write_run(tmp_path / "run", model_kind="cgcnn", with_aux=True, n=10)
-    row = benchmark_row(load_run(run_dir))
+    row = benchmark_row(_open(_run(tmp_path / "run", model_kind="cgcnn", n=10)))
 
     assert row["model_kind"] == "cgcnn"
+    assert row["stack"] == "family"
     assert row["n_samples"] == 10
     assert "family_silhouette" in row
     assert row["family"] == pytest.approx(1.0)
 
 
+def test_benchmark_row_expert_has_no_family_metrics(tmp_path):
+    run_dir = _run(tmp_path / "run", stacks=("family", "cubic"))
+    row = benchmark_row(_open(run_dir, "cubic"))
+
+    assert row["stack"] == "cubic"
+    assert "spacegroup" in row
+    assert not any(k.startswith("family") for k in row)
+
+
 def test_generate_benchmark_table_end_to_end_mixed_model_kinds(tmp_path):
-    supcon_dir = _write_run(tmp_path / "supcon_run", model_kind="supcon", with_aux=True)
-    cgcnn_dir = _write_run(tmp_path / "cgcnn_run", model_kind="cgcnn", with_aux=True)
-    mace_dir = _write_run(
-        tmp_path / "supcon_mace_run", model_kind="supcon_mace", with_aux=False
-    )
-    _write_tail_predictions(mace_dir)
+    dirs = [
+        _run(tmp_path / "supcon_run", model_kind="supcon"),
+        _run(tmp_path / "cgcnn_run", model_kind="cgcnn"),
+        _run(tmp_path / "supcon_mace_run", model_kind="supcon_mace"),
+    ]
 
     output_csv = tmp_path / "benchmark.csv"
-    result_path = generate_benchmark_table(
-        [supcon_dir, cgcnn_dir, mace_dir], output_csv
-    )
+    result_path = generate_benchmark_table(dirs, output_csv)
 
     assert result_path == output_csv
     with open(output_csv, newline="") as f:
         rows = list(csv.DictReader(f))
 
     assert len(rows) == 3
-    model_kinds = {row["model_kind"] for row in rows}
-    assert model_kinds == {"supcon", "cgcnn", "supcon_mace"}
-    fieldnames = rows[0].keys()
-    assert "family_silhouette" in fieldnames
-    assert "family" in fieldnames
-    # supcon_mace has no built-in heads in embeddings.npz -- its "family"
-    # accuracy column comes from the tail_predictions.npz fallback, and is
-    # still present (not missing) in the shared column set.
-    mace_row = next(r for r in rows if r["model_kind"] == "supcon_mace")
-    assert float(mace_row["family"]) == pytest.approx(1.0)
+    assert {row["model_kind"] for row in rows} == {"supcon", "cgcnn", "supcon_mace"}
+    assert "family_silhouette" in rows[0]
+    assert "family" in rows[0]
 
 
 # --- benchmark plots ----------------------------------------------------------
 
 
 def _rows_for_plots(tmp_path):
-    supcon_a = _write_run(tmp_path / "supcon_a", model_kind="supcon", with_aux=True)
-    supcon_b = _write_run(tmp_path / "supcon_b", model_kind="supcon", with_aux=True)
-    cgcnn_run = _write_run(tmp_path / "cgcnn_run", model_kind="cgcnn", with_aux=True)
-    return [benchmark_row(load_run(d)) for d in [supcon_a, supcon_b, cgcnn_run]]
+    dirs = [
+        _run(tmp_path / "supcon_a", model_kind="supcon"),
+        _run(tmp_path / "supcon_b", model_kind="supcon"),
+        _run(tmp_path / "cgcnn_run", model_kind="cgcnn"),
+    ]
+    return [benchmark_row(_open(d)) for d in dirs]
 
 
 def test_plot_classification_accuracy_by_model_kind_writes_png_and_csv(tmp_path):
@@ -410,8 +243,7 @@ def test_plot_classification_accuracy_by_model_kind_writes_png_and_csv(tmp_path)
 
 
 def test_plot_classification_accuracy_by_model_kind_skips_when_no_accuracy(tmp_path):
-    run_dir = _write_run(tmp_path / "run", model_kind="supcon", with_aux=False)
-    rows = [benchmark_row(load_run(run_dir))]
+    rows = [benchmark_row(_open(_run(tmp_path / "run", heads=())))]
     save_path = tmp_path / "accuracy.png"
 
     plot_classification_accuracy_by_model_kind(rows, save_path=save_path)
@@ -429,7 +261,7 @@ def test_plot_2d_quality_by_model_kind_writes_png_and_csv(tmp_path):
     assert save_path.exists()
     with open(csv_path, newline="") as f:
         csv_rows = list(csv.DictReader(f))
-    assert {r["label_set"] for r in csv_rows} == {"family_2d"}
+    assert "family_2d" in {r["label_set"] for r in csv_rows}
     assert {r["model_kind"] for r in csv_rows} == {"supcon", "cgcnn"}
 
 
@@ -446,22 +278,72 @@ def test_generate_benchmark_plots_writes_both_pngs(tmp_path):
     assert (output_dir / "embedding_quality_2d_by_model_kind.csv").exists()
 
 
-def test_generate_benchmark_table_plot_true_also_writes_plots(tmp_path):
-    supcon_dir = _write_run(tmp_path / "supcon_run", model_kind="supcon", with_aux=True)
-    cgcnn_dir = _write_run(tmp_path / "cgcnn_run", model_kind="cgcnn", with_aux=True)
-    output_csv = tmp_path / "benchmark.csv"
-
-    generate_benchmark_table([supcon_dir, cgcnn_dir], output_csv, plot=True)
-
-    plots_dir = tmp_path / "benchmark_plots"
-    assert (plots_dir / "accuracy_by_model_kind.png").exists()
-    assert (plots_dir / "embedding_quality_2d_by_model_kind.png").exists()
-
-
 def test_generate_benchmark_table_plot_false_skips_plots(tmp_path):
-    supcon_dir = _write_run(tmp_path / "supcon_run", model_kind="supcon", with_aux=True)
     output_csv = tmp_path / "benchmark.csv"
 
-    generate_benchmark_table([supcon_dir], output_csv)
+    generate_benchmark_table([_run(tmp_path / "supcon_run")], output_csv)
 
     assert not (tmp_path / "benchmark_plots").exists()
+
+
+# --- per-(run, stack) rows and plots ------------------------------------------
+
+
+def _sweep(tmp_path):
+    sweep = tmp_path / "s"
+    write_fake_run(
+        sweep / "a", stacks=("family", "cubic"), families=("Cubic", "Hexagonal")
+    )
+    write_fake_run(
+        sweep / "b",
+        stacks=("family", "cubic"),
+        families=("Cubic", "Hexagonal"),
+        learning_rate=2e-3,
+    )
+    return sweep
+
+
+def test_table_has_one_row_per_run_and_stack(tmp_path):
+    out = generate_benchmark_table([_sweep(tmp_path)], tmp_path / "t.csv")
+    rows = list(csv.DictReader(open(out)))
+    assert len(rows) == 4
+    assert {r["stack"] for r in rows} == {"family", "cubic"}
+    family = [r for r in rows if r["stack"] == "family"]
+    cubic = [r for r in rows if r["stack"] == "cubic"]
+    assert all(r["family"] != "" for r in family)
+    assert all(r["spacegroup"] != "" for r in cubic)
+    assert all(r["family"] == "" for r in cubic)  # experts have no family metrics
+    assert all(r["model_kind"] == "supcon" for r in rows)
+    assert "wall_clock_seconds" not in rows[0]
+
+
+def test_default_hyperparams_are_the_new_dotted_paths(tmp_path):
+    out = generate_benchmark_table([_sweep(tmp_path)], tmp_path / "t.csv")
+    header = next(csv.reader(open(out)))
+    for key in (
+        "model.latent_dim",
+        "model.encoder_hidden_dim",
+        "model.body_train.learning_rate",
+    ):
+        assert key in header
+
+
+def test_collect_run_dirs_accepts_runs_and_sweeps(tmp_path):
+    sweep = _sweep(tmp_path)
+    assert collect_run_dirs([sweep]) == sorted(p.resolve() for p in sweep.iterdir())
+    assert collect_run_dirs([sweep / "a", sweep]) == collect_run_dirs([sweep])
+
+
+def test_plots_are_written_per_stack(tmp_path):
+    generate_benchmark_table([_sweep(tmp_path)], tmp_path / "t.csv", plot=True)
+    plots = tmp_path / "benchmark_plots"
+    assert any((plots / "family").iterdir())
+    assert any((plots / "cubic").iterdir())
+
+
+def test_heads_name_is_forwarded(tmp_path):
+    sweep = tmp_path / "s"
+    write_fake_run(sweep / "a", heads=("x", "y"))
+    with pytest.raises(ValueError, match="several heads"):
+        generate_benchmark_table([sweep], tmp_path / "t.csv")
+    generate_benchmark_table([sweep], tmp_path / "t.csv", heads_name="x")
