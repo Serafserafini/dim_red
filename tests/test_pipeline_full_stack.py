@@ -21,7 +21,10 @@ SYSTEM_SPACEGROUPS = {
 
 def _block(**over):
     block = {
-        "data": {"pyxtal": {"structures_per_spacegroup": 2}},
+        "data": {
+            "pyxtal": {"structures_per_spacegroup": 2},
+            "soap": {"element_agnostic": True},
+        },
         "encoder": {"encoder_hidden_dim": [8], "latent_dim": 4},
         "projection": {"projection_dim": 5},
         "train": {"epochs": 2, "batch_size": 8},

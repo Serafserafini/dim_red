@@ -16,7 +16,7 @@ def _block(spacegroups, per_sg):
     return {
         "data": {
             "pyxtal": {"spacegroups": spacegroups, "structures_per_spacegroup": per_sg},
-            "soap": {"r_cut": 3.0, "n_max": 2, "l_max": 2},
+            "soap": {"r_cut": 3.0, "n_max": 2, "l_max": 2, "element_agnostic": True},
         },
         "encoder": {"encoder_hidden_dim": [16], "latent_dim": 4},
         "projection": {"projection_dim": 8},

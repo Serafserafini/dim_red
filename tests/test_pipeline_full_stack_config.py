@@ -14,7 +14,10 @@ from dim_red.pipeline.full_stack_config import (
 
 def _block(**over):
     block = {
-        "data": {"pyxtal": {"structures_per_spacegroup": 2}},
+        "data": {
+            "pyxtal": {"structures_per_spacegroup": 2},
+            "soap": {"element_agnostic": True},
+        },
         "encoder": {"encoder_hidden_dim": [8], "latent_dim": 4},
         "train": {"epochs": 2, "batch_size": 8},
     }
@@ -267,3 +270,26 @@ def test_balanced_batching_on_the_family_stack_still_parses():
     d["family"]["batching"] = {"strategy": "balanced", "P": 2, "K": 4}
     cfg = full_stack_config_from_dict(d)
     assert cfg.stacks[FAMILY].model.body_batching.strategy == "balanced"
+
+
+def test_supcon_requires_element_agnostic_soap():
+    d = _config()
+    d["family"]["data"]["soap"] = {"element_agnostic": False}
+    with pytest.raises(ValueError, match="element_agnostic"):
+        full_stack_config_from_dict(d)
+
+
+def test_supcon_default_soap_is_rejected_with_a_fix_hint():
+    d = _config()
+    del d["family"]["data"]["soap"]
+    with pytest.raises(ValueError, match="stack 'family'.*element_agnostic: true"):
+        full_stack_config_from_dict(d)
+
+
+def test_supcon_mace_does_not_need_mu2():
+    d = _config(model_kind="supcon_mace")
+    for block in (d["family"], d["experts"]["defaults"]):
+        block["data"].pop("soap", None)
+        block["data"]["mace"] = {"checkpoint_path": "x.msgpack"}
+    cfg = full_stack_config_from_dict(d)
+    assert cfg.model_kind == "supcon_mace"

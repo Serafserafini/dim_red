@@ -416,6 +416,15 @@ def full_stack_config_from_dict(d: Dict[str, Any]) -> FullStackConfig:
     stacks = {
         name: parse_stack_spec(name, block, seed) for name, block in blocks.items()
     }
+    if model_kind == "supcon":
+        for name, spec in stacks.items():
+            if not spec.data.soap.element_agnostic:
+                raise ValueError(
+                    f"stack {name!r}: model_kind supcon needs "
+                    "data.soap.element_agnostic: true (SOAP 'mu2' compression), "
+                    "so a stack's features depend only on geometry, never on "
+                    "which chemical species its dataset happened to contain"
+                )
     if model_kind == "supcon_mace":
         for name, spec in stacks.items():
             if not spec.data.mace.checkpoint_path:

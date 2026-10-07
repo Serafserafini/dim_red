@@ -11,7 +11,10 @@ from dim_red.pipeline.stack_data import StackDataset, build_stack_dataset
 
 
 def _spec(name=FAMILY, model_kind="supcon", extra_data=None, seed=5):
-    data = {"pyxtal": {"structures_per_spacegroup": 2}}
+    data = {
+        "pyxtal": {"structures_per_spacegroup": 2},
+        "soap": {"element_agnostic": True},
+    }
     data.update(extra_data or {})
     block = {
         "data": data,
