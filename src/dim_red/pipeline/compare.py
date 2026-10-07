@@ -4,8 +4,8 @@ Comparison suite for sweep output: discovers every run directory written by
 fixed set of PNG comparison plots -- overlaid loss curves, final-metric-vs-
 hyperparameter plots for whichever hyperparameters actually varied across the
 runs, a grid of latent-space scatter plots, and (when auxiliary heads were
-used) a classification-accuracy comparison -- into ``<sweep_dir>/comparison/``.
-Each ``plot_*`` function also accepts a ``csv_path`` to write the exact data
+used) a classification-accuracy comparison -- into ``<sweep_dir>/comparison/``. One suite per stack (``family`` and each trained
+per-family expert) is written, into ``<comparison>/<stack>/``. Each ``plot_*`` function also accepts a ``csv_path`` to write the exact data
 backing that plot, so ``generate_comparison_report`` produces a CSV alongside
 every PNG (same basename, ``.csv`` instead of ``.png``).
 """
@@ -24,11 +24,13 @@ import numpy as np
 
 from dim_red.analysis.plotting import plot_spacegroup_histogram
 from dim_red.pca import PCA
-from dim_red.pipeline.config import (
-    RunConfig,
-    flatten_config_dict,
-    load_run_config,
-    run_config_to_dict,
+from dim_red.pipeline.run_layout import (
+    FAMILY,
+    STACK_ORDER,
+    RunData,
+    discover_full_stack_runs,
+    open_stack,
+    trained_stack_names,
 )
 
 logger = logging.getLogger("dim_red.pipeline")
@@ -39,10 +41,19 @@ logger = logging.getLogger("dim_red.pipeline")
 _CRYSTAL_SYSTEM_ABBREV_LEN = 3
 
 # Config fields never worth treating as a "hyperparameter" to plot/label by:
-# constant across a sweep's runs by construction (output_dir), unique per
-# run rather than swept (name), or sensitive (fetch.api_key -- excluded so it
-# can never end up in a plot title/filename even if it somehow varied).
-_NON_HYPERPARAM_KEYS = {"fetch.api_key", "output_dir", "name"}
+# constant across a sweep's runs by construction (output_dir) or unique per
+# run rather than swept (name). ``seed`` is deliberately *not* listed: if a
+# sweep varies it, it should show up as a hyperparameter.
+_NON_HYPERPARAM_KEYS = {"output_dir", "name"}
+
+
+def display_metric(metric: str, stack: str) -> str:
+    """Plot label of a loss-history column. The CSV keeps the historical
+    ``*_family_supcon`` names, but in an expert stack that term contrasts
+    spacegroups."""
+    if stack == FAMILY:
+        return metric
+    return metric.replace("family_supcon", "spacegroup_supcon")
 
 
 def _abbreviate_crystal_systems(systems: List[str]) -> str:
@@ -77,7 +88,7 @@ def _format_hyperparam_value(path: str, value: Any) -> Any:
     systems, join other lists with "-", and pass numeric/scalar values
     through unchanged so numeric plotting/sorting still works.
     """
-    if path == "fetch.crystal_systems":
+    if path in ("fetch.crystal_systems", "data.pyxtal.families"):
         return _abbreviate_crystal_systems(value)
     if isinstance(value, list):
         return "-".join(str(v) for v in value)
@@ -87,11 +98,12 @@ def _format_hyperparam_value(path: str, value: Any) -> Any:
 # Short forms for the hyperparameter *names* themselves (as opposed to their
 # values, handled by ``_format_hyperparam_value``) -- mirrors the prefixes
 # ``dim_red.pipeline.single_run.make_run_name`` already uses for run
-# directory names (hd, cs, aux, lf, lsg), extended to the rest of RunConfig
+# directory names (hd, cs, aux, lf, lsg), extended to the rest of the stack config
 # so any swept field gets a short, plot/CSV-friendly key. Anything not listed
 # here falls back to its unabbreviated config field name.
 _HYPERPARAM_KEY_ABBREV = {
     "crystal_systems": "cs",
+    "families": "cs",
     "limit_per_system": "limit",
     "encoder_hidden_dim": "hd",
     "latent_dim": "ld",
@@ -125,71 +137,24 @@ def _abbreviate_hyperparam_key(path: str) -> str:
     return _HYPERPARAM_KEY_ABBREV.get(key, key)
 
 
-@dataclass
-class RunData:
-    """Everything loaded from one run directory needed for comparison plots."""
-
-    run_dir: Path
-    config: RunConfig
-    loss_history: Dict[str, np.ndarray]
-    embeddings: Dict[str, np.ndarray]
-
-    @property
-    def label(self) -> str:
-        """Full run directory name -- unique, used for identification only."""
-        return self.run_dir.name
-
-    @property
-    def flat_config(self) -> Dict[str, Any]:
-        """This run's config as ``{dotted_path: leaf_value}`` pairs."""
-        return flatten_config_dict(run_config_to_dict(self.config))
-
-
-def discover_runs(sweep_dir: Union[str, Path]) -> List[Path]:
-    """Return every immediate subdirectory of ``sweep_dir`` that looks like a
-    completed run (has both ``config.yaml`` and ``loss_history.csv``), sorted
-    by name for reproducible plot ordering.
-    """
-    sweep_dir = Path(sweep_dir)
-    run_dirs = sorted(
-        p
-        for p in sweep_dir.iterdir()
-        if p.is_dir()
-        and (p / "config.yaml").exists()
-        and (p / "loss_history.csv").exists()
-    )
-    if not run_dirs:
-        raise ValueError(f"No completed runs found directly under {sweep_dir}")
-    return run_dirs
-
-
-def _load_loss_history(path: Path) -> Dict[str, np.ndarray]:
-    with open(path, newline="") as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
-    return {
-        key: np.array([float(row[key]) for row in rows]) for key in reader.fieldnames
-    }
-
-
-def load_run(run_dir: Union[str, Path]) -> RunData:
-    """Load one run directory's config, loss history and embeddings."""
-    run_dir = Path(run_dir)
-    config = load_run_config(run_dir / "config.yaml")
-    loss_history = _load_loss_history(run_dir / "loss_history.csv")
-    with np.load(run_dir / "embeddings.npz") as npz:
-        embeddings = dict(npz.items())
-    return RunData(
-        run_dir=run_dir, config=config, loss_history=loss_history, embeddings=embeddings
-    )
-
-
-def load_runs(sweep_dir: Union[str, Path]) -> List[RunData]:
-    return [load_run(d) for d in discover_runs(sweep_dir)]
+def load_runs(
+    sweep_dir: Union[str, Path],
+    stack: str = FAMILY,
+    heads_name: Optional[str] = None,
+) -> List[RunData]:
+    """``stack`` of every FullStack run directly under ``sweep_dir`` that has
+    it trained (runs without it are skipped with a log line)."""
+    runs = []
+    for run_dir in discover_full_stack_runs(sweep_dir):
+        if stack not in trained_stack_names(run_dir):
+            logger.info("skipping run %s: stack %r is not trained", run_dir.name, stack)
+            continue
+        runs.append(open_stack(run_dir, stack, heads_name, allow_no_heads=True))
+    return runs
 
 
 def varying_hyperparams(runs: List[RunData]) -> List[str]:
-    """Dotted-path config keys (see ``dim_red.pipeline.config.flatten_config_dict``)
+    """Dotted-path config keys (flattened stack spec)
     whose value differs across ``runs`` -- i.e. whatever was actually swept,
     for *any* config field, not a fixed set of named axes. Sorted for
     reproducible plot ordering.
@@ -300,8 +265,8 @@ def plot_loss_curves(
                 color=cmap(i % 10),
             )
         ax.set_xlabel("Epoch")
-        ax.set_ylabel(metric)
-        ax.set_title(metric)
+        ax.set_ylabel(display_metric(metric, runs[0].stack))
+        ax.set_title(display_metric(metric, runs[0].stack))
         ax.grid(True, linestyle="--", alpha=0.5)
 
     handles, labels = axes[0].get_legend_handles_labels()
@@ -408,9 +373,10 @@ def plot_final_metric_vs_hyperparam(
         ax.set_xticklabels([str(k) for k in keys])
 
     ax.set_xlabel(hyperparam)
-    ax.set_ylabel(f"final {metric}")
+    shown = display_metric(metric, runs[0].stack)
+    ax.set_ylabel(f"final {shown}")
     ax.set_title(
-        f"Final {metric} vs {hyperparam} "
+        f"Final {shown} vs {hyperparam} "
         f"({len(runs)} run(s) across {len(keys)} group(s))"
     )
     ax.legend()
@@ -904,40 +870,6 @@ def classification_accuracies_from_npz(npz: Dict[str, np.ndarray]) -> Dict[str, 
     return accs
 
 
-def hierarchical_accuracies_from_npz(npz: Dict[str, np.ndarray]) -> Dict[str, float]:
-    """Family/spacegroup/spacegroup-oracle accuracy for a
-    ``dim_red.pipeline.tail_training`` hierarchical tail's
-    ``tail_predictions.npz``.
-
-    Same ``family``/``spacegroup`` keys as ``classification_accuracies_from_npz``
-    (computed the exact same way, including the ``_all``/``_train``/``_val``
-    breakdown, since a hierarchical tail's payload shares that same schema --
-    ``spacegroup`` here already reflects the honest, end-to-end pipeline:
-    stage 1's *predicted* family picked which per-family expert produced
-    ``spacegroup_probs``), plus ``spacegroup_oracle`` (and its own
-    ``_all``/``_train``/``_val`` breakdown) when ``spacegroup_probs_oracle``
-    is present -- accuracy if stage 1's *true* family had been used to pick
-    the expert instead, isolating expert quality from stage-1 routing
-    quality. Returns an empty dict if none of the expected keys are present.
-    """
-    accs = classification_accuracies_from_npz(npz)
-    if "spacegroup_probs_oracle" in npz and "spacegroups" in npz:
-        pred = npz["spacegroup_classes"][npz["spacegroup_probs_oracle"].argmax(axis=1)]
-        true = npz["spacegroups"]
-        split = npz.get("split")
-        if split is None:
-            accs["spacegroup_oracle"] = _masked_accuracy(pred, true)
-        else:
-            val_acc = _masked_accuracy(pred, true, split == "val")
-            accs["spacegroup_oracle"] = val_acc
-            accs["spacegroup_oracle_all"] = _masked_accuracy(pred, true)
-            accs["spacegroup_oracle_train"] = _masked_accuracy(
-                pred, true, split == "train"
-            )
-            accs["spacegroup_oracle_val"] = val_acc
-    return accs
-
-
 def plot_aux_accuracy_comparison(
     runs: List[RunData],
     save_path: Optional[Union[str, Path]] = None,
@@ -992,48 +924,16 @@ def plot_aux_accuracy_comparison(
     plt.close(fig)
 
 
-def generate_comparison_report(
-    sweep_dir: Union[str, Path],
-    output_dir: Optional[Union[str, Path]] = None,
-    write_data_files: bool = False,
-    umap_params: Optional[LatentUmapParams] = None,
-) -> Path:
-    """Discover every run under ``sweep_dir`` and render the full comparison
-    suite (loss curves -- one subplot per loss-history column common to every
-    run, e.g. the total and, when active, the aux-head cross-entropy or
-    SupCon terms, not just the total -- final-metric-vs-hyperparameter plots
-    for those same components against whatever hyperparameter varied, a
-    spacegroup histogram colored by family, a latent-space grid (any non-2D
-    run projected to 2D via UMAP, see ``plot_latent_space_grid``) with a
-    PCA/UMAP baseline comparison, and an aux-heads accuracy comparison if
-    applicable) into ``output_dir`` (default: ``<sweep_dir>/comparison``).
-
-    Args:
-        sweep_dir: Directory containing completed run subdirectories.
-        output_dir: Where to write the comparison PNGs (and CSVs, if
-            ``write_data_files``). Defaults to ``<sweep_dir>/comparison``.
-        write_data_files: If True, also write each plot's underlying data to
-            a CSV file of the same name (e.g. ``loss_curves.png`` /
-            ``loss_curves.csv``), so the numbers behind a plot can be
-            inspected or reprocessed without parsing the image. Off by
-            default -- only the PNGs are written.
-        umap_params: Hyperparameters (``LatentUmapParams``) for the UMAP
-            projection used in the latent-space grid, both for non-2D runs
-            and the UMAP baseline. ``None`` (default) uses ``umap-learn``'s
-            own defaults.
-
-    Returns:
-        The directory the comparison PNGs (and CSVs) were written to.
-    """
-    sweep_dir = Path(sweep_dir)
-    runs = load_runs(sweep_dir)
-    output_dir = Path(output_dir) if output_dir else sweep_dir / "comparison"
+def _write_stack_report(
+    runs: List[RunData],
+    output_dir: Path,
+    write_data_files: bool,
+    umap_params: Optional[LatentUmapParams],
+) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     def _csv_path(name: str) -> Optional[Path]:
         return output_dir / name if write_data_files else None
-
-    logger.info("Comparing %d run(s) from %s", len(runs), sweep_dir)
 
     plot_loss_curves(
         runs,
@@ -1041,7 +941,6 @@ def generate_comparison_report(
         save_path=output_dir / "loss_curves.png",
         csv_path=_csv_path("loss_curves.csv"),
     )
-
     if len(runs) > 1:
         varying = varying_hyperparams(runs)
         for metric in available_loss_metrics(runs):
@@ -1056,7 +955,6 @@ def generate_comparison_report(
                 )
     else:
         logger.info("Only one run found; skipping final-metric-vs-hyperparameter plots")
-
     plot_spacegroup_family_histogram(
         runs,
         save_path=output_dir / "spacegroup_histogram.png",
@@ -1074,5 +972,49 @@ def generate_comparison_report(
         csv_path=_csv_path("aux_heads_accuracy.csv"),
     )
 
+
+def generate_comparison_report(
+    sweep_dir: Union[str, Path],
+    output_dir: Optional[Union[str, Path]] = None,
+    write_data_files: bool = False,
+    umap_params: Optional[LatentUmapParams] = None,
+    heads_name: Optional[str] = None,
+) -> Path:
+    """Render the full comparison suite (loss curves for every loss-history
+    column common to the runs, final-metric-vs-hyperparameter plots, a
+    spacegroup histogram, a latent-space grid with PCA/UMAP baselines, and an
+    aux-heads accuracy comparison when heads exist) **once per stack** for
+    every FullStack run directly under ``sweep_dir``, into
+    ``<output_dir>/<stack>/`` (default ``<sweep_dir>/comparison``). A run that
+    lacks a stack is skipped, with a log line, from that stack's suite only.
+    Needs a ``heads_name`` when a stack has several heads sets; stacks with no
+    heads get no accuracy plots.
+
+    Args:
+        sweep_dir: Directory containing completed run subdirectories.
+        output_dir: Where to write the per-stack suites. Defaults to
+            ``<sweep_dir>/comparison``.
+        write_data_files: If True, also write each plot's underlying data to
+            a CSV file of the same name. Off by default.
+        umap_params: Hyperparameters (``LatentUmapParams``) for the UMAP
+            projection used in the latent-space grid. ``None`` uses
+            ``umap-learn``'s own defaults.
+        heads_name: Which heads set to read when a stack has several.
+
+    Returns:
+        The directory holding the per-stack suites.
+    """
+    sweep_dir = Path(sweep_dir)
+    run_dirs = discover_full_stack_runs(sweep_dir)
+    output_dir = Path(output_dir) if output_dir else sweep_dir / "comparison"
+    stacks = [
+        s for s in STACK_ORDER if any(s in trained_stack_names(d) for d in run_dirs)
+    ]
+    logger.info(
+        "Comparing %d run(s) from %s over stacks %s", len(run_dirs), sweep_dir, stacks
+    )
+    for stack in stacks:
+        runs = load_runs(sweep_dir, stack=stack, heads_name=heads_name)
+        _write_stack_report(runs, output_dir / stack, write_data_files, umap_params)
     logger.info("Comparison report saved to %s", output_dir)
     return output_dir

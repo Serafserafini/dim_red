@@ -10,7 +10,6 @@ import csv
 
 import numpy as np
 import pytest
-import yaml
 
 from dim_red.pipeline.compare import (
     LatentUmapParams,
@@ -18,10 +17,9 @@ from dim_red.pipeline.compare import (
     available_loss_metrics,
     classification_accuracies_from_npz,
     compute_embedding_baselines,
-    discover_runs,
+    display_metric,
     final_metric_groups,
     generate_comparison_report,
-    hierarchical_accuracies_from_npz,
     latent_grid_axes,
     load_runs,
     plot_aux_accuracy_comparison,
@@ -32,49 +30,10 @@ from dim_red.pipeline.compare import (
     run_labels,
     varying_hyperparams,
 )
-from dim_red.pipeline.config import (
-    AuxHeadsConfig,
-    EncoderConfig,
-    FetchConfig,
-    RunConfig,
-    SoapConfig,
-    TrainSettings,
-    run_config_to_dict,
-)
+from dim_red.pipeline.run_layout import FAMILY, discover_full_stack_runs
+from tests.fullstack_helpers import write_fake_run
 
 matplotlib = pytest.importorskip("matplotlib")
-
-
-def _write_loss_history(path, epochs=3, val_loss_final=1.0, aux=False):
-    fieldnames = [
-        "epoch",
-        "train_loss",
-        "train_recon",
-        "train_kl",
-        "val_loss",
-        "val_recon",
-        "val_kl",
-    ]
-    if aux:
-        fieldnames += ["train_family_ce", "val_family_ce"]
-    with open(path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for epoch in range(1, epochs + 1):
-            val_loss = val_loss_final + (epochs - epoch) * 0.1
-            row = {
-                "epoch": epoch,
-                "train_loss": val_loss + 0.05,
-                "train_recon": val_loss * 0.7,
-                "train_kl": val_loss * 0.3,
-                "val_loss": val_loss,
-                "val_recon": val_loss * 0.7,
-                "val_kl": val_loss * 0.3,
-            }
-            if aux:
-                row["train_family_ce"] = 0.2
-                row["val_family_ce"] = 0.25
-            writer.writerow(row)
 
 
 def _write_run(
@@ -88,51 +47,18 @@ def _write_run(
     n_features=None,
     latent_dim=2,
 ):
-    run_dir.mkdir(parents=True)
-
-    aux_heads = (
-        AuxHeadsConfig(mode="family_only", lambda_family=1.0, head_hidden_dim=4)
-        if with_aux
-        else AuxHeadsConfig()
+    return write_fake_run(
+        run_dir,
+        hidden_dim=hidden_dim,
+        families=[c.capitalize() for c in crystal_systems],
+        val_loss_final=val_loss_final,
+        aux=with_aux,
+        n=n,
+        learning_rate=learning_rate,
+        n_features=n_features,
+        latent_dim=latent_dim,
+        heads=("default",) if with_aux else (),
     )
-    config = RunConfig(
-        fetch=FetchConfig(crystal_systems=crystal_systems, limit_per_system=8),
-        soap=SoapConfig(r_cut=3.0, n_max=2, l_max=2),
-        encoder=EncoderConfig(encoder_hidden_dim=hidden_dim, latent_dim=latent_dim),
-        train=TrainSettings(
-            epochs=3, batch_size=4, val_ratio=0.25, learning_rate=learning_rate
-        ),
-        aux_heads=aux_heads,
-        seed=0,
-        output_dir=str(run_dir.parent),
-        name=run_dir.name,
-    )
-    with open(run_dir / "config.yaml", "w") as f:
-        yaml.safe_dump(run_config_to_dict(config), f, sort_keys=False)
-
-    _write_loss_history(
-        run_dir / "loss_history.csv", val_loss_final=val_loss_final, aux=with_aux
-    )
-
-    rng = np.random.default_rng(0)
-    embeddings = rng.normal(size=(n, latent_dim)).astype(np.float32)
-    labels = np.array([crystal_systems[0].capitalize()] * n)
-    payload = dict(
-        embeddings=embeddings,
-        labels=labels,
-        material_ids=np.array([f"mp-{i}" for i in range(n)]),
-        spacegroups=np.array([1] * n, dtype=np.int64),
-        split=np.array(["train"] * (n - 1) + ["val"]),
-    )
-    if with_aux:
-        family_probs = np.zeros((n, 1), dtype=np.float32)
-        family_probs[:, 0] = 1.0
-        payload["family_probs"] = family_probs
-        payload["family_classes"] = np.array([crystal_systems[0].capitalize()])
-    if n_features is not None:
-        payload["features"] = rng.normal(size=(n, n_features)).astype(np.float32)
-    np.savez(run_dir / "embeddings.npz", **payload)
-    return run_dir
 
 
 @pytest.fixture
@@ -144,20 +70,20 @@ def sweep_dir(tmp_path):
 
 
 def test_discover_runs_finds_completed_run_dirs(sweep_dir):
-    dirs = discover_runs(sweep_dir)
+    dirs = discover_full_stack_runs(sweep_dir)
     assert [d.name for d in dirs] == ["hd-4_cs-cubic", "hd-8_cs-cubic"]
 
 
 def test_discover_runs_raises_when_empty(tmp_path):
     empty = tmp_path / "empty-sweep"
     empty.mkdir()
-    with pytest.raises(ValueError, match="No completed runs"):
-        discover_runs(empty)
+    with pytest.raises(ValueError, match="No completed FullStack runs"):
+        discover_full_stack_runs(empty)
 
 
 def test_varying_hyperparams_detects_hidden_dim_only(sweep_dir):
     runs = load_runs(sweep_dir)
-    assert varying_hyperparams(runs) == ["encoder.encoder_hidden_dim"]
+    assert varying_hyperparams(runs) == ["model.encoder_hidden_dim"]
 
 
 def test_varying_hyperparams_is_not_limited_to_named_axes(tmp_path):
@@ -169,7 +95,7 @@ def test_varying_hyperparams_is_not_limited_to_named_axes(tmp_path):
     _write_run(d / "lr-a", [4], ["cubic"], val_loss_final=1.0, learning_rate=0.01)
     _write_run(d / "lr-b", [4], ["cubic"], val_loss_final=0.5, learning_rate=0.001)
     runs = load_runs(d)
-    assert varying_hyperparams(runs) == ["train.learning_rate"]
+    assert varying_hyperparams(runs) == ["model.body_train.learning_rate"]
 
 
 def test_crystal_systems_hyperparam_is_abbreviated(tmp_path):
@@ -178,7 +104,7 @@ def test_crystal_systems_hyperparam_is_abbreviated(tmp_path):
         d / "run-a", [4], ["cubic", "hexagonal", "monoclinic", "orthorhombic"], 1.0
     )
     runs = load_runs(d)
-    groups = final_metric_groups(runs, "fetch.crystal_systems")
+    groups = final_metric_groups(runs, "data.pyxtal.families")
     # Long crystal-system names truncated to 3 letters each, not the full
     # names, so axis labels/titles built from this value stay plot-safe.
     (key,) = groups.keys()
@@ -198,7 +124,7 @@ def test_run_labels_abbreviates_crystal_systems_and_stays_short(tmp_path):
     # Hyperparameter *names* are also abbreviated (hd, cs), same short forms
     # as run-directory names, not the full config field names.
     assert "encoder_hidden_dim" not in labels[run_dir_a]
-    assert "crystal_systems" not in labels[run_dir_a]
+    assert "families" not in labels[run_dir_a]
     assert "hd=128-64-32" in labels[run_dir_a]
     assert "cs=" in labels[run_dir_a]
     for label in labels.values():
@@ -206,10 +132,10 @@ def test_run_labels_abbreviates_crystal_systems_and_stays_short(tmp_path):
 
 
 def test_abbreviate_hyperparam_key_uses_short_forms():
-    assert _abbreviate_hyperparam_key("encoder.encoder_hidden_dim") == "hd"
-    assert _abbreviate_hyperparam_key("fetch.crystal_systems") == "cs"
+    assert _abbreviate_hyperparam_key("model.encoder_hidden_dim") == "hd"
+    assert _abbreviate_hyperparam_key("data.pyxtal.families") == "cs"
     assert _abbreviate_hyperparam_key("aux_heads.lambda_family") == "lf"
-    assert _abbreviate_hyperparam_key("train.learning_rate") == "lr"
+    assert _abbreviate_hyperparam_key("model.body_train.learning_rate") == "lr"
 
 
 def test_abbreviate_hyperparam_key_falls_back_to_full_name_when_unknown():
@@ -251,18 +177,16 @@ def test_generate_comparison_report_loss_curves_include_all_available_metrics(
     sweep_dir,
 ):
     """The `compare` command's loss_curves.png/.csv must plot every loss
-    component common to all runs (recon/kl here), not just the total.
+    component common to all runs (the SupCon terms here), not just the total.
     """
-    report_dir = generate_comparison_report(sweep_dir, write_data_files=True)
+    report_dir = generate_comparison_report(sweep_dir, write_data_files=True) / FAMILY
     with open(report_dir / "loss_curves.csv", newline="") as f:
         rows = list(csv.DictReader(f))
     assert {row["metric"] for row in rows} == {
         "train_loss",
         "val_loss",
-        "train_recon",
-        "val_recon",
-        "train_kl",
-        "val_kl",
+        "train_family_supcon",
+        "val_family_supcon",
     }
 
 
@@ -271,7 +195,7 @@ def test_generate_comparison_report_loss_curves_include_aux_ce_terms(tmp_path):
     _write_run(d / "hd-4_cs-cubic", [4], ["cubic"], val_loss_final=1.0, with_aux=True)
     _write_run(d / "hd-8_cs-cubic", [8], ["cubic"], val_loss_final=0.5, with_aux=True)
 
-    report_dir = generate_comparison_report(d, write_data_files=True)
+    report_dir = generate_comparison_report(d, write_data_files=True) / FAMILY
     with open(report_dir / "loss_curves.csv", newline="") as f:
         rows = list(csv.DictReader(f))
     assert {"train_family_ce", "val_family_ce"} <= {row["metric"] for row in rows}
@@ -295,7 +219,7 @@ def test_final_metric_groups_groups_multiple_runs_per_value(tmp_path):
         )
 
     runs = load_runs(d)
-    groups = final_metric_groups(runs, "fetch.crystal_systems")
+    groups = final_metric_groups(runs, "data.pyxtal.families")
 
     assert set(groups) == {"cub", "hex"}
     assert len(groups["cub"]) == 3
@@ -311,7 +235,7 @@ def test_final_metric_groups_groups_multiple_runs_per_value(tmp_path):
 def test_plot_final_metric_vs_hyperparam_writes_file(sweep_dir, tmp_path):
     runs = load_runs(sweep_dir)
     out = tmp_path / "final_vs_hd.png"
-    plot_final_metric_vs_hyperparam(runs, "encoder.encoder_hidden_dim", save_path=out)
+    plot_final_metric_vs_hyperparam(runs, "model.encoder_hidden_dim", save_path=out)
     assert out.exists()
 
 
@@ -319,12 +243,12 @@ def test_plot_final_metric_vs_hyperparam_writes_csv(sweep_dir, tmp_path):
     runs = load_runs(sweep_dir)
     out = tmp_path / "final_vs_hd.csv"
     plot_final_metric_vs_hyperparam(
-        runs, "encoder.encoder_hidden_dim", metric="val_loss", csv_path=out
+        runs, "model.encoder_hidden_dim", metric="val_loss", csv_path=out
     )
     assert out.exists()
     with open(out, newline="") as f:
         rows = list(csv.DictReader(f))
-    assert set(rows[0]) == {"run", "encoder.encoder_hidden_dim", "val_loss"}
+    assert set(rows[0]) == {"run", "model.encoder_hidden_dim", "val_loss"}
     assert len(rows) == len(runs)
 
 
@@ -393,14 +317,14 @@ def test_latent_grid_axes_returns_none_with_fewer_than_two_varying(sweep_dir):
 
 def test_latent_grid_axes_picks_two_largest_cardinality_axes(tmp_path):
     d = tmp_path / "20260729-1"
-    # vae.encoder_hidden_dim: 3 distinct values; fetch.crystal_systems: 2.
+    # vae.encoder_hidden_dim: 3 distinct values; data.pyxtal.families: 2.
     for hd in ([4], [8], [16]):
         for cs in (["cubic"], ["hexagonal"]):
             _write_run(d / f"hd-{hd[0]}_cs-{cs[0]}", hd, cs, 1.0)
     runs = load_runs(d)
     assert latent_grid_axes(runs) == (
-        "encoder.encoder_hidden_dim",
-        "fetch.crystal_systems",
+        "model.encoder_hidden_dim",
+        "data.pyxtal.families",
     )
 
 
@@ -411,8 +335,8 @@ def test_plot_latent_space_grid_lays_out_two_axes_as_rows_and_cols(tmp_path):
             _write_run(d / f"hd-{hd[0]}_lr-{lr}", hd, ["cubic"], 1.0, learning_rate=lr)
     runs = load_runs(d)
     assert latent_grid_axes(runs) == (
-        "train.learning_rate",
-        "encoder.encoder_hidden_dim",
+        "model.body_train.learning_rate",
+        "model.encoder_hidden_dim",
     )
     out = tmp_path / "latent_grid.png"
     plot_latent_space_grid(runs, save_path=out)
@@ -592,8 +516,11 @@ def test_generate_comparison_report_forwards_umap_params(tmp_path):
     _write_run(d / "hd-4_cs-cubic", [4], ["cubic"], 1.0, n=20, latent_dim=3)
     _write_run(d / "hd-8_cs-cubic", [8], ["cubic"], 0.5, n=20, latent_dim=3)
 
-    report_dir = generate_comparison_report(
-        d, write_data_files=True, umap_params=LatentUmapParams(n_neighbors=5)
+    report_dir = (
+        generate_comparison_report(
+            d, write_data_files=True, umap_params=LatentUmapParams(n_neighbors=5)
+        )
+        / FAMILY
     )
     assert (report_dir / "latent_space_grid.png").exists()
     with open(report_dir / "latent_space_grid.csv", newline="") as f:
@@ -639,8 +566,9 @@ def test_plot_aux_accuracy_csv_written_when_aux_heads_present(tmp_path):
 
 
 def test_generate_comparison_report_writes_expected_files(sweep_dir):
-    report_dir = generate_comparison_report(sweep_dir, write_data_files=True)
-    assert report_dir == sweep_dir / "comparison"
+    out_dir = generate_comparison_report(sweep_dir, write_data_files=True)
+    assert out_dir == sweep_dir / "comparison"
+    report_dir = out_dir / FAMILY
     assert (report_dir / "loss_curves.png").exists()
     assert (report_dir / "loss_curves.csv").exists()
     # Every available loss metric (not just val_loss) gets its own
@@ -648,17 +576,11 @@ def test_generate_comparison_report_writes_expected_files(sweep_dir):
     for metric in [
         "train_loss",
         "val_loss",
-        "train_recon",
-        "val_recon",
-        "train_kl",
-        "val_kl",
+        "train_family_supcon",
+        "val_family_supcon",
     ]:
-        assert (
-            report_dir / f"final_{metric}_vs_encoder_encoder_hidden_dim.png"
-        ).exists()
-        assert (
-            report_dir / f"final_{metric}_vs_encoder_encoder_hidden_dim.csv"
-        ).exists()
+        assert (report_dir / f"final_{metric}_vs_model_encoder_hidden_dim.png").exists()
+        assert (report_dir / f"final_{metric}_vs_model_encoder_hidden_dim.csv").exists()
     assert (report_dir / "spacegroup_histogram.png").exists()
     assert (report_dir / "spacegroup_histogram.csv").exists()
     assert (report_dir / "latent_space_grid.png").exists()
@@ -669,8 +591,9 @@ def test_generate_comparison_report_writes_expected_files(sweep_dir):
 
 
 def test_generate_comparison_report_skips_csvs_by_default(sweep_dir):
-    report_dir = generate_comparison_report(sweep_dir)
-    assert report_dir == sweep_dir / "comparison"
+    out_dir = generate_comparison_report(sweep_dir)
+    assert out_dir == sweep_dir / "comparison"
+    report_dir = out_dir / FAMILY
     # PNGs are always written...
     assert (report_dir / "loss_curves.png").exists()
     assert (report_dir / "spacegroup_histogram.png").exists()
@@ -684,12 +607,10 @@ def test_generate_comparison_report_includes_aux_ce_metrics_when_active(tmp_path
     _write_run(d / "hd-4_cs-cubic", [4], ["cubic"], val_loss_final=1.0, with_aux=True)
     _write_run(d / "hd-8_cs-cubic", [8], ["cubic"], val_loss_final=0.5, with_aux=True)
 
-    report_dir = generate_comparison_report(d)
+    report_dir = generate_comparison_report(d) / FAMILY
 
     for metric in ["train_family_ce", "val_family_ce"]:
-        assert (
-            report_dir / f"final_{metric}_vs_encoder_encoder_hidden_dim.png"
-        ).exists()
+        assert (report_dir / f"final_{metric}_vs_model_encoder_hidden_dim.png").exists()
     assert (report_dir / "aux_heads_accuracy.png").exists()
 
 
@@ -699,10 +620,8 @@ def test_available_loss_metrics_orders_known_metrics_first(sweep_dir):
     assert available_loss_metrics(runs) == [
         "train_loss",
         "val_loss",
-        "train_kl",
-        "train_recon",
-        "val_kl",
-        "val_recon",
+        "train_family_supcon",
+        "val_family_supcon",
     ]
 
 
@@ -715,10 +634,8 @@ def test_available_loss_metrics_includes_aux_ce_when_present(tmp_path):
         "val_loss",
         "train_family_ce",
         "val_family_ce",
-        "train_kl",
-        "train_recon",
-        "val_kl",
-        "val_recon",
+        "train_family_supcon",
+        "val_family_supcon",
     ]
 
 
@@ -731,14 +648,12 @@ def test_available_loss_metrics_intersects_across_runs_with_different_columns(tm
     assert available_loss_metrics(runs) == [
         "train_loss",
         "val_loss",
-        "train_kl",
-        "train_recon",
-        "val_kl",
-        "val_recon",
+        "train_family_supcon",
+        "val_family_supcon",
     ]
 
 
-# --- classification_accuracies_from_npz / hierarchical_accuracies_from_npz --
+# --- classification_accuracies_from_npz --
 
 
 def _classification_npz(n_family_correct=3, n_family=4, with_spacegroup=True):
@@ -784,26 +699,6 @@ def test_classification_accuracies_from_npz_family_and_spacegroup():
     accs = classification_accuracies_from_npz(npz)
     assert accs["family"] == 3 / 4
     assert accs["spacegroup"] == 1.0
-
-
-def test_hierarchical_accuracies_from_npz_matches_classification_when_no_oracle():
-    npz = _classification_npz()
-    assert hierarchical_accuracies_from_npz(npz) == classification_accuracies_from_npz(
-        npz
-    )
-
-
-def test_hierarchical_accuracies_from_npz_reports_oracle_separately():
-    npz = _classification_npz()
-    # The oracle predictions are perfect, unlike the (family-routed)
-    # end-to-end spacegroup_probs -- exercises that the two accuracies are
-    # computed and reported independently.
-    n = npz["spacegroups"].shape[0]
-    npz["spacegroup_probs_oracle"] = np.tile(np.array([1.0, 0.0]), (n, 1))
-    accs = hierarchical_accuracies_from_npz(npz)
-    assert accs["family"] == 3 / 4
-    assert accs["spacegroup"] == 1.0
-    assert accs["spacegroup_oracle"] == 1.0
 
 
 def test_classification_accuracies_from_npz_splits_train_val_when_split_present():
@@ -855,3 +750,52 @@ def test_available_loss_metrics_orders_new_and_legacy_cross_entropy_keys():
         "train_family_ce",
         "val_family_ce",
     ]
+
+
+# --- one suite per stack ------------------------------------------------------
+
+
+def test_report_writes_one_suite_per_stack(tmp_path, caplog):
+    import logging
+
+    sweep = tmp_path / "20261007-1"
+    write_fake_run(sweep / "a", stacks=("family", "cubic"), learning_rate=1e-3)
+    write_fake_run(sweep / "b", stacks=("family", "cubic"), learning_rate=2e-3)
+    write_fake_run(sweep / "c", stacks=("family",), learning_rate=3e-3)
+
+    with caplog.at_level(logging.INFO, logger="dim_red.pipeline"):
+        out = generate_comparison_report(sweep)
+
+    assert out == sweep / "comparison"
+    for stack in ("family", "cubic"):
+        assert (out / stack / "loss_curves.png").exists()
+        assert (out / stack / "latent_space_grid.png").exists()
+        assert (
+            out / stack / "final_val_loss_vs_model_body_train_learning_rate.png"
+        ).exists()
+    assert any(
+        "skipping run" in r.message and "'cubic'" in r.message and "c" in r.message
+        for r in caplog.records
+    )
+
+
+def test_load_runs_selects_the_requested_stack(tmp_path):
+    sweep = tmp_path / "s"
+    write_fake_run(sweep / "a", stacks=("family", "cubic"))
+    runs = load_runs(sweep, stack="cubic")
+    assert [r.stack for r in runs] == ["cubic"]
+    assert "spacegroup_probs" in runs[0].embeddings
+
+
+def test_report_requires_a_heads_choice_when_ambiguous(tmp_path):
+    sweep = tmp_path / "s"
+    write_fake_run(sweep / "a", heads=("x", "y"))
+    with pytest.raises(ValueError, match="several heads"):
+        generate_comparison_report(sweep)
+    generate_comparison_report(sweep, heads_name="x")
+
+
+def test_display_metric_names_the_label_of_the_stack():
+    assert display_metric("train_family_supcon", FAMILY) == "train_family_supcon"
+    assert display_metric("val_family_supcon", "cubic") == "val_spacegroup_supcon"
+    assert display_metric("val_loss", "cubic") == "val_loss"
