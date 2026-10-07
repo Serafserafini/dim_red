@@ -822,7 +822,6 @@ def test_load_sweep_config_and_expand(tmp_path):
     sweep = load_sweep_config(config_path)
 
     assert sweep.output_dir == "runs"
-    assert sweep.api_key is None
 
     runs = expand_sweep(sweep)
 
@@ -846,14 +845,6 @@ def test_load_sweep_config_and_expand(tmp_path):
 
     # No aux_heads block -> mode="none" for every expanded run.
     assert all(r.aux_heads == AuxHeadsConfig(mode="none") for r in runs)
-
-
-def test_sweep_api_key_reads_from_fetch_block(tmp_path):
-    base = _sweep_base()
-    base["fetch"]["api_key"] = "secret"
-    sweep_dict = {"base": base, "grid": {}}
-    sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
-    assert sweep.api_key == "secret"
 
 
 def test_expand_sweep_with_empty_grid_returns_single_base_run(tmp_path):

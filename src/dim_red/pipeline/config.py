@@ -706,10 +706,6 @@ class SweepConfig:
     def output_dir(self) -> str:
         return str(self.base.get("output_dir", "runs"))
 
-    @property
-    def api_key(self) -> Optional[str]:
-        return self.base.get("fetch", {}).get("api_key")
-
 
 # Keys that older configs / saved ``config.yaml`` files may still carry for
 # features that no longer exist. Ignored silently (debug log only) so existing

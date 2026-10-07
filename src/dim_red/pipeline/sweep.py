@@ -1,87 +1,39 @@
-"""
-Grid-sweep orchestration: expands a ``SweepConfig``'s grid (the Cartesian
-product of however many dotted-path axes it declares -- any RunConfig field
-can be swept) into one run per combination. Runs sharing the same crystal
-systems/SOAP settings/fetch limit reuse the same dataset cache entry, so
-fetch + SOAP only run once per distinct combination of those.
-"""
+"""Grid sweeps over ``FullStack`` configs: the Cartesian product of however
+many dotted-path axes ``SweepConfig.grid`` declares (e.g.
+``family.encoder.latent_dim``, ``experts.defaults.train.epochs``), one
+``FullStack`` run (body + heads ``default``) per combination under a fresh
+``<output_dir>/<date>-<n>/`` directory."""
 
 from __future__ import annotations
 
+import copy
 import dataclasses
+import itertools
 import logging
 import re
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Union
 
-from dim_red.pipeline.config import (
-    AugmentationConfig,
-    AuxHeadsConfig,
-    BatchingConfig,
-    FetchConfig,
-    PyxtalConfig,
-    RunConfig,
-    SoapConfig,
-    SupConConfig,
-    SweepConfig,
-    TrainSettings,
-    expand_sweep,
-    flatten_config_dict,
-    run_config_to_dict,
-)
-from dim_red.pipeline.dataset_cache import (
-    _cache_key,
-    _pyxtal_cache_key,
-    _resolve_augmentation,
-)
-from dim_red.pipeline.single_run import run_single
+import yaml
+
+from dim_red.pipeline.config import SweepConfig, _set_dotted
+from dim_red.pipeline.full_stack import DEFAULT_HEADS_NAME, FullStack
+from dim_red.pipeline.full_stack_config import full_stack_config_from_dict
 
 logger = logging.getLogger("dim_red.pipeline")
 
 _SWEEP_DIR_RE = re.compile(r"^\d{8}-(\d+)$")
 
 
-def _dataset_cache_key(config: RunConfig) -> str:
-    """The same dataset cache key ``dim_red.pipeline.dataset_cache.build_dataset_for_run``
-    would compute for ``config`` -- used by ``run_sweep`` to detect which
-    runs in a grid share an identical dataset (crystal systems/pyxtal
-    config + SOAP settings + augmentation), so it can avoid saving a
-    redundant copy of the (potentially multi-GB) SOAP feature matrix into
-    every one of their ``embeddings.npz`` files (see
-    ``dim_red.pipeline.single_run.run_single``'s ``save_features`` docs).
-    Not meaningful for ``model_kind == "cgcnn"`` (a different, graph-based
-    cache key applies there instead) -- harmless to compute anyway, since
-    cgcnn runs never save ``features`` regardless of this key.
-    """
-    augmentation = _resolve_augmentation(config)
-    if config.data_source == "pyxtal":
-        seed = config.pyxtal.seed if config.pyxtal.seed is not None else config.seed
-        return _pyxtal_cache_key(
-            config.pyxtal, seed, config.soap.as_kwargs(), augmentation
-        )
-    return _cache_key(
-        config.fetch.crystal_systems,
-        config.fetch.limit_per_system,
-        config.soap.as_kwargs(),
-        augmentation,
-    )
-
-
 def _next_sweep_dir(output_dir: Path) -> Path:
-    """Allocate this sweep invocation's directory, named ``<date>-<n>`` where
-    ``n`` is one more than the highest sibling number already present under
-    ``output_dir`` (regardless of that sibling's own date), so concurrent
-    sweeps never collide and the individual run folders inside can be named
-    by hyperparameters alone.
-    """
+    """``<output_dir>/<date>-<n>`` where ``n`` is one more than the highest
+    sibling number already present (so concurrent sweeps never collide)."""
     today = datetime.now().strftime("%Y%m%d")
     last_n = 0
     if output_dir.exists():
         for p in output_dir.iterdir():
-            if not p.is_dir():
-                continue
-            m = _SWEEP_DIR_RE.match(p.name)
+            m = _SWEEP_DIR_RE.match(p.name) if p.is_dir() else None
             if m:
                 last_n = max(last_n, int(m.group(1)))
     sweep_dir = output_dir / f"{today}-{last_n + 1}"
@@ -89,157 +41,63 @@ def _next_sweep_dir(output_dir: Path) -> Path:
     return sweep_dir
 
 
-def _default_flat_config() -> dict:
-    """Flattened ``{dotted_path: default_value}`` for every ``RunConfig`` leaf
-    that actually has a static default. ``encoder.encoder_hidden_dim``/
-    ``encoder.latent_dim`` are required (no default), so they're left out
-    here -- meaning they always show up as non-default below.
-    """
-    defaults = {
-        "seed": 42,
-        "output_dir": "runs",
-        "name": None,
-        "model": "supcon",
-        "data_source": "fetch",
-    }
-    for prefix, cls in (
-        ("soap", SoapConfig),
-        ("train", TrainSettings),
-        ("aux_heads", AuxHeadsConfig),
-        ("supcon", SupConConfig),
-        ("batching", BatchingConfig),
-        ("fetch", FetchConfig),
-        ("pyxtal", PyxtalConfig),
-        ("augmentation", AugmentationConfig),
-    ):
-        defaults.update(flatten_config_dict({prefix: dataclasses.asdict(cls())}))
-
-    return defaults
+def _slug(value) -> str:
+    return re.sub(r"[^A-Za-z0-9.]+", "-", str(value)).strip("-")
 
 
-def _diff_from_defaults(config: RunConfig, defaults: dict) -> dict:
-    """``{dotted_path: value}`` for every leaf of ``config`` that differs
-    from ``defaults`` (or has no entry there at all, e.g. ``encoder.*``) --
-    fields left at their default aren't included, so only what this run
-    actually customized shows up.
-    """
-    flat = flatten_config_dict(run_config_to_dict(config))
-    return {
-        key: value
-        for key, value in flat.items()
-        if key not in defaults or defaults[key] != value
-    }
-
-
-def _summarize_field(values: List[str]) -> str:
-    """A single display value if every run in the sweep agrees, otherwise a
-    ``varies: ...`` listing -- happens when the field itself is a swept axis
-    (e.g. ``encoder.encoder_hidden_dim``), in which case the actual per-value
-    breakdown is already visible in the "Sweep axes" line.
-    """
-    unique = sorted(set(values))
-    if len(unique) == 1:
-        return unique[0]
-    return "varies: " + " | ".join(unique)
-
-
-def _write_sweep_readme(
-    output_dir: Path, sweep_dir: Path, sweep: SweepConfig, run_configs: List[RunConfig]
-) -> None:
-    """Append a summary entry for this sweep invocation to
-    ``<output_dir>/README.md`` -- creating the file (with a header) the first
-    time a sweep is sent to this ``output_dir``, and just appending a new
-    entry (never overwriting prior ones) on every subsequent sweep.
-    """
-    readme_path = output_dir / "README.md"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    is_new = not readme_path.exists()
-
-    defaults = _default_flat_config()
-    per_run_diffs = [_diff_from_defaults(c, defaults) for c in run_configs]
-    flats = [flatten_config_dict(run_config_to_dict(c)) for c in run_configs]
-    non_default_keys = sorted({key for diff in per_run_diffs for key in diff})
-
-    lines = [f"## {sweep_dir.name}\n\n"]
-    lines.append(
-        f"- Sweep axes: {', '.join(sorted(sweep.grid)) if sweep.grid else '(none)'}\n"
-    )
-    if non_default_keys:
-        lines.append("- Non-default settings:\n")
-        for key in non_default_keys:
-            values = [str(flat.get(key, defaults.get(key))) for flat in flats]
-            lines.append(f"  - {key}: {_summarize_field(values)}\n")
-    lines.append("\n")
-    entry = "".join(lines)
-    with open(readme_path, "a") as f:
-        if is_new:
-            f.write("# Sweeps\n\n")
-        f.write(entry)
+def _run_name(base_name: str, keys: List[str], combo) -> str:
+    parts = [
+        f"{key.rsplit('.', 1)[-1]}-{_slug(value)}" for key, value in zip(keys, combo)
+    ]
+    return "_".join([base_name, *parts])
 
 
 def run_sweep(
     sweep: SweepConfig, cache_dir: Optional[Union[str, Path]] = None
 ) -> List[Path]:
-    """Expand a SweepConfig's grid and run each combination sequentially.
+    """Expand ``sweep.grid`` over ``sweep.base`` and run every combination
+    sequentially. Every combination is parsed (and so validated) before the
+    first one trains. Returns the run directories in grid order."""
+    if "model_kind" not in sweep.base and "model" in sweep.base:
+        raise ValueError(
+            "dimred-sweep only supports FullStack configs (model_kind: "
+            "supcon|supcon_mace); run cgcnn configs with dimred-run"
+        )
+    keys = list(sweep.grid)
+    value_lists = [sweep.grid[k] for k in keys]
+    combos = list(itertools.product(*value_lists)) if keys else [()]
+    configs = []
+    for combo in combos:
+        d = copy.deepcopy(sweep.base)
+        for key, value in zip(keys, combo):
+            _set_dotted(d, key, value)
+        config = full_stack_config_from_dict(d)
+        if keys:
+            config = dataclasses.replace(
+                config, name=_run_name(config.name, keys, combo)
+            )
+        configs.append(config)
 
-    Each invocation gets its own ``<output_dir>/<date>-<n>`` directory (see
-    ``_next_sweep_dir``); individual run folders inside it are named from
-    their swept hyperparameters only (see ``make_run_name``). The dataset
-    cache stays shared at ``<output_dir>/_dataset_cache`` across sweep
-    invocations, since it doesn't depend on which sweep produced it.
-
-    Also appends a summary entry for this sweep (the swept axes, plus every
-    config value that differs from its ``RunConfig`` dataclass default) to
-    ``<output_dir>/README.md``, creating that file the first time a sweep
-    lands in ``output_dir`` (see ``_write_sweep_readme``).
-
-    Returns:
-        The list of run directories created, in grid order.
-    """
-    run_configs = expand_sweep(sweep)
     output_dir = Path(sweep.output_dir)
     resolved_cache_dir = Path(cache_dir) if cache_dir else output_dir / "_dataset_cache"
     sweep_dir = _next_sweep_dir(output_dir)
-    _write_sweep_readme(output_dir, sweep_dir, sweep, run_configs)
-
+    with open(sweep_dir / "sweep.yaml", "w") as f:
+        yaml.safe_dump({"base": sweep.base, "grid": sweep.grid}, f, sort_keys=False)
     logger.info(
         "Starting sweep: %d axis/axes (%s) = %d run(s), saved under %s",
-        len(sweep.grid),
-        sorted(sweep.grid),
-        len(run_configs),
+        len(keys),
+        sorted(keys),
+        len(configs),
         sweep_dir,
     )
 
     run_dirs = []
-    seen_dataset_keys: set = set()
-    for i, config in enumerate(run_configs, start=1):
-        data_scope = (
-            config.fetch.crystal_systems
-            if config.data_source == "fetch"
-            else config.pyxtal
-        )
-        logger.info(
-            "[%d/%d] data_source=%s scope=%s hidden_dims=%s",
-            i,
-            len(run_configs),
-            config.data_source,
-            data_scope,
-            config.encoder.encoder_hidden_dim,
-        )
-        # Only the first run seen for a given dataset (crystal systems/pyxtal
-        # config + SOAP settings + augmentation) gets its SOAP features saved
-        # into embeddings.npz -- every later run sharing that same dataset
-        # would just be duplicating the identical, potentially multi-GB
-        # array. See run_single's save_features docs.
-        dataset_key = _dataset_cache_key(config)
-        save_features = dataset_key not in seen_dataset_keys
-        seen_dataset_keys.add(dataset_key)
+    for i, config in enumerate(configs, start=1):
+        logger.info("[%d/%d] %s", i, len(configs), config.name)
         config = dataclasses.replace(config, output_dir=str(sweep_dir))
-        run_dirs.append(
-            run_single(
-                config, cache_dir=resolved_cache_dir, save_features=save_features
-            )
-        )
-
+        full_stack = FullStack.create(config, cache_dir=resolved_cache_dir)
+        full_stack.fit_body()
+        full_stack.fit_heads(DEFAULT_HEADS_NAME)
+        run_dirs.append(full_stack.run_dir)
     logger.info("Sweep complete: %d run(s) saved under %s", len(run_dirs), sweep_dir)
     return run_dirs
