@@ -28,18 +28,18 @@ SOAP · grafo · MACE
 :::
 
 :::{grid-item-card} 4 · Corpo del modello
-supcon · supcon_mace · cgcnn
-`RunConfig.model_kind`
+supcon · supcon_mace (FullStack) · cgcnn
+`model_kind`
 +++
 {doc}`model_kinds`
 :::
 
-:::{grid-item-card} 5 · Tail (fase 2)
+:::{grid-item-card} 5 · Heads / tail (fase 2)
 :class-card: sd-border-dashed
-classification · visualization · hierarchical_supcon
-`RunConfig.tails`
+FullStack: classifier + viz per stack · cgcnn: `dimred-train-tail`
+`dimred-train-heads`
 +++
-{doc}`tails`
+{doc}`fullstack` · {doc}`tails`
 :::
 
 :::{grid-item-card} 6 · Analisi
@@ -51,14 +51,14 @@ compare · benchmark · apply
 
 ::::
 
-Un `SweepConfig` esegue questa stessa pipeline una volta per ogni combinazione del prodotto cartesiano definito in `grid` (vedi {doc}`runconfig`); `pipeline.benchmark` confronta run di `model_kind` diversi in un'unica tabella (vedi {doc}`tools`).
+`supcon`/`supcon_mace` si allenano solo con `FullStack` (schema di config, comandi e layout su disco in {doc}`fullstack`); `RunConfig`/`run_single` sono solo `cgcnn`. `dimred-run` sceglie in base alle chiavi della config. `dimred-sweep` (solo FullStack) esegue una run per ogni combinazione del prodotto cartesiano definito in `grid` (vedi {doc}`runconfig`); `pipeline.benchmark` confronta run in un'unica tabella, una riga per stack (vedi {doc}`tools`).
 
-## Le due config posizionali, sempre presenti
+## Le config posizionali di un run cgcnn
 
-Qualunque `model_kind`, un {py:class}`~dim_red.pipeline.config.RunConfig` (riferimento completo in {doc}`runconfig`) richiede sempre:
+Un {py:class}`~dim_red.pipeline.config.RunConfig` (riferimento completo in {doc}`runconfig`) richiede sempre:
 
-- `soap` — anche quando non è la featurizzazione effettivamente usata (`cgcnn`/`supcon_mace` la ignorano a favore di `graph`/`mace`).
-- `encoder` — architettura dell'encoder condivisa (`cgcnn` ne legge solo `latent_dim`).
+- `soap` — blocco obbligatorio dello schema, anche se `cgcnn` usa `graph`.
+- `encoder` — `cgcnn` ne legge solo `latent_dim`.
 - `train` — meccaniche di training condivise.
 
-Il resto della configurazione — quale sotto-config si applica a quale `model_kind` — è coperto pagina per pagina; la {doc}`runconfig` raccoglie anche la matrice di compatibilità completa e le regole di validazione (`__post_init__`).
+La {doc}`runconfig` raccoglie anche le regole di validazione (`__post_init__`).

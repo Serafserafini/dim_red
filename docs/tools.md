@@ -9,9 +9,9 @@ Due strumenti distinti, entrambi progettati per **non** classificare o scegliere
 * - Strumento
   - Ambito
 * - `pipeline.compare`
-  - Un pannello di grafici (curve di loss, metrica finale vs. iperparametro, griglia dello spazio latente, istogramma spacegroup/famiglia, confronto accuratezza head ausiliarie) per **una singola cartella di sweep**, assumendo colonne di `loss_history.csv` comparabili al suo interno.
+  - Per **una singola cartella di sweep** di run FullStack: una suite di grafici (curve di loss, metrica finale vs. iperparametro, griglia dello spazio latente, istogramma spacegroup, confronto accuratezza) **per ogni stack**, in `<sweep>/comparison/<stack>/`. Serve `--heads-name` se uno stack ha più set di heads.
 * - `pipeline.benchmark`
-  - Una singola tabella CSV larga che confronta **`model_kind` diversi insieme** (cosa che `compare` non fa, perché le colonne/scale della loss divergono per kind). Accetta un mix di directory di run singoli e directory di sweep in un'unica chiamata.
+  - Una singola tabella CSV larga, **una riga per stack** di ogni run FullStack (un run ha uno stack `family` e fino a 7 esperti). Accetta un mix di directory di run singoli e directory di sweep in un'unica chiamata; `--heads-name` se ci sono più set di heads.
 ```
 
 ```{eval-rst}
@@ -24,7 +24,7 @@ Due strumenti distinti, entrambi progettati per **non** classificare o scegliere
 
 ## Le metriche di qualità dell'embedding
 
-Calcolate da `dim_red.analysis.metrics.embedding_quality_metrics` (solo scikit-learn), sia sull'embedding nativo (qualunque sia `latent_dim`) sia, con prefisso `_2d`, su una proiezione 2D scelta in ordine di preferenza: un tail di visualizzazione già allenato con `viz_dim=2` → l'embedding nativo se già 2D → una proiezione PCA deterministica come ultima risorsa.
+Calcolate da `dim_red.analysis.metrics.embedding_quality_metrics` (solo scikit-learn), sia sull'embedding nativo (qualunque sia `latent_dim`) sia, con prefisso `_2d`, su una proiezione 2D scelta in ordine di preferenza: la visualization head già allenata con `viz_dim=2` → l'embedding nativo se già 2D → una proiezione PCA deterministica come ultima risorsa.
 
 ```{eval-rst}
 .. autofunction:: dim_red.analysis.metrics.embedding_quality_metrics
@@ -32,7 +32,13 @@ Calcolate da `dim_red.analysis.metrics.embedding_quality_metrics` (solo scikit-l
 
 ## Inferenza — applicare un run a nuove strutture
 
-`dimred-apply <structures.extxyz> <run_dir>`: carica un run già completato e proietta strutture mai viste nel suo spazio latente, senza ricalcolare SOAP sul training set (recupera `feature_mean`/`feature_std` direttamente da `embeddings.npz`, con un fallback solo per run salvati prima che questo campo esistesse).
+`dimred-apply <structures.extxyz> <run_dir>`. Per un run FullStack (`--heads-name` se ci sono più set di heads) scrive in `<run_dir>/applied` un CSV di predizioni (`family`, `expert`, `spacegroup` con le probabilità; vuoti se l'esperto non è allenato) e un npz delle coordinate di visualizzazione. Dalla libreria: `FullStack.open(run).predict(structures)`, vedi {doc}`fullstack`.
+
+```{eval-rst}
+.. autofunction:: dim_red.pipeline.full_stack.apply_to_structures
+```
+
+Per un run cgcnn l'applicazione proietta le strutture nello spazio latente del run (recupera `feature_mean`/`feature_std` da `embeddings.npz`) e le disegna insieme al dataset originale:
 
 ```{eval-rst}
 .. autofunction:: dim_red.pipeline.inference.load_trained_run

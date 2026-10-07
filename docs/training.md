@@ -1,6 +1,6 @@
 # Training
 
-Blocco YAML `train:`, meccaniche di training condivise (stessi nomi di campo) da `supcon.training` (fase 1) e `cgcnn.training`. L'ottimizzatore è sempre Adam (`optax.adam(learning_rate)`).
+Blocco YAML `train:`, meccaniche di training con gli stessi nomi di campo in `cgcnn` (`TrainSettings` qui sotto) e in ogni stack di FullStack (blocco `train:` dello stack, che popola `StackConfig`/`TrainConfig` di `supcon.training`; vedi {doc}`fullstack`). L'ottimizzatore è sempre Adam (`optax.adam(learning_rate)`).
 
 ```{eval-rst}
 .. autoclass:: dim_red.pipeline.config.TrainSettings
@@ -13,7 +13,7 @@ Le chiavi `train.optimizer` e `train.beta` (ottimizzatore VeLO e peso KL del VAE
 
 ## Early stopping
 
-Implementato identicamente nei training loop di fase 1 e di fase 2 (`supcon`, `cgcnn`). Monitora sempre `val_loss` — non configurabile su un'altra metrica in questa prima versione.
+Implementato identicamente nei training loop di `supcon.training` (body), `supcon.tail_training` (heads) e `cgcnn.training`. Monitora sempre `val_loss` — non configurabile su un'altra metrica in questa prima versione.
 
 ```{eval-rst}
 .. autoclass:: dim_red.pipeline.config.EarlyStoppingConfig

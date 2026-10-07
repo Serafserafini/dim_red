@@ -1,6 +1,4 @@
-# Head ausiliarie & loss contrastiva
-
-Due schemi alternativi per usare le etichette (famiglia cristallina, spacegroup) durante il training del corpo — mutuamente esclusivi in base a `model_kind`.
+# Head ausiliarie & batching
 
 ## `aux_heads:` — classificatori sulla z
 
@@ -11,18 +9,13 @@ Usato solo da {bdg-success}`cgcnn` (per cui è obbligatorio, `mode != "none"`): 
 
 ```
 
-## `supcon:` — Supervised Contrastive
+## Loss contrastiva di supcon / supcon_mace
 
-Usato da {bdg-warning}`supcon` e {bdg-secondary}`supcon_mace`. La loss è calcolata sull'output di una `ProjectionTail` (Khosla et al. 2020), non sulla rappresentazione `r` del corpo stesso — nessuna head di classificazione a questo stadio (quelle arrivano in fase 2, vedi {doc}`tails`).
-
-```{eval-rst}
-.. autoclass:: dim_red.pipeline.config.SupConConfig
-
-```
+La loss Supervised Contrastive (Khosla et al. 2020) è calcolata sull'output di una `ProjectionTail`, non sulla rappresentazione `r` del corpo. I suoi parametri (`tau`, `distance`, `lambda_norm`) stanno nei blocchi `contrastive:` e `viz:` di ogni stack di FullStack — vedi {doc}`fullstack`.
 
 ## `batching:` — campionamento dei batch
 
-Usato da {bdg-warning}`supcon` e {bdg-secondary}`supcon_mace`. Solo i batch di *training* sono interessati — quelli di validazione restano sempre casuali.
+Solo i batch di *training* sono interessati — quelli di validazione restano sempre casuali. Nelle config FullStack il blocco `batching:` di uno stack ha la stessa forma; qui sotto la dataclass usata dal tail di visualizzazione cgcnn.
 
 ```{eval-rst}
 .. autoclass:: dim_red.pipeline.config.BatchingConfig

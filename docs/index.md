@@ -1,6 +1,6 @@
 # dim_red
 
-**dim_red** trasforma database di strutture cristalline in rappresentazioni a bassa dimensionalità, con modelli contrastivi supervisionati (su SOAP o su embedding di un foundation model congelato) e un modello a grafo — e ne misura quanto separano famiglia cristallina e spacegroup.
+**dim_red** trasforma database di strutture cristalline in rappresentazioni a bassa dimensionalità, con modelli contrastivi supervisionati (`FullStack`) (su SOAP o su embedding di un foundation model congelato) e un modello a grafo — e ne misura quanto separano famiglia cristallina e spacegroup.
 
 Questa guida è la mappa di riferimento della codebase: architettura, cosa fa ogni `model_kind`, e — soprattutto — **cosa fa ogni singolo parametro di configurazione**. Le pagine sulla configurazione non ripetono a mano quello che il codice già dice: incorporano i docstring delle dataclass di `pipeline/config.py` tramite `autodoc`, quindi restano sincronizzate quando il codice cambia. La prosa di contorno (perché un default è quel default, come due parametri interagiscono, quando usare cosa) è scritta a mano.
 
@@ -24,13 +24,13 @@ Parti dalla mappa della pipeline, poi segui sorgenti dati → featurizzazione �
 :::{grid-item-card} Sto scegliendo un model_kind
 :link: model_kinds
 :link-type: doc
-Confronto diretto tra supcon, supcon_mace e cgcnn: cosa allenano e quali blocchi YAML usano.
+Confronto diretto tra supcon, supcon_mace (FullStack) e cgcnn: cosa allenano e quali blocchi YAML usano.
 :::
 
 :::{grid-item-card} Sto cercando un parametro preciso
 :link: runconfig
 :link-type: doc
-`RunConfig` di primo livello, con link a ogni sotto-config. Oppure usa la ricerca full-text della sidebar.
+`RunConfig` (cgcnn) di primo livello, con link a ogni sotto-config; per supcon/supcon_mace vedi la pagina FullStack. Oppure usa la ricerca full-text della sidebar.
 :::
 
 :::{grid-item-card} Voglio confrontare run già fatti
@@ -46,6 +46,7 @@ Confronto diretto tra supcon, supcon_mace e cgcnn: cosa allenano e quali blocchi
 :caption: Panoramica
 
 pipeline
+fullstack
 model_kinds
 ```
 

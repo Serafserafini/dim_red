@@ -1,6 +1,6 @@
 # Sorgenti dati & augmentation
 
-`RunConfig.data_source` sceglie come viene costruito il database di strutture *prima* della featurizzazione: `"fetch"` (default) interroga Materials Project per strutture reali; `"pyxtal"` genera strutture sintetiche simmetriche con `dim_red.generate`. Esattamente uno tra `fetch`/`pyxtal` deve essere presente in YAML, coerentemente con `data_source` — la validazione è in `RunConfig.__post_init__` (vedi {doc}`runconfig`).
+`RunConfig.data_source` sceglie come viene costruito il database di strutture *prima* della featurizzazione: `"fetch"` (default) interroga Materials Project per strutture reali; `"pyxtal"` genera strutture sintetiche simmetriche con `dim_red.generate`. Esattamente uno tra `fetch`/`pyxtal` deve essere presente in YAML, coerentemente con `data_source` — la validazione è in `RunConfig.__post_init__` (vedi {doc}`runconfig`). Questo vale per i run cgcnn: gli stack di FullStack usano solo `pyxtal`, nel blocco `data.pyxtal` di ogni stack ({doc}`fullstack`).
 
 ## `fetch:` — Materials Project reale
 

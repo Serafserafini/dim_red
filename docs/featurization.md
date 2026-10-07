@@ -1,6 +1,6 @@
 # Featurizzazione
 
-Tre modi di trasformare una struttura in un vettore, mutuamente esclusivi in base a `model_kind`.
+Tre modi di trasformare una struttura in un vettore, mutuamente esclusivi in base a `model_kind`. Per `supcon`/`supcon_mace` i blocchi `soap`/`mace` stanno sotto `data:` di ogni stack ({doc}`fullstack`).
 
 ```{list-table}
 :header-rows: 1
@@ -11,7 +11,7 @@ Tre modi di trasformare una struttura in un vettore, mutuamente esclusivi in bas
   - Idea
 * - `soap:`
   - `supcon`
-  - Descrittore SOAP per struttura (via `dscribe`), `average="outer"` fisso.
+  - Descrittore SOAP per struttura (via `dscribe`), `average="outer"` fisso. Con FullStack `element_agnostic: true` (compressione `mu2`) è obbligatorio.
 * - `graph:`
   - `cgcnn`
   - Grafo di legami costruito dal codice stesso, specie chimiche rimappate a slot locali — niente identità chimica reale.

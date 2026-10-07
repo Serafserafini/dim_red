@@ -38,8 +38,8 @@ An earlier version of `model.py` was written blind against `mace_jax`'s source r
 
 ## `pipeline` integration (see `src/dim_red/pipeline/CLAUDE.md`)
 
-- `pipeline.config.MaceConfig` (YAML: top-level `mace:` block -- `checkpoint_path`/`r_max`/`pooling`) is required for `model_kind: supcon_mace` (`checkpoint_path` must be set). No `latent_dim`: the embedding width is whatever the checkpoint produces.
-- `pipeline.dataset_cache.build_mace_dataset_for_run` (+ `get_or_build_mace_dataset`/`get_or_build_pyxtal_mace_dataset`) caches the final pooled per-structure embedding (same cache schema as the SOAP path), so the expensive forward pass runs once per dataset.
-- `pipeline.tail_training._compute_native_mace_features` recomputes native MACE features for `hierarchical_supcon` per-family experts on `supcon_mace` runs.
+- `pipeline.config.MaceConfig` (the `data.mace` block of each FullStack stack: `checkpoint_path`/`r_max`/`pooling`) is required for `model_kind: supcon_mace` (`checkpoint_path` must be set). No `latent_dim`: the embedding width is whatever the checkpoint produces.
+- `pipeline.dataset_cache.get_or_build_pyxtal_mace_dataset` (called by `pipeline.stack_data.build_stack_dataset`) caches the final pooled per-structure embedding (same cache schema as the SOAP path), so the expensive forward pass runs once per dataset.
+- `pipeline.featurize.featurize_structures` computes the same MACE embeddings for new structures at predict time.
 
-See `configs/tail_train_hierarchical_supcon_supcon_mace_*.example.yaml` and `slurm/supcon_mace_*.sbatch`.
+See `configs/full_stack.example.yaml` (`model_kind: supcon_mace`) and `slurm/supcon_mace_*.sbatch`.

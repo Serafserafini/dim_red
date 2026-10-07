@@ -38,7 +38,12 @@ source_suffix = {
 }
 
 templates_path: list = []
-exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
+exclude_patterns = [
+    "_build",
+    "Thumbs.db",
+    ".DS_Store",
+    "superpowers",
+]  # plans/specs: historical, not part of the guide
 
 # -- autodoc / napoleon -------------------------------------------------
 # Every dataclass in pipeline/config.py already carries a Google-style

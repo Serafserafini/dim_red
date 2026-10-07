@@ -7,8 +7,7 @@ Toolkit per ridurre la dimensionalità di strutture cristalline e allenare rappr
 - **Dati**: `fetch.py` (Materials Project), `generate.py` (strutture simmetriche sintetiche con `pyxtal`), `augmentation.py` (jitter posizionale, vacanze, supercelle).
 - **Featurizzazione**: `soap.py` (SOAP via `dscribe`), `cgcnn/graph.py` (grafo di legami), `mace/` (embedding di un MACE pre-addestrato e congelato).
 - **Riduzione classica**: `pca.py`, `umap.py`, `utils.py` (standardizzazione).
-- **Modelli** (`model_kind`): `supcon` (Supervised Contrastive su SOAP), `supcon_mace` (stessa ricetta sugli embedding MACE), `cgcnn` (rete a grafo con classificazione congiunta).
-- **Fase 2 (tail)**: `classification`, `visualization`, `hierarchical_supcon` (esperti per famiglia) sopra un corpo congelato.
+- **Modelli** (`model_kind`): `supcon` (Supervised Contrastive su SOAP) e `supcon_mace` (stessa ricetta sugli embedding MACE), allenati solo tramite `FullStack` (uno stack per sistema cristallino + fino a 7 esperti per spacegroup, ognuno con classificatore e visualizzatore); `cgcnn` (rete a grafo con classificazione congiunta).
 - **`pipeline/`**: orchestrazione guidata da YAML (`RunConfig`), sweep, confronto, benchmark, inferenza su nuove strutture.
 - **`analysis/`**: grafici e metriche di qualità degli embedding.
 
@@ -27,15 +26,16 @@ Comandi installati (`pyproject.toml`):
 
 | Comando | Cosa fa |
 |---|---|
-| `dimred-run <config.yaml>` | una run singola (dataset → modello → artefatti) |
-| `dimred-sweep <config.yaml>` | grid search |
+| `dimred-run <config.yaml>` | una run (FullStack o cgcnn, in base alle chiavi della config) |
+| `dimred-sweep <config.yaml>` | grid search su una config FullStack |
 | `dimred-rerun <run_dir>` | rilancia una run salvata |
-| `dimred-compare <dir>` | grafici di confronto di una sweep |
-| `dimred-train-tail <config.yaml>` | allena un tail di fase 2 su una run |
+| `dimred-train-heads <config.yaml> <run_dir> --heads-name NAME` | nuovo set di heads (classificatore + viz) su body FullStack già allenati |
+| `dimred-compare <dir>` | grafici di confronto di una sweep, una suite per stack |
+| `dimred-train-tail <config.yaml> <run_dir>` | tail di fase 2 su un run cgcnn |
 | `dimred-apply <structures.extxyz> <run_dir>` | applica una run a nuove strutture |
-| `dimred-benchmark <runs>... --output <csv>` | tabella di qualità tra run/model_kind |
+| `dimred-benchmark <runs>... --output <csv>` | tabella di qualità, una riga per stack |
 
-Config di esempio in `configs/`, riferimento completo dei campi in `examples/config_reference.example.yaml`, descrizione di ogni blocco in `docs/` (`sphinx-build docs docs/_build`).
+Config di esempio in `configs/`, partire da `configs/full_stack.example.yaml`; descrizione di ogni blocco in `docs/` (`docs/fullstack.md` per supcon/supcon_mace) (`sphinx-build docs docs/_build`).
 
 ## Test
 
