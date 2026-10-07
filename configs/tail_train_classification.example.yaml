@@ -1,23 +1,21 @@
 # Example config for phase 2 of the SupCon body/tail workflow: freezes an
-# already-trained "model: supcon" run's body (see
-# configs/single_run_supcon.example.yaml) and trains a small classification
+# already-trained cgcnn run's body (see
+# configs/single_run_cgcnn.example.yaml) and trains a small classification
 # tail on top of its already-saved representations (embeddings.npz), via
 # cross-entropy -- Khosla et al. 2020's "linear evaluation protocol",
 # generalized to a small MLP head instead of a strictly linear one. No SOAP
 # recompute, no body forward pass -- freely rerunnable with a different
 # tail config against the same trained body.
-# The run directory (a completed "model: supcon" run -- needs config.yaml,
+# The run directory (a completed cgcnn run -- needs config.yaml,
 # dataset.extxyz, model_params.msgpack and embeddings.npz) is passed on the
 # command line, not in this file, so the same tail config can be reused
 # across many runs without editing it each time:
 # Run with: dimred-train-tail configs/tail_train_classification.example.yaml runs/<date>-<n>/<run-name>
 
-tail_kind: classification # "classification", "visualization" or
-# "hierarchical_supcon" -- see configs/tail_train_visualization.example.yaml
-# and configs/tail_train_hierarchical_supcon_best_combo.example.yaml.
+tail_kind: classification # "classification" or "visualization"
+# -- see configs/tail_train_visualization.example.yaml.
 
-# A family classifier. Spacegroup classification is done by the per-family
-# experts of tail_kind: hierarchical_supcon, not here.
+# A family classifier.
 classification:
   head_hidden_dim: 16
 

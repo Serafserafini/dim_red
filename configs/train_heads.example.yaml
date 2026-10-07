@@ -1,0 +1,37 @@
+# Same schema as dimred-run. For every stack it lists, ONLY the classifier,
+# viz and seed blocks are read (the other blocks must be present so the file
+# validates, but are ignored); the trained bodies are never touched.
+# Run with: dimred-train-heads configs/train_heads.example.yaml <run_dir> --heads-name wide [--stacks family,cubic]
+name: train-heads-example
+seed: 42
+model_kind: supcon # or supcon_mace (then data.mace.checkpoint_path is required)
+output_dir: runs
+
+family:
+  data:
+    pyxtal:
+      families: [cubic, hexagonal, orthorhombic]
+      structures_per_family: 30
+      distribution: uniform
+      n_species: 2
+    soap: {r_cut: 5.0, n_max: 4, l_max: 3, sigma: 0.5, element_agnostic: true} # mu2 is required for supcon
+  encoder: {encoder_hidden_dim: [64, 32], latent_dim: 8}
+  projection: {projection_dim: 32}
+  contrastive: {tau: 0.1, distance: cosine}
+  classifier: {hidden_dim: 32}
+  viz: {hidden_dim: [64, 32], viz_dim: 2, tau: 0.1, distance: euclidean}
+  train: {epochs: 10, batch_size: 32, val_ratio: 0.2, device: cpu}
+
+experts:
+  defaults: # merged under each expert's own block
+    data:
+      pyxtal: {structures_per_spacegroup: 12, distribution: uniform, n_species: 2}
+      soap: {r_cut: 5.0, n_max: 4, l_max: 3, sigma: 0.5, element_agnostic: true}
+    encoder: {encoder_hidden_dim: [32], latent_dim: 8}
+    projection: {projection_dim: 16}
+    contrastive: {tau: 0.1, distance: cosine}
+    classifier: {hidden_dim: 32}
+    viz: {hidden_dim: [64, 32], viz_dim: 2}
+    train: {epochs: 10, batch_size: 32, val_ratio: 0.2, device: cpu}
+  cubic: {}
+  tetragonal: {encoder: {latent_dim: 6}} # per-expert override

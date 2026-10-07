@@ -1,0 +1,67 @@
+# The "best combo" recipe (round 7 + round 15 findings): contrastive tau 0.05
+# with cosine distance, wide trunk [256, 128] / latent 32, projection 128,
+# classifier hidden 32, visualizer [64, 32], 200 epochs with early stopping.
+# Run with: dimred-run configs/full_stack_best_combo.example.yaml --cache-dir runs/_shared_dataset_cache
+name: full-stack-best-combo
+seed: 42
+model_kind: supcon
+output_dir: runs/full_stack_best_combo
+
+family:
+  data:
+    pyxtal:
+      families: [triclinic, monoclinic, orthorhombic, tetragonal, trigonal, hexagonal, cubic]
+      structures_per_family: 500
+      distribution: uniform
+      n_species: 1
+    augmentation:
+      n_augmented: 4
+      keep_original: true
+      jitter_probability: 0.5
+      jitter_std: 0.05
+      vacancy_probability: 0.5
+      vacancy_atom_probability: 1
+      max_vacancies: 1
+      supercell_radius: 4.0
+    soap: {r_cut: 6.0, n_max: 8, l_max: 6, sigma: 0.5, element_agnostic: true}
+  encoder: {encoder_hidden_dim: [256, 128], latent_dim: 32}
+  projection: {projection_dim: 128}
+  contrastive: {tau: 0.05, distance: cosine, lambda_norm: 0.0}
+  classifier: {hidden_dim: 32}
+  viz: {hidden_dim: [64, 32], viz_dim: 2, tau: 0.1, distance: euclidean}
+  train: &train
+    epochs: 200
+    batch_size: 128
+    learning_rate: 0.001
+    val_ratio: 0.2
+    device: gpu
+    early_stopping: {enabled: true, patience: 20, min_delta: 0.0001, restore_best_weights: true}
+  batching: {strategy: random}
+
+experts:
+  defaults:
+    data:
+      pyxtal: {structures_per_spacegroup: 60, distribution: uniform, n_species: 1}
+      augmentation:
+        n_augmented: 4
+        keep_original: true
+        jitter_probability: 0.5
+        jitter_std: 0.05
+        vacancy_probability: 0.5
+        vacancy_atom_probability: 1
+        max_vacancies: 1
+        supercell_radius: 4.0
+      soap: {r_cut: 6.0, n_max: 8, l_max: 6, sigma: 0.5, element_agnostic: true}
+    encoder: {encoder_hidden_dim: [128, 64], latent_dim: 16}
+    projection: {projection_dim: 64}
+    contrastive: {tau: 0.05, distance: cosine}
+    classifier: {hidden_dim: 32}
+    viz: {hidden_dim: [64, 32], viz_dim: 2, tau: 0.1, distance: euclidean}
+    train: *train
+  triclinic: {}
+  monoclinic: {}
+  orthorhombic: {}
+  tetragonal: {}
+  trigonal: {}
+  hexagonal: {}
+  cubic: {}
