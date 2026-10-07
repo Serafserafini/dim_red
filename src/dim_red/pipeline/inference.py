@@ -1,41 +1,29 @@
 """
-Applies an already-trained model -- as saved by
+Applies an already-trained cgcnn model -- as saved by
 ``dim_red.pipeline.single_run.run_single`` -- to new structures, and plots
 the result in that model's latent space alongside the original dataset it
-was trained on.
+was trained on. supcon/supcon_mace stacks are applied through
+``dim_red.pipeline.full_stack`` instead (``dimred-apply`` dispatches on the
+run directory's layout).
 
 A completed run directory always has, written together: ``config.yaml``
-(architecture + SOAP settings), ``dataset.extxyz`` (the exact structures used
-to fit/standardize the model, same order as the SOAP features it saw),
-``model_params.msgpack`` (trained weights) and ``embeddings.npz`` (the
-original dataset's latent embeddings/labels, the standardized ``features``
-fed to the model plus the ``feature_mean``/``feature_std`` they were
-standardized with, and the family/spacegroup class vocabularies when a
-CGCNN's classification heads were active). ``load_trained_run`` reads
-all four: it takes ``feature_mean``/``feature_std`` directly from
-``embeddings.npz`` (saved there by ``dim_red.pipeline.single_run.run_single``
-since ``dim_red.pipeline.dataset_cache.build_dataset_for_run`` now returns
-them too) -- no SOAP recomputation on the training set at all -- resolves
-the species list from ``dataset.extxyz`` (cheap: no SOAP involved, just
-reading back which chemical symbols were present), then rebuilds the model
-architecture and loads its trained weights. Runs written before this
-(``feature_mean``/``feature_std`` missing from ``embeddings.npz``) fall back
-to the old behavior -- recomputing SOAP on ``dataset.extxyz`` to recover
-those statistics -- so they stay loadable, just slower. ``encode_structures``
-then featurizes/standardizes new structures through that *same* pipeline --
-not each their own -- so they land in a latent space that's actually
-comparable to the training set's, and ``plot_applied_structures`` overlays
-the two (projecting both through one shared UMAP fit when the latent space
-isn't already 2D, so old and new points don't end up in two unrelated
-coordinate systems).
+(architecture + graph settings), ``dataset.extxyz`` (the exact structures
+used for training), ``model_params.msgpack`` (trained weights) and
+``embeddings.npz`` (the original dataset's latent embeddings/labels, and the
+family/spacegroup class vocabularies when the classification heads were
+active). ``load_trained_run`` rebuilds the model architecture from
+``config.yaml``/``embeddings.npz`` and loads its trained weights;
+``encode_structures`` then builds graphs for new structures with the run's
+own graph settings, so they land in a latent space comparable to the
+training set's, and ``plot_applied_structures`` overlays the two (projecting
+both through one shared UMAP fit when the latent space isn't already 2D, so
+old and new points don't end up in two unrelated coordinate systems).
 
 ``load_run_embeddings`` is a lighter-weight counterpart for callers that
 only need ``config.yaml``/``embeddings.npz`` and never the reconstructed
 model itself -- e.g. ``dim_red.pipeline.tail_training.train_tail``, which
-trains a tail directly on a frozen body's already-saved representations and
-never needs the model, species list, or standardization stats
-``load_trained_run`` resolves. It requires only those two files (not the
-full four) and never touches SOAP.
+trains a tail directly on a frozen body's already-saved representations.
+It requires only those two files (not the full four).
 """
 
 from __future__ import annotations
@@ -53,16 +41,8 @@ from flax import serialization
 from dim_red.analysis.plotting import plot_applied_structures
 from dim_red.pipeline.compare import LatentUmapParams, make_umap
 from dim_red.pipeline.config import RunConfig, load_run_config
-from dim_red.soap import compute_soap
-from dim_red.utils import apply_standardization, fit_standardization
 
 logger = logging.getLogger("dim_red.pipeline")
-
-# Recomputed-vs-saved standardized-feature mismatch above this is treated as
-# a sign config.yaml/dataset.extxyz don't actually match what produced this
-# run (stale/hand-edited files) -- logged as a warning, not a hard failure,
-# since a small mismatch is expected from floating-point non-associativity.
-_STANDARDIZATION_MISMATCH_TOL = 1e-4
 
 _REQUIRED_RUN_FILES = (
     "config.yaml",
@@ -74,14 +54,11 @@ _REQUIRED_RUN_FILES = (
 
 @dataclass
 class LoadedRun:
-    """Everything needed to apply a trained run's model to new structures."""
+    """Everything needed to apply a trained cgcnn run's model to new structures."""
 
     run_dir: Path
     config: RunConfig
-    model: Any  # supcon.model.SupConEncoder | cgcnn.model.CGCNNEncoder
-    species: List[str]
-    feature_mean: np.ndarray
-    feature_std: np.ndarray
+    model: Any  # cgcnn.model.CGCNNEncoder
     embeddings: Dict[
         str, np.ndarray
     ]  # this run's own embeddings.npz (original dataset)
@@ -96,10 +73,10 @@ class RunEmbeddings:
     completed run's config and ``embeddings.npz`` contents -- e.g.
     ``dim_red.pipeline.tail_training.train_tail``, which trains a tail on
     representations ``dim_red.pipeline.single_run.run_single`` already
-    computed and saved, and never needs the reconstructed model, species
-    list, or standardization stats ``LoadedRun``/``load_trained_run``
-    resolve. Use ``load_trained_run`` instead when the reconstructed model
-    itself is actually needed (e.g. to encode new structures).
+    computed and saved, and never needs the model ``LoadedRun``/
+    ``load_trained_run`` reconstructs. Use ``load_trained_run`` instead when
+    the reconstructed model itself is actually needed (e.g. to encode new
+    structures).
     """
 
     run_dir: Path
@@ -111,10 +88,8 @@ def load_run_embeddings(run_dir: Union[str, Path]) -> RunEmbeddings:
     """Load just a completed run's config and ``embeddings.npz`` -- the
     minimal subset ``dim_red.pipeline.tail_training.train_tail`` actually
     needs (see ``RunEmbeddings``). Unlike ``load_trained_run``, this never
-    reconstructs the model, resolves species, or computes/recomputes
-    standardization stats -- no SOAP computation of any kind, ever, and
-    ``dataset.extxyz``/``model_params.msgpack`` aren't required to exist at
-    all.
+    reconstructs the model, and ``dataset.extxyz``/``model_params.msgpack``
+    aren't required to exist at all.
 
     Args:
         run_dir: Path to a run directory written by
@@ -140,83 +115,47 @@ def load_run_embeddings(run_dir: Union[str, Path]) -> RunEmbeddings:
     return RunEmbeddings(run_dir=run_dir, config=config, embeddings=embeddings)
 
 
-def _resolve_species(config: RunConfig, atoms_list: List[Atoms]) -> List[str]:
-    """The species list SOAP was actually computed against for this run --
-    ``config.soap.species`` if it was set explicitly, otherwise
-    auto-detected from ``atoms_list`` (``dataset.extxyz``, the exact training
-    atoms), mirroring ``dim_red.pipeline.dataset_cache._compute_soap_and_standardize``.
-    """
-    if config.soap.species is not None:
-        return list(config.soap.species)
-    species = set()
-    for a in atoms_list:
-        species.update(a.get_chemical_symbols())
-    return sorted(species)
-
-
-def _raw_soap_matrix(
-    atoms_list: List[Atoms], soap_kwargs: Dict[str, Any], species: List[str]
-) -> np.ndarray:
-    kwargs = dict(soap_kwargs)
-    kwargs["species"] = species
-    kwargs["average"] = "outer"
-    vectors = compute_soap(atoms_list, **kwargs)
-    return np.asarray(vectors).reshape(len(atoms_list), -1)
-
-
-def _build_model(config: RunConfig, input_dim: int, embeddings: Dict[str, np.ndarray]):
-    """Reconstruct a run's model architecture (with freshly-initialized,
+def _build_model(config: RunConfig, embeddings: Dict[str, np.ndarray]):
+    """Reconstruct a cgcnn run's model architecture (with freshly-initialized,
     soon-to-be-overwritten weights) from its ``RunConfig`` -- mirrors the
     construction in ``dim_red.pipeline.single_run.run_single``. Family/
-    spacegroup classifier-head sizes (cgcnn only) come from
+    spacegroup classifier-head sizes come from
     ``embeddings['family_classes']``/``['spacegroup_classes']``, since
     ``RunConfig`` itself doesn't carry the resolved class counts.
     """
-    if config.model_kind in ("supcon", "supcon_mace"):
-        from dim_red.supcon.model import SupConEncoder
+    from dim_red.cgcnn.model import CGCNNEncoder
 
-        return SupConEncoder(
-            input_dim=input_dim,
-            encoder_hidden_dim=config.encoder.encoder_hidden_dim,
-            latent_dim=config.encoder.latent_dim,
-            seed=config.seed,
-        )
-
-    if config.model_kind == "cgcnn":
-        from dim_red.cgcnn.model import CGCNNEncoder
-
-        aux_mode = config.aux_heads.mode
-        use_family = aux_mode != "none"
-        use_spacegroup = aux_mode == "family_and_spacegroup"
-        n_family_classes = (
-            len(embeddings["family_classes"])
-            if use_family and "family_classes" in embeddings
-            else None
-        )
-        n_spacegroup_classes = (
-            len(embeddings["spacegroup_classes"])
-            if use_spacegroup and "spacegroup_classes" in embeddings
-            else None
-        )
-        return CGCNNEncoder(
-            atom_fea_len=config.graph.atom_fea_len,
-            n_conv=config.graph.n_conv,
-            h_fea_len=config.graph.h_fea_len,
-            n_h=config.graph.n_h,
-            latent_dim=config.encoder.latent_dim,
-            n_gaussian=config.graph.n_gaussian,
-            max_species=config.graph.max_species,
-            n_family_classes=n_family_classes,
-            n_spacegroup_classes=n_spacegroup_classes,
-            head_hidden_dim=config.aux_heads.head_hidden_dim,
-            seed=config.seed,
-        )
-
-    raise ValueError(f"Unsupported model_kind {config.model_kind!r}")
+    aux_mode = config.aux_heads.mode
+    use_family = aux_mode != "none"
+    use_spacegroup = aux_mode == "family_and_spacegroup"
+    n_family_classes = (
+        len(embeddings["family_classes"])
+        if use_family and "family_classes" in embeddings
+        else None
+    )
+    n_spacegroup_classes = (
+        len(embeddings["spacegroup_classes"])
+        if use_spacegroup and "spacegroup_classes" in embeddings
+        else None
+    )
+    return CGCNNEncoder(
+        atom_fea_len=config.graph.atom_fea_len,
+        n_conv=config.graph.n_conv,
+        h_fea_len=config.graph.h_fea_len,
+        n_h=config.graph.n_h,
+        latent_dim=config.encoder.latent_dim,
+        n_gaussian=config.graph.n_gaussian,
+        max_species=config.graph.max_species,
+        n_family_classes=n_family_classes,
+        n_spacegroup_classes=n_spacegroup_classes,
+        head_hidden_dim=config.aux_heads.head_hidden_dim,
+        seed=config.seed,
+    )
 
 
 def load_trained_run(run_dir: Union[str, Path]) -> LoadedRun:
-    """Load a completed run directory's trained model, ready to encode new structures.
+    """Load a completed cgcnn run directory's trained model, ready to encode
+    new structures.
 
     Args:
         run_dir: Path to a run directory written by
@@ -229,6 +168,7 @@ def load_trained_run(run_dir: Union[str, Path]) -> LoadedRun:
 
     Raises:
         FileNotFoundError: If any of the four expected files is missing.
+        ValueError: If the run's ``model_kind`` is not ``"cgcnn"``.
     """
     run_dir = Path(run_dir)
     missing = [f for f in _REQUIRED_RUN_FILES if not (run_dir / f).exists()]
@@ -239,141 +179,33 @@ def load_trained_run(run_dir: Union[str, Path]) -> LoadedRun:
         )
 
     config = load_run_config(run_dir / "config.yaml")
+    if config.model_kind != "cgcnn":
+        raise ValueError(
+            f"{run_dir} is a model_kind={config.model_kind!r} run -- "
+            "load_trained_run only loads cgcnn runs; supcon/supcon_mace stacks "
+            "are applied through dim_red.pipeline.full_stack.FullStack"
+        )
     with np.load(run_dir / "embeddings.npz") as npz:
         embeddings = dict(npz.items())
 
-    if config.model_kind == "cgcnn":
-        # No species vocabulary at all (the body's nn.Embed is keyed by a
-        # per-structure LOCAL species slot, not a real chemical species --
-        # see dim_red.cgcnn.graph) and no standardization stats (Gaussian-
-        # expanded bond distances are already bounded to [0, 1] by
-        # construction) -- dataset.extxyz doesn't even need to be read here.
-        # species/mean/std are inert placeholders kept only so LoadedRun's
-        # dataclass shape stays uniform across every model_kind (simpler
-        # than making those fields Optional everywhere) --
-        # encode_structures's cgcnn branch never reads them.
-        species: List[str] = []
-        mean = np.zeros(0, dtype=np.float32)
-        std = np.ones(0, dtype=np.float32)
-        input_dim = 0
-    elif config.model_kind == "supcon_mace":
-        # Like SOAP-based kinds, feature_mean/feature_std are always saved
-        # (dim_red.pipeline.dataset_cache.build_mace_dataset_for_run always
-        # returns them -- there's no "pre-existing run predating this field"
-        # fallback case for supcon_mace) -- taken directly from
-        # embeddings.npz, same fast path as the SOAP-based kinds below. No
-        # species list: MaceEncoder doesn't use dim_red.soap's chemical-
-        # species machinery at all (its checkpoint carries its own
-        # supported-species table internally, loaded from
-        # config.mace.checkpoint_path at construction time) -- kept as an
-        # inert empty placeholder, same treatment cgcnn's species field
-        # gets above, so LoadedRun's shape stays uniform. This branch
-        # resolves the *raw input features'* standardization stats/width
-        # (MACE's own frozen embedding); _build_model constructs the trained
-        # SupConEncoder on top of that same input_dim. dataset.extxyz isn't
-        # read here, and the SOAP-recompute fallback below never applies.
-        species = []
-        mean = embeddings["feature_mean"]
-        std = embeddings["feature_std"]
-        input_dim = (
-            embeddings["features"].shape[1]
-            if "features" in embeddings
-            else mean.shape[0]
-        )
-    else:
-        # Species resolution is cheap (just reads back which chemical
-        # symbols dataset.extxyz's atoms contain) -- no SOAP computation
-        # involved -- so it always happens for the SOAP-based model kinds.
-        train_atoms = read_atoms(str(run_dir / "dataset.extxyz"), index=":")
-        species = _resolve_species(config, train_atoms)
-
-        if "feature_mean" in embeddings and "feature_std" in embeddings:
-            # Fast path (runs written after this field existed): the exact
-            # standardization stats training used are already saved -- no
-            # need to recompute SOAP on the training set at all.
-            mean = embeddings["feature_mean"]
-            std = embeddings["feature_std"]
-            input_dim = (
-                embeddings["features"].shape[1]
-                if "features" in embeddings
-                else mean.shape[0]
-            )
-        else:
-            # Slow fallback, for runs predating feature_mean/feature_std
-            # being saved: recompute SOAP on dataset.extxyz to recover them
-            # -- the exact cost this fast path exists to avoid.
-            logger.warning(
-                "%s's embeddings.npz has no feature_mean/feature_std (a run "
-                "written before this run artifact existed) -- recomputing SOAP "
-                "on dataset.extxyz to recover standardization stats; this is "
-                "much slower than loading a run trained after this fix.",
-                run_dir,
-            )
-            soap_kwargs = config.soap.as_kwargs()
-            X_train_raw = _raw_soap_matrix(train_atoms, soap_kwargs, species)
-            mean, std = fit_standardization(X_train_raw)
-            input_dim = X_train_raw.shape[1]
-
-            if "features" in embeddings:
-                saved = embeddings["features"]
-                reproduced = apply_standardization(X_train_raw, mean, std)
-                if reproduced.shape != saved.shape:
-                    logger.warning(
-                        "Recomputed SOAP features for %s's dataset.extxyz have shape %s, "
-                        "but embeddings.npz['features'] has shape %s -- config.yaml may "
-                        "not match what actually produced this run.",
-                        run_dir,
-                        reproduced.shape,
-                        saved.shape,
-                    )
-                else:
-                    max_diff = float(np.max(np.abs(reproduced - saved)))
-                    if max_diff > _STANDARDIZATION_MISMATCH_TOL:
-                        logger.warning(
-                            "Recomputed SOAP features for %s's dataset.extxyz differ from "
-                            "embeddings.npz['features'] by up to %.3g -- config.yaml's SOAP "
-                            "settings may not match what actually produced this run (new "
-                            "structures would then be featurized inconsistently with the "
-                            "trained model).",
-                            run_dir,
-                            max_diff,
-                        )
-
-    model = _build_model(config, input_dim, embeddings)
+    # No species vocabulary (the body's nn.Embed is keyed by a per-structure
+    # LOCAL species slot, not a real chemical species -- see
+    # dim_red.cgcnn.graph) and no standardization stats (Gaussian-expanded
+    # bond distances are already bounded to [0, 1] by construction) --
+    # dataset.extxyz doesn't even need to be read here.
+    model = _build_model(config, embeddings)
     with open(run_dir / "model_params.msgpack", "rb") as f:
         model.params = serialization.from_bytes(model.params, f.read())
 
-    if config.model_kind == "cgcnn":
-        logger.info(
-            "Loaded cgcnn model from %s (latent_dim=%d)",
-            run_dir,
-            config.encoder.latent_dim,
-        )
-    elif config.model_kind == "supcon_mace":
-        logger.info(
-            "Loaded supcon_mace model from %s (mace checkpoint=%s, %d-dim MACE "
-            "input, latent_dim=%d)",
-            run_dir,
-            config.mace.checkpoint_path,
-            input_dim,
-            config.encoder.latent_dim,
-        )
-    else:
-        logger.info(
-            "Loaded %s model from %s (%d species, %d-dim SOAP input, latent_dim=%d)",
-            config.model_kind,
-            run_dir,
-            len(species),
-            input_dim,
-            config.encoder.latent_dim,
-        )
+    logger.info(
+        "Loaded cgcnn model from %s (latent_dim=%d)",
+        run_dir,
+        config.encoder.latent_dim,
+    )
     return LoadedRun(
         run_dir=run_dir,
         config=config,
         model=model,
-        species=species,
-        feature_mean=mean,
-        feature_std=std,
         embeddings=embeddings,
     )
 
@@ -383,10 +215,7 @@ def encode_structures(loaded: LoadedRun, atoms_list: List[Atoms]) -> np.ndarray:
 
     Args:
         loaded: Output of ``load_trained_run``.
-        atoms_list: New ASE ``Atoms`` to encode. Every chemical species
-            present must be among ``loaded.species`` (the species SOAP was
-            computed against during training) -- otherwise SOAP computation
-            raises.
+        atoms_list: New ASE ``Atoms`` to encode.
 
     Returns:
         Latent coordinates, shape ``(len(atoms_list), latent_dim)``.
@@ -397,38 +226,16 @@ def encode_structures(loaded: LoadedRun, atoms_list: List[Atoms]) -> np.ndarray:
     if not atoms_list:
         raise ValueError("atoms_list is empty -- nothing to encode")
 
-    if loaded.config.model_kind == "cgcnn":
-        from dim_red.cgcnn.graph import atoms_list_to_graph_arrays
+    from dim_red.cgcnn.graph import atoms_list_to_graph_arrays
 
-        # max_atoms is resolved fresh here, across just atoms_list -- it is
-        # NOT required to match whatever max_atoms training used (see
-        # dim_red.cgcnn.graph.atoms_list_to_graph_arrays's docstring: no
-        # trained parameter depends on max_atoms).
-        graph_batch = atoms_list_to_graph_arrays(
-            atoms_list, **loaded.config.graph.graph_kwargs()
-        )
-        return np.asarray(loaded.model.encode(graph_batch))
-
-    if loaded.config.model_kind == "supcon_mace":
-        # loaded.model here is the *trained* SupConEncoder (see _build_model),
-        # not something that can featurize raw Atoms itself -- a separate,
-        # freshly-constructed frozen MaceEncoder does the same featurization
-        # step training used (dim_red.pipeline.dataset_cache
-        # ._compute_mace_and_standardize), standardized with this run's own
-        # feature_mean/feature_std, and only *then* passed through the
-        # trained body -- mirrors the SOAP branch below's
-        # "_raw_soap_matrix -> apply_standardization -> model.encode" shape,
-        # just with MACE's frozen forward pass standing in for SOAP.
-        from dim_red.mace.model import MaceEncoder
-
-        mace_encoder = MaceEncoder(**loaded.config.mace.mace_kwargs())
-        raw = np.asarray(mace_encoder.encode(atoms_list))
-        X_std = apply_standardization(raw, loaded.feature_mean, loaded.feature_std)
-        return np.asarray(loaded.model.encode(X_std))
-
-    X_raw = _raw_soap_matrix(atoms_list, loaded.config.soap.as_kwargs(), loaded.species)
-    X_std = apply_standardization(X_raw, loaded.feature_mean, loaded.feature_std)
-    return np.asarray(loaded.model.encode(X_std))
+    # max_atoms is resolved fresh here, across just atoms_list -- it is NOT
+    # required to match whatever max_atoms training used (see
+    # dim_red.cgcnn.graph.atoms_list_to_graph_arrays's docstring: no trained
+    # parameter depends on max_atoms).
+    graph_batch = atoms_list_to_graph_arrays(
+        atoms_list, **loaded.config.graph.graph_kwargs()
+    )
+    return np.asarray(loaded.model.encode(graph_batch))
 
 
 def plot_applied_in_latent_space(
