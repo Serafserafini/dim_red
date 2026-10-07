@@ -5,8 +5,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --time=04:00:00
 
-# CPU counterpart to slurm/round19_phase1.sbatch, for the family-only
-# ablation's SOAP-based (model: supcon) runs -- SOAP featurization is
+# CPU job for the family-only ablation's dimred-run runs -- SOAP featurization is
 # CPU-only regardless, and these bodies (small MLP encoder, a few thousand
 # structures, 200 epochs) don't need a GPU. Pass the config path via
 # CONFIG_YAML (--export=CONFIG_YAML=...), e.g.:
@@ -15,7 +14,7 @@
 #       --export=ALL,CONFIG_YAML=experiments/ablation_family_only/aug_off.yaml \
 #       slurm/ablation_family_only_cpu.sbatch
 #
-# Same .novalocal retry guard as round19_phase1.sbatch (see repo-root
+# Same .novalocal retry guard as tune_all_models.sbatch (see repo-root
 # CLAUDE.md / session notes: jobs landing on .novalocal hostnames recur with
 # infra errors, e.g. /tmp PTX write PERMISSION_DENIED -- suspect the node
 # before dim_red code).

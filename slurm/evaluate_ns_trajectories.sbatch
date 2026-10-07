@@ -9,11 +9,16 @@
 #SBATCH --output=slurm-%x-%A_%a.out
 
 # Evaluates EVERY frame of one NS replica trajectory (array task i ->
-# ns.<i>.traj.extxyz) with the round 15 best_combo SupCon body +
-# hierarchical_supcon tail + round 16 SG visualizers -- see
+# ns.<i>.traj.extxyz) with a trained FullStack run (family stack + every
+# trained expert stack, one heads set) -- see
 # examples/evaluate_ns_trajectories.py for everything that gets saved.
-# ~2-3 min per replica (44k frames of 32 atoms) on one core; SOAP + tiny
-# MLPs only, so CPU is enough (no GPU, and JAX_PLATFORMS=cpu below).
+# SOAP + tiny MLPs only, so CPU is enough (no GPU, and JAX_PLATFORMS=cpu
+# below).
+#
+# The run is REQUIRED (DIMRED_RUN_DIR); DIMRED_HEADS_NAME is optional
+# (default: the only heads set each stack has):
+#   sbatch --export=ALL,DIMRED_RUN_DIR=runs/<full_stack_run> \
+#       slurm/evaluate_ns_trajectories.sbatch
 #
 # No .novalocal resubmit guard here, unlike the GPU jobs: that failure mode
 # (/tmp PTX writes) is GPU-only.
@@ -22,8 +27,7 @@
 # gitignored) and writes runs/ns_traj_eval/ti_trajs/ns.<i>.eval.npz.
 # Resumable: re-submitting skips finished replicas and finished chunks.
 #
-# Submit from repo root:
-#   sbatch slurm/evaluate_ns_trajectories.sbatch
+# Submit from repo root (see the --export example above).
 
 set -euo pipefail
 
@@ -43,9 +47,17 @@ export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK}"
 
 INPUT_DIR="${DIMRED_NS_INPUT_DIR:-experiments/test_strucutres/ti_trajs}"
 OUTPUT_DIR="${DIMRED_NS_OUTPUT_DIR:-runs/ns_traj_eval/ti_trajs}"
+: "${DIMRED_RUN_DIR:?DIMRED_RUN_DIR (a FullStack run directory) must be set via --export}"
+HEADS_ARGS=()
+if [ -n "${DIMRED_HEADS_NAME:-}" ]; then
+    HEADS_ARGS=(--heads-name "${DIMRED_HEADS_NAME}")
+fi
 
 python examples/evaluate_ns_trajectories.py \
     --replica "${SLURM_ARRAY_TASK_ID}" \
+    --run-dir "${DIMRED_RUN_DIR}" \
+    "${HEADS_ARGS[@]}" \
+    --device cpu \
     --input-dir "${INPUT_DIR}" \
     --output-dir "${OUTPUT_DIR}"
 

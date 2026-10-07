@@ -8,7 +8,7 @@
 # Full round-15-scale test of model_kind: supcon_mace -- best_combo's own
 # SupCon body/loss trained on frozen MACE-MP-0 features instead of SOAP.
 # Same data quantity as best_combo and the model_kind: mace comparison
-# (500/family, 17500 structures). Unlike the frozen mace/hierarchical_supcon
+# (500/family, 17500 structures). Unlike the frozen-MACE (model_kind: mace)
 # jobs, this one actually trains a body (SupCon contrastive loss over up to
 # 200 epochs with early stopping), so it's a real training job, not just
 # a frozen forward pass + tiny tail.

@@ -4,30 +4,24 @@
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:1
 #SBATCH --time=2-00:00:00
-#SBATCH --array=0-1
+#SBATCH --array=0-0
 
-# One independent GPU job per model_kind (supcon/cgcnn), via
-# SLURM_ARRAY_TASK_ID -- each gets its own GPU and its own full 2-day
-# budget, so a slow sweep for one kind can never eat into another's time.
-# Each task: dimred-sweep on that kind's slurm/tuning_sweep_<kind>.yaml,
-# then dimred-benchmark on the resulting sweep dir, so a ready benchmark_table.csv
+# One FullStack sweep (dimred-sweep: family + expert stacks, body + heads
+# "default" per grid combination) on one GPU with a full 2-day budget, then
+# dimred-benchmark on the resulting sweep dir, so a ready benchmark_table.csv
 # (see src/dim_red/pipeline/CLAUDE.md's "pipeline.benchmark" section for what's
 # in it -- family classification accuracy and 2D phase-separation lead every
-# row) is waiting for each kind once the job finishes.
+# row) is waiting once the job finishes. Kept as a single-task array (0-0) so
+# the .novalocal resubmit guard below can resubmit "this array task".
 #
-# supcon's tuning_sweep_supcon.yaml is pointed at a shared --cache-dir
-# (below) so the ~35000-structure SOAP computation runs in a separate CPU
-# job instead of inside the GPU task. REQUIRES that cache to already be
-# built and complete before this array starts -- run warmup_shared_dataset.sbatch
-# first and chain this job on it:
-#   WARMUP_ID=$(sbatch --parsable slurm/warmup_shared_dataset.sbatch)
-#   sbatch --dependency=afterok:${WARMUP_ID} slurm/tune_all_models.sbatch
-# cgcnn (task 1) is unaffected -- it featurizes with graphs, not SOAP, so it
-# keeps its own default cache dir (runs/tuning_cgcnn/_dataset_cache).
+# The sweep config defaults to configs/full_stack_sweep.example.yaml; point it
+# at your own with --export:
+#   sbatch --export=ALL,SWEEP_CONFIG=experiments/my_sweep.yaml slurm/tune_all_models.sbatch
+# Datasets are built lazily per stack into the shared --cache-dir below (no
+# separate warm-up job), so several sweeps over the same data reuse them.
 #
-# To rebuild/refresh a cross-model table combining both afterwards:
-#   dimred-benchmark runs/tuning_supcon/<date>-<n> runs/tuning_cgcnn/<date>-<n> \
-#       --output runs/final_benchmark.csv
+# cgcnn is not part of this sweep: it is trained with dimred-run
+# (configs/single_run_cgcnn.example.yaml).
 
 set -euo pipefail
 
@@ -79,26 +73,16 @@ fi
 
 cd "${SLURM_SUBMIT_DIR}"
 
-MODEL_KINDS=(supcon cgcnn)
-MODEL_KIND="${MODEL_KINDS[$SLURM_ARRAY_TASK_ID]}"
-SWEEP_CONFIG="slurm/tuning_sweep_${MODEL_KIND}.yaml"
-
-echo "Task ${SLURM_ARRAY_TASK_ID}: tuning model_kind=${MODEL_KIND} (${SWEEP_CONFIG})"
-if [ "${MODEL_KIND}" = "cgcnn" ]; then
-    # No shared cache for cgcnn: it builds graph features, not SOAP, so
-    # there's nothing to share with supcon. Default
-    # (runs/tuning_cgcnn/_dataset_cache) is fine.
-    dimred-sweep "${SWEEP_CONFIG}"
-else
-    # supcon uses the shared dataset cache -- see the file-level
-    # comment above. Must already be warmed up by warmup_shared_dataset.sbatch.
-    dimred-sweep "${SWEEP_CONFIG}" --cache-dir runs/_shared_dataset_cache
-fi
+SWEEP_CONFIG="${SWEEP_CONFIG:-configs/full_stack_sweep.example.yaml}"
+echo "FullStack sweep: ${SWEEP_CONFIG}"
+dimred-sweep "${SWEEP_CONFIG}" --cache-dir runs/_shared_dataset_cache
 
 # dimred-sweep doesn't print the sweep directory itself (only each run dir),
-# so recover it as the most recently created dated dir under this kind's
-# output_dir -- safe since this is the only job writing there for this kind.
-SWEEP_DIR=$(ls -td "runs/tuning_${MODEL_KIND}"/*/ | head -1)
+# so recover it as the most recently created dated dir under the sweep
+# config's base.output_dir -- safe as long as this is the only job writing
+# there.
+OUTPUT_DIR=$(python -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))["base"].get("output_dir", "runs"))' "${SWEEP_CONFIG}")
+SWEEP_DIR=$(ls -td "${OUTPUT_DIR}"/[0-9]*-[0-9]*/ | head -1)
 SWEEP_DIR=${SWEEP_DIR%/}
 echo "Sweep finished: ${SWEEP_DIR}"
 
