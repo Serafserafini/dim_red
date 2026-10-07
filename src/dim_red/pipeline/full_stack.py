@@ -15,11 +15,14 @@ Layout (``<run_dir>``)::
                                         predictions.npz, viz_embeddings.npz, viz_plot.png
 """
 
+import dataclasses
+import json
 import logging
 import os
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 import numpy as np
 import yaml
@@ -31,6 +34,7 @@ from dim_red.pipeline._common import (
     _save_loss_history,
     _split_indices_grouped,
 )
+from dim_red.pipeline.featurize import featurize_structures, standardize
 from dim_red.pipeline.full_stack_config import (
     FAMILY,
     STACK_ORDER,
@@ -40,12 +44,45 @@ from dim_red.pipeline.full_stack_config import (
     full_stack_config_to_dict,
     stack_spec_to_dict,
 )
+from dim_red.pipeline.run_layout import resolve_heads_name, trained_stack_names
 from dim_red.pipeline.stack_data import StackDataset, build_stack_dataset
 from dim_red.supcon.stack import SingleStack
 
 logger = logging.getLogger("dim_red.pipeline")
 
 History = Dict[str, List[float]]
+
+DEFAULT_HEADS_NAME = "default"
+
+
+@dataclass(frozen=True)
+class StackPrediction:
+    """One stack's output for a batch: class names (columns of ``proba``),
+    class probabilities and the 2D/3D visualization coordinates."""
+
+    classes: list
+    proba: np.ndarray
+    viz: np.ndarray
+
+    @property
+    def labels(self) -> list:
+        return [self.classes[i] for i in self.proba.argmax(axis=1)]
+
+
+@dataclass(frozen=True)
+class Prediction:
+    """Family -> expert prediction for a batch of structures. ``expert``,
+    ``spacegroup``, ``spacegroup_proba`` and ``viz_expert`` hold ``None`` for a
+    structure whose crystal system has no trained expert: an explicit missing
+    value, never a guess."""
+
+    family: List[str]
+    family_proba: np.ndarray
+    expert: List[Optional[str]]
+    spacegroup: List[Optional[int]]
+    spacegroup_proba: List[Optional[float]]
+    viz_family: np.ndarray
+    viz_expert: List[Optional[np.ndarray]]
 
 
 def _labels_for(name: str, dataset: StackDataset) -> list:
@@ -406,3 +443,119 @@ class FullStack:
                 self._stack_dir(name) / "heads" / heads_name, device=device
             )
         return stack
+
+    # -- inference -------------------------------------------------------
+    def stack_names(self) -> List[str]:
+        """Trained stacks on disk, in canonical order."""
+        return trained_stack_names(self.run_dir)
+
+    def _stack_meta(self, name: str):
+        stack_dir = self._stack_dir(name)
+        with open(stack_dir / "classes.yaml") as f:
+            classes = yaml.safe_load(f)["classes"]
+        with np.load(stack_dir / "embeddings.npz") as npz:
+            return classes, npz["feature_mean"], npz["feature_std"]
+
+    def _raw_features(self, structures, spec: StackSpec, cache: Dict[str, Any]):
+        data = (
+            spec.data.mace
+            if self.config.model_kind == "supcon_mace"
+            else spec.data.soap
+        )
+        key = json.dumps(dataclasses.asdict(data), sort_keys=True)
+        if key not in cache:
+            cache[key] = featurize_structures(
+                structures, self.config.model_kind, spec.data
+            )
+        return cache[key]
+
+    def _predict_stack(
+        self,
+        name: str,
+        structures: list,
+        heads_name: Optional[str],
+        device: str,
+        cache: Dict[str, Any],
+        rows: Optional[Sequence[int]] = None,
+    ) -> StackPrediction:
+        trained = self.stack_names()
+        if name not in trained:
+            raise ValueError(
+                f"stack {name!r} is not trained in {self.run_dir}; trained "
+                f"stacks: {trained}"
+            )
+        spec = self.config.stacks[name]
+        raw = self._raw_features(structures, spec, cache)
+        if rows is not None:
+            raw = raw[list(rows)]
+        classes, mean, std = self._stack_meta(name)
+        X = standardize(raw, mean, std)
+        heads = resolve_heads_name(self._stack_dir(name), heads_name)
+        stack = self.load_stack(name, heads, device=device)
+        return StackPrediction(
+            classes=classes, proba=stack.predict_proba(X), viz=stack.visualize(X)
+        )
+
+    def predict_stack(
+        self,
+        name: str,
+        structures,
+        heads_name: Optional[str] = None,
+        device: str = "cpu",
+    ) -> StackPrediction:
+        """One stack alone (no routing). ``device`` is where the params are
+        placed, whatever device they were trained on."""
+        structures = list(structures)
+        if not structures:
+            raise ValueError("structures is empty -- nothing to predict")
+        return self._predict_stack(name, structures, heads_name, device, {})
+
+    def predict(
+        self,
+        structures,
+        heads_name: Optional[str] = None,
+        device: str = "cpu",
+    ) -> Prediction:
+        """Family stack assigns the crystal system; each structure is then
+        sent to that system's expert (if one is trained) for its spacegroup."""
+        structures = list(structures)
+        if not structures:
+            raise ValueError("structures is empty -- nothing to predict")
+        trained = self.stack_names()
+        if FAMILY not in trained:
+            raise ValueError(
+                "predict routes through the family stack, which is not trained "
+                f"in {self.run_dir}; use predict_stack(name, structures) for a "
+                "single stack"
+            )
+        cache: Dict[str, Any] = {}
+        fam = self._predict_stack(FAMILY, structures, heads_name, device, cache)
+        family = [str(fam.classes[i]) for i in fam.proba.argmax(axis=1)]
+        n = len(structures)
+        expert: List[Optional[str]] = [None] * n
+        spacegroup: List[Optional[int]] = [None] * n
+        spacegroup_proba: List[Optional[float]] = [None] * n
+        viz_expert: List[Optional[np.ndarray]] = [None] * n
+        for system in sorted(set(family)):
+            name = system.lower()
+            if name not in trained or name == FAMILY:
+                continue
+            rows = [i for i, f in enumerate(family) if f == system]
+            exp = self._predict_stack(
+                name, structures, heads_name, device, cache, rows=rows
+            )
+            for k, i in enumerate(rows):
+                top = int(exp.proba[k].argmax())
+                expert[i] = name
+                spacegroup[i] = int(exp.classes[top])
+                spacegroup_proba[i] = float(exp.proba[k, top])
+                viz_expert[i] = exp.viz[k]
+        return Prediction(
+            family=family,
+            family_proba=fam.proba.max(axis=1),
+            expert=expert,
+            spacegroup=spacegroup,
+            spacegroup_proba=spacegroup_proba,
+            viz_family=fam.viz,
+            viz_expert=viz_expert,
+        )
