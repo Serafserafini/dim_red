@@ -13,7 +13,8 @@ from dim_red.pipeline.config import (
 )
 from dim_red.pipeline.full_stack_config import full_stack_config_from_dict
 
-CONFIGS = sorted(Path("configs").rglob("*.yaml"))
+CONFIGS_DIR = Path(__file__).resolve().parent.parent / "configs"
+CONFIGS = sorted(CONFIGS_DIR.rglob("*.yaml"))
 
 
 def _is_full_stack(d):
@@ -48,7 +49,7 @@ def test_example_configs_load(path):
 
 def test_full_stack_examples_cover_family_and_experts():
     cfg = full_stack_config_from_dict(
-        yaml.safe_load(Path("configs/full_stack.example.yaml").read_text())
+        yaml.safe_load((CONFIGS_DIR / "full_stack.example.yaml").read_text())
     )
     assert "family" in cfg.stacks and len(cfg.stacks) >= 3
     assert all(s.data.soap.element_agnostic for s in cfg.stacks.values())

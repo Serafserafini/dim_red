@@ -1,7 +1,7 @@
 # Grid sweep over a FullStack config: one run (body + heads "default") per
 # combination. Axes are dotted paths into the base config.
 # Run with: dimred-sweep configs/full_stack_sweep.example.yaml
-# Then: dimred-compare runs/<date>-<n>   and   dimred-benchmark runs/<date>-<n> --output runs/<date>-<n>/benchmark.csv
+# Then: dimred-compare runs/full_stack_sweep/<date>-<n>   and   dimred-benchmark runs/full_stack_sweep/<date>-<n> --output runs/full_stack_sweep/<date>-<n>/benchmark.csv
 base:
   name: sweep
   seed: 42

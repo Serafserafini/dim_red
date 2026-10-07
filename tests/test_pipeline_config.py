@@ -727,3 +727,13 @@ def test_run_config_dataclass_refuses_supcon_models_with_a_pointer(model_kind):
             aux_heads=AuxHeadsConfig(mode="family_only"),
             model_kind=model_kind,
         )
+
+
+@pytest.mark.parametrize("content", ["", "- a\n- b\n"])
+def test_load_yaml_rejects_non_mapping(tmp_path, content):
+    from dim_red.pipeline.config import load_yaml
+
+    path = tmp_path / "bad.yaml"
+    path.write_text(content)
+    with pytest.raises(ValueError, match="mapping"):
+        load_yaml(path)

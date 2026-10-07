@@ -699,7 +699,10 @@ def _parse_visualization_tail_config(
 
 def load_yaml(path: Union[str, Path]) -> Dict[str, Any]:
     with open(path, "r") as f:
-        return yaml.safe_load(f)
+        loaded = yaml.safe_load(f)
+    if not isinstance(loaded, dict):
+        raise ValueError(f"{path} is empty or not a YAML mapping")
+    return loaded
 
 
 def run_config_from_dict(d: Dict[str, Any]) -> RunConfig:

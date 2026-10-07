@@ -59,8 +59,10 @@ Esempi: `configs/full_stack.example.yaml`, `configs/full_stack_best_combo.exampl
     config.yaml                # StackSpec risolto
     dataset.extxyz  classes.yaml  embeddings.npz
     body/                      # encoder_params, projection_params, stack.yaml, loss_history.csv
-    heads/<nome>/              # parametri classifier/viz, heads.yaml, history,
-                               # predictions.npz, viz_embeddings.npz, viz_plot.png
+    heads/<nome>/              # parametri classifier/viz, heads.yaml,
+                               # classifier_loss_history.csv, viz_loss_history.csv,
+                               # predictions.npz, viz_embeddings.npz,
+                               # viz_plot.png (solo se viz_dim == 2)
 ```
 
 Le directory `.<x>.tmp` sono scritture atomiche interrotte: i lettori (`run_layout`) le ignorano. Scrivere il body in una cartella `stacks/<nome>/` già esistente è un errore, non una sovrascrittura. I run con il vecchio layout (pre-FullStack) **non** sono leggibili.
@@ -77,6 +79,7 @@ Lo stack `family` assegna il sistema cristallino, poi ogni struttura è instrada
 
 ## Quirk noti
 
+- `dimred-rerun` di un run che vive dentro una directory di sweep lo ricrea dentro quella directory (l'`output_dir` registrato) e con la cache dei dataset dello sweep; per rilanciarlo altrove copiare la config e cambiare `output_dir`.
 - Le chiavi di history `*_family_supcon` compaiono anche negli esperti, dove contrastano spacegroup; i grafici le rietichettano.
 - I dataset di `family` e degli esperti non condividono strutture: la valutazione end-to-end della catena famiglia → esperto richiede un set held-out (`examples/evaluate_holdout_pyxtal.py`).
 - `tests/golden/make_golden.py` serve solo come provenienza dei riferimenti golden (girava sul codice pre-FullStack, commit `a693fa2`).

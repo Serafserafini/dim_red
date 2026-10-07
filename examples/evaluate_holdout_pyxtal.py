@@ -288,7 +288,9 @@ class Evaluator:
         true_sg = np.array([int(a.info["spacegroup"]) for a in atoms])
         device = self.args.device
 
-        prediction = full_stack.predict(atoms, heads_name=heads_name, device=device)
+        prediction = full_stack.predict(
+            atoms, heads_name=self.args.heads_name, device=device
+        )
         result = dict(
             test_set=test_id,
             model_kind=full_stack.config.model_kind,
@@ -309,7 +311,9 @@ class Evaluator:
 
         experts = [n for n in trained if n in EXPERT_NAMES]
         if experts:
-            sg = self._spacegroups(full_stack, experts, heads_name, atoms, true_family)
+            sg = self._spacegroups(
+                full_stack, experts, self.args.heads_name, atoms, true_family
+            )
             e2e = np.array(
                 [-1 if s is None else int(s) for s in prediction.spacegroup],
                 dtype=np.int64,
