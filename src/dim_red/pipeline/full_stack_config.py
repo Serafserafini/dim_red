@@ -27,6 +27,7 @@ from dim_red.pipeline.config import (
     _parse_train_settings,
     load_yaml,
 )
+from dim_red.pipeline.run_layout import EXPERT_NAMES, FAMILY, STACK_ORDER  # noqa: F401
 from dim_red.supcon.stack import (
     Batching,
     StackConfig,
@@ -35,17 +36,6 @@ from dim_red.supcon.stack import (
 )
 from dim_red.supcon.training import TrainConfig
 
-FAMILY = "family"
-EXPERT_NAMES = (
-    "triclinic",
-    "monoclinic",
-    "orthorhombic",
-    "tetragonal",
-    "trigonal",
-    "hexagonal",
-    "cubic",
-)
-STACK_ORDER = (FAMILY,) + EXPERT_NAMES
 _SYSTEM_SPACEGROUP_RANGES = {
     "triclinic": (1, 2),
     "monoclinic": (3, 15),
