@@ -487,6 +487,9 @@ def _run_config(data_source="fetch", pyxtal_config=None, augmentation_config=Non
         data_source=data_source,
         pyxtal=pyxtal_config,
         augmentation=augmentation_config,
+        # build_dataset_for_run is the SOAP path; RunConfig's default
+        # model_kind is now "cgcnn" (which would require aux_heads).
+        model_kind="supcon",
     )
 
 

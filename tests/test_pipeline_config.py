@@ -1,6 +1,6 @@
 """
-Unit tests for pipeline config parsing (YAML -> dataclasses) and generic
-sweep-grid expansion (any dotted-path config field can be a grid axis).
+Unit tests for pipeline config parsing (YAML -> dataclasses) of the cgcnn
+``RunConfig`` and the generic sweep-config loader.
 """
 
 import pytest
@@ -8,11 +8,9 @@ import yaml
 
 from dim_red.pipeline.config import (
     AugmentationConfig,
-    AutoTailsConfig,
     AuxHeadsConfig,
     BalancedBatchingParams,
     BatchingConfig,
-    ClassificationTailConfig,
     EarlyStoppingConfig,
     EncoderConfig,
     FetchConfig,
@@ -21,14 +19,11 @@ from dim_red.pipeline.config import (
     PyxtalConfig,
     RunConfig,
     SoapConfig,
-    SupConConfig,
-    TailTrainSettings,
     TrainSettings,
-    VisualizationTailConfig,
-    expand_sweep,
     flatten_config_dict,
     load_run_config,
     load_sweep_config,
+    run_config_from_dict,
     run_config_to_dict,
 )
 
@@ -47,6 +42,8 @@ def _single_run_dict():
         "soap": {"r_cut": 4.0, "n_max": 2, "l_max": 2},
         "encoder": {"encoder_hidden_dim": [16, 8], "latent_dim": 2},
         "train": {"epochs": 3, "batch_size": 4, "val_ratio": 0.25},
+        # model defaults to cgcnn, which requires an active aux-heads mode.
+        "aux_heads": {"mode": "family_only"},
     }
 
 
@@ -68,13 +65,14 @@ def test_load_run_config_roundtrip(tmp_path):
     assert config.soap.sigma == 0.5
     assert config.train.device == "cpu"
 
-    # aux_heads defaults to mode="none" when the config doesn't mention it
-    # at all.
-    assert config.aux_heads == AuxHeadsConfig(mode="none")
+    # AuxHeadsConfig's own default is mode="none" (invalid for cgcnn, hence
+    # the explicit block in _single_run_dict).
+    assert AuxHeadsConfig() == AuxHeadsConfig(mode="none")
+    assert config.aux_heads == AuxHeadsConfig(mode="family_only")
 
-    # model_kind defaults to "supcon" when the config doesn't mention it at
+    # model_kind defaults to "cgcnn" when the config doesn't mention it at
     # all.
-    assert config.model_kind == "supcon"
+    assert config.model_kind == "cgcnn"
 
 
 def test_run_config_still_reads_the_legacy_vae_block_name(tmp_path):
@@ -108,7 +106,7 @@ def test_run_config_parses_model_kind(tmp_path):
 def test_run_config_rejects_removed_model_kinds(tmp_path, removed):
     d = _single_run_dict()
     d["model"] = removed
-    with pytest.raises(ValueError, match="model_kind must be one of"):
+    with pytest.raises(ValueError, match="model must be 'cgcnn'"):
         load_run_config(_write_yaml(tmp_path / "run.yaml", d))
 
 
@@ -254,31 +252,6 @@ def test_run_config_to_dict_omits_pyxtal_block_for_fetch_source(tmp_path):
     saved = run_config_to_dict(config)
     assert "pyxtal" not in saved
     assert "fetch" in saved
-
-
-def test_expand_sweep_can_vary_data_source(tmp_path):
-    """Sweeping "data_source" (fetch vs pyxtal) works via the same generic
-    grid mechanism as model_kind -- no special-casing needed in expand_sweep.
-    """
-    base = _sweep_base()
-    base["pyxtal"] = {"structures_per_spacegroup": 2, "spacegroups": [225]}
-    sweep_dict = {"base": base, "grid": {"data_source": ["fetch", "pyxtal"]}}
-    sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
-    runs = expand_sweep(sweep)
-    assert {r.data_source for r in runs} == {"fetch", "pyxtal"}
-
-
-def test_expand_sweep_can_vary_model_kind(tmp_path):
-    """The generic grid mechanism already supports this for free: sweeping
-    "model" produces a RunConfig per model kind, with no special-casing
-    needed in expand_sweep.
-    """
-    base = _single_run_dict()
-    base["aux_heads"] = {"mode": "family_only"}  # required by cgcnn
-    sweep_dict = {"base": base, "grid": {"model": ["supcon", "cgcnn"]}}
-    sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
-    runs = expand_sweep(sweep)
-    assert {r.model_kind for r in runs} == {"supcon", "cgcnn"}
 
 
 def test_run_config_to_dict_reloads_identically(tmp_path):
@@ -436,195 +409,6 @@ def test_run_config_to_dict_roundtrips_aux_heads(tmp_path):
     assert reloaded.aux_heads.mode == "family_and_spacegroup"
 
 
-def test_run_config_defaults_supcon_block(tmp_path):
-    config_path = _write_yaml(tmp_path / "run.yaml", _single_run_dict())
-    config = load_run_config(config_path)
-    assert config.supcon == SupConConfig(mode="family_only")
-
-
-def test_supcon_config_rejects_invalid_mode():
-    with pytest.raises(ValueError, match="supcon.mode must be one of"):
-        SupConConfig(mode="bogus")
-
-
-@pytest.mark.parametrize(
-    "mode", ["family_only", "spacegroup_only", "family_and_spacegroup"]
-)
-def test_supcon_config_accepts_all_valid_modes(mode):
-    assert SupConConfig(mode=mode).mode == mode
-
-
-def test_supcon_config_defaults_distance_to_cosine():
-    assert SupConConfig().distance == "cosine"
-
-
-def test_supcon_config_rejects_invalid_distance():
-    with pytest.raises(ValueError, match="supcon.distance must be one of"):
-        SupConConfig(distance="bogus")
-
-
-@pytest.mark.parametrize("distance", ["euclidean", "cosine"])
-def test_supcon_config_accepts_all_valid_distances(distance):
-    assert SupConConfig(distance=distance).distance == distance
-
-
-def test_run_config_parses_model_kind_supcon(tmp_path):
-    d = _single_run_dict()
-    d["model"] = "supcon"
-    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
-    assert config.model_kind == "supcon"
-
-
-def test_run_config_parses_supcon_block(tmp_path):
-    d = _single_run_dict()
-    d["model"] = "supcon"
-    d["supcon"] = {"mode": "spacegroup_only", "lambda_spacegroup": 2.0, "tau": 0.05}
-    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
-
-    assert config.supcon.mode == "spacegroup_only"
-    assert config.supcon.lambda_spacegroup == 2.0
-    assert config.supcon.tau == 0.05
-    # Untouched field keeps its default.
-    assert config.supcon.lambda_family == 1.0
-
-
-def test_supcon_config_lambda_norm_defaults_to_zero(tmp_path):
-    config_path = _write_yaml(tmp_path / "run.yaml", _single_run_dict())
-    config = load_run_config(config_path)
-    assert config.supcon.lambda_norm == 0.0
-
-
-def test_run_config_parses_supcon_lambda_norm(tmp_path):
-    d = _single_run_dict()
-    d["model"] = "supcon"
-    d["supcon"] = {"lambda_norm": 0.25}
-    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
-    assert config.supcon.lambda_norm == 0.25
-
-
-def test_run_config_to_dict_roundtrips_supcon_lambda_norm(tmp_path):
-    d = _single_run_dict()
-    d["model"] = "supcon"
-    d["supcon"] = {"lambda_norm": 0.4}
-    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
-
-    saved_path = _write_yaml(tmp_path / "saved.yaml", run_config_to_dict(config))
-    reloaded = load_run_config(saved_path)
-
-    assert reloaded == config
-    assert reloaded.supcon.lambda_norm == 0.4
-
-
-def test_supcon_config_projection_dim_defaults_to_128(tmp_path):
-    config_path = _write_yaml(tmp_path / "run.yaml", _single_run_dict())
-    config = load_run_config(config_path)
-    assert config.supcon.projection_dim == 128
-    assert config.supcon.projection_hidden_dim is None
-
-
-def test_supcon_config_rejects_non_positive_projection_dim():
-    with pytest.raises(ValueError, match="projection_dim must be a positive integer"):
-        SupConConfig(projection_dim=0)
-
-
-def test_run_config_parses_supcon_projection_fields(tmp_path):
-    d = _single_run_dict()
-    d["model"] = "supcon"
-    d["supcon"] = {"projection_dim": 64, "projection_hidden_dim": [32, 16]}
-    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
-
-    assert config.supcon.projection_dim == 64
-    assert config.supcon.projection_hidden_dim == [32, 16]
-
-
-def test_run_config_to_dict_roundtrips_supcon_projection_fields(tmp_path):
-    d = _single_run_dict()
-    d["model"] = "supcon"
-    d["supcon"] = {"projection_dim": 64, "projection_hidden_dim": [32]}
-    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
-
-    saved_path = _write_yaml(tmp_path / "saved.yaml", run_config_to_dict(config))
-    reloaded = load_run_config(saved_path)
-
-    assert reloaded == config
-    assert reloaded.supcon.projection_dim == 64
-    assert reloaded.supcon.projection_hidden_dim == [32]
-
-
-def test_expand_sweep_can_vary_supcon_projection_dim(tmp_path):
-    base = _single_run_dict()
-    base["model"] = "supcon"
-    sweep_dict = {
-        "base": base,
-        "grid": {"supcon.projection_dim": [32, 64, 128]},
-    }
-    sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
-    runs = expand_sweep(sweep)
-    assert {r.supcon.projection_dim for r in runs} == {32, 64, 128}
-
-
-def test_expand_sweep_can_vary_supcon_lambda_norm(tmp_path):
-    base = _single_run_dict()
-    base["model"] = "supcon"
-    sweep_dict = {
-        "base": base,
-        "grid": {"supcon.lambda_norm": [0.0, 0.1, 0.5]},
-    }
-    sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
-    runs = expand_sweep(sweep)
-    assert {r.supcon.lambda_norm for r in runs} == {0.0, 0.1, 0.5}
-
-
-def test_run_config_to_dict_roundtrips_supcon_block(tmp_path):
-    d = _single_run_dict()
-    d["model"] = "supcon"
-    d["supcon"] = {"mode": "family_only", "lambda_family": 0.7, "tau": 0.2}
-    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
-
-    saved_path = _write_yaml(tmp_path / "saved.yaml", run_config_to_dict(config))
-    reloaded = load_run_config(saved_path)
-
-    assert reloaded == config
-    assert reloaded.model_kind == "supcon"
-    assert reloaded.supcon.mode == "family_only"
-    assert reloaded.supcon.tau == 0.2
-
-
-def test_expand_sweep_can_vary_supcon_mode(tmp_path):
-    base = _single_run_dict()
-    base["model"] = "supcon"
-    sweep_dict = {
-        "base": base,
-        "grid": {
-            "supcon.mode": ["family_only", "spacegroup_only", "family_and_spacegroup"]
-        },
-    }
-    sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
-    runs = expand_sweep(sweep)
-
-    assert {r.supcon.mode for r in runs} == {
-        "family_only",
-        "spacegroup_only",
-        "family_and_spacegroup",
-    }
-    assert all(r.model_kind == "supcon" for r in runs)
-
-
-def test_sweep_config_invalid_supcon_mode_raises_on_expand(tmp_path):
-    base = _single_run_dict()
-    base["model"] = "supcon"
-    sweep_dict = {"base": base, "grid": {"supcon.mode": ["bogus"]}}
-    sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
-    with pytest.raises(ValueError, match="supcon.mode must be one of"):
-        expand_sweep(sweep)
-
-
-def test_run_config_defaults_batching_random(tmp_path):
-    config_path = _write_yaml(tmp_path / "run.yaml", _single_run_dict())
-    config = load_run_config(config_path)
-    assert config.batching == BatchingConfig(strategy="random")
-
-
 def test_batching_config_rejects_invalid_strategy():
     with pytest.raises(ValueError, match="batching.strategy must be one of"):
         BatchingConfig(strategy="bogus")
@@ -648,73 +432,6 @@ def test_batching_config_balanced_with_valid_k_is_accepted():
     assert config.balanced_params.P == 4
     assert config.balanced_params.K == 16
     assert config.balanced_params.S == 3
-
-
-def test_run_config_parses_batching_block(tmp_path):
-    d = _single_run_dict()
-    d["model"] = "supcon"
-    d["batching"] = {
-        "strategy": "balanced",
-        "balanced_params": {"P": 2, "K": 8, "S": None},
-    }
-    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
-
-    assert config.batching.strategy == "balanced"
-    assert config.batching.balanced_params.P == 2
-    assert config.batching.balanced_params.K == 8
-    assert config.batching.balanced_params.S is None
-
-
-def test_run_config_to_dict_roundtrips_batching_block(tmp_path):
-    d = _single_run_dict()
-    d["model"] = "supcon"
-    d["batching"] = {
-        "strategy": "balanced",
-        "balanced_params": {"P": None, "K": 12, "S": 4},
-    }
-    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
-
-    saved_path = _write_yaml(tmp_path / "saved.yaml", run_config_to_dict(config))
-    reloaded = load_run_config(saved_path)
-
-    assert reloaded == config
-    assert reloaded.batching.strategy == "balanced"
-    assert reloaded.batching.balanced_params.K == 12
-    assert reloaded.batching.balanced_params.S == 4
-
-
-def test_existing_config_without_batching_block_still_loads(tmp_path):
-    """Backward compatibility: a config predating the batching feature (no
-    "batching:" key at all) must still load fine, defaulting to "random".
-    """
-    d = _single_run_dict()
-    assert "batching" not in d
-    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
-    assert config.batching.strategy == "random"
-
-
-def test_expand_sweep_can_vary_batching_strategy(tmp_path):
-    base = _single_run_dict()
-    base["model"] = "supcon"
-    base["batching"] = {"balanced_params": {"K": 8}}
-    sweep_dict = {
-        "base": base,
-        "grid": {"batching.strategy": ["random", "balanced"]},
-    }
-    sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
-    runs = expand_sweep(sweep)
-
-    assert {r.batching.strategy for r in runs} == {"random", "balanced"}
-
-
-def test_sweep_config_invalid_batching_strategy_raises_on_expand(tmp_path):
-    sweep_dict = {
-        "base": _single_run_dict(),
-        "grid": {"batching.strategy": ["bogus"]},
-    }
-    sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
-    with pytest.raises(ValueError, match="batching.strategy must be one of"):
-        expand_sweep(sweep)
 
 
 def test_run_config_defaults_early_stopping_disabled(tmp_path):
@@ -779,163 +496,6 @@ def test_existing_config_without_early_stopping_block_still_loads(tmp_path):
     assert config.train.early_stopping.enabled is False
 
 
-def test_expand_sweep_can_vary_early_stopping_patience(tmp_path):
-    sweep_dict = {
-        "base": _single_run_dict(),
-        "grid": {"train.early_stopping.patience": [3, 5, 10]},
-    }
-    sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
-    runs = expand_sweep(sweep)
-    assert {r.train.early_stopping.patience for r in runs} == {3, 5, 10}
-
-
-def test_sweep_config_invalid_early_stopping_patience_raises_on_expand(tmp_path):
-    sweep_dict = {
-        "base": _single_run_dict(),
-        "grid": {"train.early_stopping.patience": [0]},
-    }
-    sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
-    with pytest.raises(ValueError, match="early_stopping.patience must be a positive"):
-        expand_sweep(sweep)
-
-
-def _sweep_base():
-    return {
-        "seed": 1,
-        "output_dir": "runs",
-        "fetch": {"crystal_systems": ["cubic"], "limit_per_system": 5},
-        "soap": {"r_cut": 4.0, "n_max": 2, "l_max": 2},
-        "encoder": {"encoder_hidden_dim": [16], "latent_dim": 3},
-        "train": {"epochs": 1, "batch_size": 4},
-    }
-
-
-def test_load_sweep_config_and_expand(tmp_path):
-    sweep_dict = {
-        "base": _sweep_base(),
-        "grid": {
-            "fetch.crystal_systems": [["cubic"], ["cubic", "hexagonal"]],
-            "encoder.encoder_hidden_dim": [[16], [16, 8]],
-        },
-    }
-    config_path = _write_yaml(tmp_path / "sweep.yaml", sweep_dict)
-    sweep = load_sweep_config(config_path)
-
-    assert sweep.output_dir == "runs"
-
-    runs = expand_sweep(sweep)
-
-    # 2 crystal-system sets x 2 hidden-layer configs = 4 runs.
-    assert len(runs) == 4
-    assert all(isinstance(r, RunConfig) for r in runs)
-
-    combos = {
-        (tuple(r.fetch.crystal_systems), tuple(r.encoder.encoder_hidden_dim))
-        for r in runs
-    }
-    assert combos == {
-        (("cubic",), (16,)),
-        (("cubic",), (16, 8)),
-        (("cubic", "hexagonal"), (16,)),
-        (("cubic", "hexagonal"), (16, 8)),
-    }
-    # Non-swept settings are shared across every expanded run.
-    assert all(r.encoder.latent_dim == 3 for r in runs)
-    assert all(r.train.epochs == 1 for r in runs)
-
-    # No aux_heads block -> mode="none" for every expanded run.
-    assert all(r.aux_heads == AuxHeadsConfig(mode="none") for r in runs)
-
-
-def test_expand_sweep_with_empty_grid_returns_single_base_run(tmp_path):
-    sweep_dict = {"base": _sweep_base()}
-    sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
-    runs = expand_sweep(sweep)
-
-    assert len(runs) == 1
-    assert runs[0].fetch.crystal_systems == ["cubic"]
-    assert runs[0].encoder.encoder_hidden_dim == [16]
-
-
-def test_expand_sweep_can_vary_any_dotted_path(tmp_path):
-    """Grid axes are not limited to hidden dims/crystal systems -- any
-    RunConfig field reachable by a dotted path can be swept, e.g. training
-    hyperparameters or the run's seed.
-    """
-    sweep_dict = {
-        "base": _sweep_base(),
-        "grid": {
-            "train.learning_rate": [0.001, 0.0005],
-            "train.batch_size": [4, 8],
-            "seed": [0, 1, 2],
-        },
-    }
-    sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
-    runs = expand_sweep(sweep)
-
-    # 2 learning rates x 2 batch sizes x 3 seeds = 12 runs.
-    assert len(runs) == 12
-    combos = {(r.train.learning_rate, r.train.batch_size, r.seed) for r in runs}
-    assert len(combos) == 12
-    assert {r.seed for r in runs} == {0, 1, 2}
-    assert {r.train.learning_rate for r in runs} == {0.001, 0.0005}
-    assert {r.train.batch_size for r in runs} == {4, 8}
-    # Everything not in the grid stays shared across every expanded run.
-    assert all(r.fetch.crystal_systems == ["cubic"] for r in runs)
-
-
-def test_sweep_config_invalid_aux_heads_mode_raises_on_expand(tmp_path):
-    sweep_dict = {
-        "base": _sweep_base(),
-        "grid": {"aux_heads.mode": ["bogus"]},
-    }
-    sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
-    with pytest.raises(ValueError, match="aux_heads.mode must be one of"):
-        expand_sweep(sweep)
-
-
-def test_expand_sweep_family_only_expands_lambda_family_axis(tmp_path):
-    base = _sweep_base()
-    base["aux_heads"] = {"mode": "family_only"}
-    base["fetch"]["crystal_systems"] = ["cubic"]
-    sweep_dict = {
-        "base": base,
-        "grid": {
-            "fetch.crystal_systems": [["cubic"], ["cubic", "hexagonal"]],
-            "aux_heads.lambda_family": [0.5, 1.0, 2.0],
-        },
-    }
-    sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
-    runs = expand_sweep(sweep)
-
-    # 2 crystal-system sets x 3 lambda_family values.
-    assert len(runs) == 6
-    assert all(r.aux_heads.mode == "family_only" for r in runs)
-    lambdas = sorted({r.aux_heads.lambda_family for r in runs})
-    assert lambdas == [0.5, 1.0, 2.0]
-    # lambda_spacegroup is irrelevant in family_only mode -> stays default.
-    assert all(r.aux_heads.lambda_spacegroup == 1.0 for r in runs)
-
-
-def test_expand_sweep_family_and_spacegroup_expands_both_lambda_axes(tmp_path):
-    base = _sweep_base()
-    base["aux_heads"] = {"mode": "family_and_spacegroup"}
-    sweep_dict = {
-        "base": base,
-        "grid": {
-            "aux_heads.lambda_family": [0.5, 1.0],
-            "aux_heads.lambda_spacegroup": [0.1, 0.2],
-        },
-    }
-    sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
-    runs = expand_sweep(sweep)
-
-    # 2 lf x 2 lsg = 4.
-    assert len(runs) == 4
-    combos = {(r.aux_heads.lambda_family, r.aux_heads.lambda_spacegroup) for r in runs}
-    assert combos == {(0.5, 0.1), (0.5, 0.2), (1.0, 0.1), (1.0, 0.2)}
-
-
 def test_removed_train_keys_are_ignored_without_failing(tmp_path):
     """``train.optimizer`` (VeLO was removed, Adam is the only optimizer) and
     ``train.beta`` (VAE-only) may still sit in older configs / saved
@@ -946,109 +506,6 @@ def test_removed_train_keys_are_ignored_without_failing(tmp_path):
     config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
     assert not hasattr(config.train, "optimizer")
     assert not hasattr(config.train, "beta")
-
-
-def test_run_config_defaults_tails_to_none(tmp_path):
-    config_path = _write_yaml(tmp_path / "run.yaml", _single_run_dict())
-    config = load_run_config(config_path)
-    assert config.tails is None
-
-
-def test_run_config_parses_tails_classification_only(tmp_path):
-    d = _single_run_dict()
-    d["tails"] = {"classification": {"head_hidden_dim": 32}}
-    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
-
-    assert config.tails == AutoTailsConfig(
-        classification=ClassificationTailConfig(head_hidden_dim=32),
-        visualization=None,
-    )
-
-
-def test_run_config_parses_tails_visualization_only(tmp_path):
-    d = _single_run_dict()
-    d["tails"] = {
-        "visualization": {
-            "viz_dim": 3,
-            "batching": {
-                "strategy": "balanced",
-                "balanced_params": {"K": 8},
-            },
-        }
-    }
-    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
-
-    assert config.tails.classification is None
-    assert config.tails.visualization.viz_dim == 3
-    assert config.tails.visualization.batching == BatchingConfig(
-        strategy="balanced",
-        balanced_params=BalancedBatchingParams(K=8),
-    )
-
-
-def test_run_config_parses_tails_both(tmp_path):
-    d = _single_run_dict()
-    d["tails"] = {
-        "classification": {"head_hidden_dim": 8},
-        "visualization": {"viz_dim": 2},
-        "train": {"epochs": 5},
-    }
-    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
-
-    assert config.tails.classification == ClassificationTailConfig(head_hidden_dim=8)
-    assert config.tails.visualization == VisualizationTailConfig(viz_dim=2)
-    assert config.tails.train == TailTrainSettings(epochs=5)
-
-
-def test_run_config_to_dict_roundtrips_tails_block(tmp_path):
-    d = _single_run_dict()
-    d["tails"] = {
-        "classification": {"head_hidden_dim": 8},
-        "visualization": {"viz_dim": 3},
-        "train": {"epochs": 7},
-    }
-    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
-
-    saved_path = _write_yaml(tmp_path / "saved.yaml", run_config_to_dict(config))
-    reloaded = load_run_config(saved_path)
-
-    assert reloaded == config
-    assert reloaded.tails.classification.head_hidden_dim == 8
-    assert reloaded.tails.visualization.viz_dim == 3
-    assert reloaded.tails.train.epochs == 7
-
-
-def test_run_config_to_dict_omits_tails_block_when_none(tmp_path):
-    config_path = _write_yaml(tmp_path / "run.yaml", _single_run_dict())
-    config = load_run_config(config_path)
-    saved = run_config_to_dict(config)
-    assert "tails" not in saved
-
-
-def test_expand_sweep_can_vary_tails_classification_head_hidden_dim(tmp_path):
-    base = _single_run_dict()
-    base["tails"] = {"classification": {"head_hidden_dim": 8}}
-    sweep_dict = {
-        "base": base,
-        "grid": {"tails.classification.head_hidden_dim": [8, 16, 32]},
-    }
-    sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
-    runs = expand_sweep(sweep)
-    assert {r.tails.classification.head_hidden_dim for r in runs} == {8, 16, 32}
-
-
-def test_run_config_rejects_removed_single_stage_spacegroup_classification(tmp_path):
-    d = _single_run_dict()
-    d["tails"] = {"classification": {"mode": "family_and_spacegroup"}}
-    with pytest.raises(ValueError, match="hierarchical_supcon"):
-        load_run_config(_write_yaml(tmp_path / "run.yaml", d))
-
-
-def test_run_config_rejects_removed_hierarchical_tails_block(tmp_path):
-    d = _single_run_dict()
-    d["tails"] = {"hierarchical": {"head_hidden_dim": 8}}
-    with pytest.raises(ValueError, match="tails.hierarchical was removed"):
-        load_run_config(_write_yaml(tmp_path / "run.yaml", d))
 
 
 # --- GraphConfig / model_kind == "cgcnn" ------------------------------------
@@ -1138,9 +595,10 @@ def test_run_config_cgcnn_requires_aux_heads_mode_not_none(tmp_path):
 
 
 def test_run_config_cgcnn_default_aux_heads_mode_none_raises(tmp_path):
-    # _single_run_dict() has no aux_heads block at all -- AuxHeadsConfig's
-    # own default (mode="none") should still trip the cgcnn-specific check.
+    # No aux_heads block at all -- AuxHeadsConfig's own default
+    # (mode="none") should still trip the cgcnn-specific check.
     d = _single_run_dict()
+    del d["aux_heads"]
     d["model"] = "cgcnn"
     with pytest.raises(ValueError, match="requires aux_heads.mode != 'none'"):
         load_run_config(_write_yaml(tmp_path / "run.yaml", d))
@@ -1168,23 +626,10 @@ def test_run_config_to_dict_always_includes_graph_block(tmp_path):
     assert "graph" in saved
 
 
-def test_expand_sweep_can_vary_graph_n_conv(tmp_path):
-    base = _cgcnn_run_dict()
-    sweep_dict = {"base": base, "grid": {"graph.n_conv": [2, 3, 4]}}
-    sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
-    runs = expand_sweep(sweep)
-    assert {r.graph.n_conv for r in runs} == {2, 3, 4}
-    assert all(r.model_kind == "cgcnn" for r in runs)
-
-
-# --- MaceConfig / model_kind == "supcon_mace" ---------------------------------------
-
-
-def _mace_run_dict():
-    d = _single_run_dict()
-    d["model"] = "supcon_mace"
-    d["mace"] = {"checkpoint_path": "/fake/ckpt", "r_max": 5.0}
-    return d
+# --- MaceConfig ----------------------------------------------------------------
+#
+# RunConfig.mace stays only for dim_red.pipeline.dataset_cache's MACE dataset
+# builder; run_config_from_dict never produces a supcon_mace RunConfig.
 
 
 def test_run_config_defaults_mace_block(tmp_path):
@@ -1215,29 +660,15 @@ def test_mace_config_rejects_invalid_values(kwargs):
         MaceConfig(**kwargs)
 
 
-def test_run_config_parses_model_kind_supcon_mace(tmp_path):
-    config = load_run_config(_write_yaml(tmp_path / "run.yaml", _mace_run_dict()))
-    assert config.model_kind == "supcon_mace"
-    assert config.mace.checkpoint_path == "/fake/ckpt"
-    assert config.mace.r_max == 5.0
-
-
-def test_run_config_supcon_mace_requires_checkpoint_path(tmp_path):
-    d = _single_run_dict()
-    d["model"] = "supcon_mace"
+def test_run_config_supcon_mace_requires_checkpoint_path():
     with pytest.raises(ValueError, match="requires mace.checkpoint_path"):
-        load_run_config(_write_yaml(tmp_path / "run.yaml", d))
-
-
-def test_run_config_to_dict_roundtrips_mace_block(tmp_path):
-    d = _mace_run_dict()
-    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
-
-    saved_path = _write_yaml(tmp_path / "saved.yaml", run_config_to_dict(config))
-    reloaded = load_run_config(saved_path)
-
-    assert reloaded == config
-    assert reloaded.mace.checkpoint_path == "/fake/ckpt"
+        RunConfig(
+            soap=SoapConfig(),
+            encoder=EncoderConfig(encoder_hidden_dim=[8], latent_dim=2),
+            train=TrainSettings(),
+            fetch=FetchConfig(crystal_systems=["cubic"]),
+            model_kind="supcon_mace",
+        )
 
 
 def test_run_config_to_dict_always_includes_mace_block(tmp_path):
@@ -1249,10 +680,61 @@ def test_run_config_to_dict_always_includes_mace_block(tmp_path):
     assert "mace" in saved
 
 
-def test_expand_sweep_can_vary_mace_r_max(tmp_path):
-    base = _mace_run_dict()
-    sweep_dict = {"base": base, "grid": {"mace.r_max": [4.0, 5.0, 6.0]}}
+# --- removed features: explicit errors / tolerated leftovers ------------------
+
+
+def test_run_config_rejects_non_cgcnn_models_with_a_pointer():
+    with pytest.raises(ValueError, match="FullStack"):
+        run_config_from_dict(
+            {
+                "model": "supcon",
+                "data_source": "pyxtal",
+                "pyxtal": {"structures_per_spacegroup": 1},
+                "encoder": {"encoder_hidden_dim": [4], "latent_dim": 2},
+            }
+        )
+
+
+@pytest.mark.parametrize("model", ["supcon", "supcon_mace"])
+def test_run_config_rejects_supcon_models_from_yaml(tmp_path, model):
+    d = _single_run_dict()
+    d["model"] = model
+    with pytest.raises(ValueError, match="FullStack"):
+        load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+
+
+def test_run_config_rejects_top_level_tails_block(tmp_path):
+    d = _single_run_dict()
+    d["tails"] = {"visualization": {"viz_dim": 2}}
+    with pytest.raises(ValueError, match="dimred-train-tail"):
+        load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+
+
+def test_run_config_ignores_removed_supcon_and_batching_blocks(tmp_path):
+    """Every config.yaml run_single saved before supcon/batching were
+    removed carries both blocks (cgcnn runs included), so they must still
+    load -- the blocks are ignored, not an error."""
+    d = _single_run_dict()
+    d["supcon"] = {"mode": "family_only", "tau": 0.05, "projection_dim": 128}
+    d["batching"] = {"strategy": "balanced", "balanced_params": {"K": 4}}
+    config = load_run_config(_write_yaml(tmp_path / "run.yaml", d))
+
+    assert config == load_run_config(
+        _write_yaml(tmp_path / "plain.yaml", _single_run_dict())
+    )
+    saved = run_config_to_dict(config)
+    assert "supcon" not in saved
+    assert "batching" not in saved
+    assert "tails" not in saved
+
+
+def test_load_sweep_config_reads_base_and_grid(tmp_path):
+    sweep_dict = {
+        "base": {**_single_run_dict(), "output_dir": "sweeps"},
+        "grid": {"encoder.encoder_hidden_dim": [[16], [16, 8]], "seed": [0, 1]},
+    }
     sweep = load_sweep_config(_write_yaml(tmp_path / "sweep.yaml", sweep_dict))
-    runs = expand_sweep(sweep)
-    assert {r.mace.r_max for r in runs} == {4.0, 5.0, 6.0}
-    assert all(r.model_kind == "supcon_mace" for r in runs)
+
+    assert sweep.output_dir == "sweeps"
+    assert sweep.base["fetch"]["crystal_systems"] == ["cubic", "hexagonal"]
+    assert sweep.grid == {"encoder.encoder_hidden_dim": [[16], [16, 8]], "seed": [0, 1]}

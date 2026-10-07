@@ -148,7 +148,7 @@ def train_tail(config: TailTrainConfig) -> Path:
         )
     run_dir = Path(config.run_dir)
     loaded = load_run_embeddings(run_dir)
-    allowed_model_kinds = _TAIL_MODEL_KINDS.get(config.tail_kind, ())
+    allowed_model_kinds = _TAIL_MODEL_KINDS[config.tail_kind]
     if loaded.config.model_kind not in allowed_model_kinds:
         raise ValueError(
             f"{run_dir} is a model_kind={loaded.config.model_kind!r} run -- "

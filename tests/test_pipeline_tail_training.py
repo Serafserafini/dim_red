@@ -314,6 +314,8 @@ def test_train_tail_rejects_a_non_cgcnn_run(tmp_path):
         train=TailTrainSettings(epochs=1, batch_size=4),
     )
 
-    with pytest.raises(ValueError, match="supcon"):
+    # Refused while parsing the run's config.yaml (supcon configs use the
+    # FullStack schema), before any tail directory is created.
+    with pytest.raises(ValueError, match="FullStack"):
         train_tail(config)
     assert not (run_dir / "tails").exists()

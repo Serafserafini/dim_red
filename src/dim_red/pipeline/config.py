@@ -5,9 +5,7 @@ Configuration schema and YAML loaders for the unified structures -> features
 
 from __future__ import annotations
 
-import copy
 import dataclasses
-import itertools
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,8 +16,14 @@ import yaml
 logger = logging.getLogger("dim_red.pipeline")
 
 _AUX_HEADS_MODES = ("none", "family_only", "family_and_spacegroup")
+# Label-level/similarity choices of the SupCon-loss visualization tail
+# (VisualizationTailConfig), which cgcnn tails still use.
 _SUPCON_MODES = ("family_only", "spacegroup_only", "family_and_spacegroup")
 _SUPCON_DISTANCES = ("euclidean", "cosine")
+# "supcon"/"supcon_mace" stay constructible as dataclasses only because
+# dim_red.pipeline.dataset_cache's SOAP/MACE builders still take a RunConfig;
+# run_config_from_dict only ever produces "cgcnn" (supcon/supcon_mace configs
+# use the FullStack schema, dim_red.pipeline.full_stack_config).
 _MODEL_KINDS = ("supcon", "cgcnn", "supcon_mace")
 _DATA_SOURCES = ("fetch", "pyxtal")
 
@@ -58,9 +62,7 @@ class GraphConfig:
     ``SoapConfig`` establishes.
 
     ``latent_dim`` is deliberately NOT a field here -- it's read from the
-    shared ``encoder:`` block (``encoder.latent_dim``) instead, the same
-    "shared field, model-kind-specific subset" precedent ``supcon`` already
-    sets (it reads ``encoder.encoder_hidden_dim``/``encoder.latent_dim``).
+    shared ``encoder:`` block (``encoder.latent_dim``) instead.
     For ``model_kind: cgcnn``, every other ``encoder:`` field is ignored --
     only ``encoder.latent_dim`` is read (the body's output width, saved to
     ``embeddings.npz``, reused by every downstream tail).
@@ -352,9 +354,8 @@ class AugmentationConfig:
 @dataclass(frozen=True)
 class EncoderConfig:
     """Encoder architecture: this is sweep axis A (hidden-layer
-    configuration). Read by every ``RunConfig.model_kind`` that has an MLP
-    encoder (``supcon``/``supcon_mace``); ``cgcnn`` builds its own graph
-    encoder from ``GraphConfig`` and reads only ``latent_dim`` from here.
+    configuration). ``cgcnn`` builds its own graph encoder from
+    ``GraphConfig`` and reads only ``latent_dim`` from here.
 
     In YAML this block is ``encoder:``; the old name ``vae:`` is still read
     (and merged) so older configs and saved ``config.yaml`` files keep
@@ -417,9 +418,8 @@ class TrainSettings:
 
 @dataclass(frozen=True)
 class AuxHeadsConfig:
-    """Classification heads trained jointly with the body (``cgcnn`` only --
-    it is that model kind's only training objective; ``supcon``/
-    ``supcon_mace`` ignore this block).
+    """Classification heads trained jointly with the cgcnn body (its only
+    training objective).
 
     Attributes:
         mode: One of ``"none"`` (default; invalid for ``cgcnn``),
@@ -446,87 +446,6 @@ class AuxHeadsConfig:
             raise ValueError(
                 f"aux_heads.mode must be one of {_AUX_HEADS_MODES}, got {self.mode!r}"
             )
-
-
-@dataclass(frozen=True)
-class SupConConfig:
-    """Config for ``RunConfig.model_kind == "supcon"``: a two-level (family
-    and/or spacegroup) Supervised Contrastive loss, computed on a projection
-    tail's output (Khosla et al. 2020's ``z = Proj(Enc(x))``, see
-    ``dim_red.supcon.tails.ProjectionTail``/``dim_red.supcon.training``) --
-    no classifier heads involved at this stage, unlike ``AuxHeadsConfig``
-    (whose ``mode`` this mirrors the shape of). Classification/visualization
-    tails are trained separately, after this run's body is frozen -- see
-    ``dim_red.pipeline.config.TailTrainConfig``.
-
-    Attributes:
-        mode: Which label level(s) to contrast on: ``"family_only"``
-            (default -- matches ``best_combo``, round 15's best-known
-            SupCon-family reference config, see
-            ``configs/single_run_supcon_best_combo.example.yaml``),
-            ``"spacegroup_only"``, or ``"family_and_spacegroup"``.
-            Unlike ``AuxHeadsConfig.mode``, ``"spacegroup_only"`` is valid
-            here -- the two SupCon terms are independent (no family ->
-            spacegroup masking needed), so there's no reason a spacegroup
-            term would require a family term to also be active.
-        lambda_family: Weight of the family-level SupCon term. Ignored when
-            ``mode == "spacegroup_only"``.
-        lambda_spacegroup: Weight of the spacegroup-level SupCon term.
-            Ignored when ``mode == "family_only"``.
-        tau: Temperature dividing similarities before the softmax inside the
-            SupCon loss. ``0.05`` (default) matches ``best_combo``.
-        distance: Which similarity ``dim_red.supcon.training.supcon_loss``
-            computes: ``"euclidean"`` (negative squared Euclidean distance,
-            the original formulation here, unbounded scale) or ``"cosine"``
-            (default -- cosine similarity between L2-normalized ``z``
-            vectors, bounded to ``[-1, 1]``; matches ``best_combo``, and
-            consistently outperformed ``"euclidean"`` in every round 1-7
-            sweep that compared them). Forwarded as-is to
-            ``dim_red.supcon.training.TrainConfig.distance``.
-        lambda_norm: Weight of the embedding-norm regularizer (mean squared
-            L2 norm of the batch's projected ``z``), added to the total loss
-            alongside the family/spacegroup terms -- unlike those, it's not
-            gated by ``mode`` (it doesn't depend on labels at all, so it's
-            always in effect whenever it's non-zero). ``0.0`` (default)
-            disables it, matching the pre-regularizer behavior exactly. See
-            ``dim_red.supcon.training.norm_penalty`` for why this matters:
-            with ``distance == "euclidean"`` (default), similarity has no
-            built-in scale normalization, so nothing otherwise discourages
-            the projection from inflating ``z``'s norm without bound;
-            largely redundant with ``distance == "cosine"``.
-        projection_dim: Size of the space the SupCon loss is actually
-            computed in (Khosla et al. 2020 default: 128) -- separate from
-            ``encoder.latent_dim``, which stays the body's own representation
-            width (saved to ``embeddings.npz``, reused by every downstream
-            tail). The projection tail is discarded after phase 1 in the
-            original paper; this codebase still saves its trained params
-            (``projection_params.msgpack``) for reproducibility.
-        projection_hidden_dim: Widths of hidden layers in the projection
-            tail's MLP. ``None`` (default) resolves to a single hidden
-            layer matching the body's own ``latent_dim``.
-    """
-
-    mode: str = "family_only"
-    lambda_family: float = 1.0
-    lambda_spacegroup: float = 1.0
-    tau: float = 0.05
-    distance: str = "cosine"
-    lambda_norm: float = 0.0
-    projection_dim: int = 128
-    projection_hidden_dim: Optional[List[int]] = None
-
-    def __post_init__(self):
-        if self.mode not in _SUPCON_MODES:
-            raise ValueError(
-                f"supcon.mode must be one of {_SUPCON_MODES}, got {self.mode!r}"
-            )
-        if self.distance not in _SUPCON_DISTANCES:
-            raise ValueError(
-                f"supcon.distance must be one of {_SUPCON_DISTANCES}, got "
-                f"{self.distance!r}"
-            )
-        if self.projection_dim <= 0:
-            raise ValueError("supcon.projection_dim must be a positive integer")
 
 
 @dataclass(frozen=True)
@@ -558,10 +477,8 @@ _BATCHING_STRATEGIES = ("random", "balanced")
 
 @dataclass(frozen=True)
 class BatchingConfig:
-    """How ``dim_red.supcon.training.training_first_phase`` forms training
-    mini-batches. Only meaningful for ``RunConfig.model_kind == "supcon"``
-    (ignored otherwise, same treatment as ``aux_heads``/``supcon`` being
-    ignored for the model kinds they don't apply to).
+    """How a visualization tail (``VisualizationTailConfig.batching``) forms
+    training mini-batches.
 
     Attributes:
         strategy: ``"random"`` (default -- a plain shuffle, unchanged
@@ -595,30 +512,23 @@ class BatchingConfig:
 
 @dataclass(frozen=True)
 class RunConfig:
-    """Fully resolved configuration for a single dataset -> SOAP -> model run.
+    """Fully resolved configuration for a single dataset -> graphs -> CGCNN
+    run (``dim_red.pipeline.single_run.run_single``).
 
     Attributes:
-        model_kind: Which model to train: ``"supcon"`` (default; an
-            encoder-only model trained with a Supervised Contrastive loss on
-            family/spacegroup labels, jointly with a projection tail -- see
-            ``dim_red.supcon``), ``"supcon_mace"`` (the same training recipe,
-            fed the embeddings of a frozen, pretrained MACE model -- see
-            ``dim_red.mace`` -- instead of a standardized SOAP descriptor, so
-            it requires ``mace.checkpoint_path``), or ``"cgcnn"`` (a
-            graph-convolutional encoder trained jointly with classifier
-            head(s) via cross-entropy on family/spacegroup labels, in a
-            single phase; always requires ``aux_heads.mode != "none"``; see
-            ``dim_red.cgcnn``). ``"supcon"``/``"supcon_mace"`` read their
-            encoder architecture from ``encoder`` (``encoder_hidden_dim``,
-            ``latent_dim``); ``"cgcnn"`` reads its graph-construction +
-            architecture hyperparameters from ``graph`` instead (only
-            ``encoder.latent_dim`` is still read). ``"supcon"``/
-            ``"supcon_mace"`` read their loss settings from ``supcon`` (and
-            their training-batch sampling strategy from ``batching``);
-            ``"cgcnn"`` reads its classification-head settings from
-            ``aux_heads`` and always uses a plain shuffle. See
-            ``dim_red.pipeline.single_run.run_single``.
-        data_source: How the dataset (before SOAP) is built: ``"fetch"``
+        model_kind: ``"cgcnn"`` (default): a graph-convolutional encoder
+            trained jointly with classifier head(s) via cross-entropy on
+            family/spacegroup labels, in a single phase; always requires
+            ``aux_heads.mode != "none"``; see ``dim_red.cgcnn``. It reads its
+            graph-construction + architecture hyperparameters from ``graph``
+            (only ``encoder.latent_dim`` is read from ``encoder``) and its
+            classification-head settings from ``aux_heads``.
+            ``run_config_from_dict`` rejects every other model; supcon/
+            supcon_mace configs use the FullStack schema
+            (``dim_red.pipeline.full_stack_config``). ``"supcon"``/
+            ``"supcon_mace"`` remain constructible directly only for
+            ``dim_red.pipeline.dataset_cache``'s SOAP/MACE dataset builders.
+        data_source: How the dataset is built: ``"fetch"``
             (default -- the ``fetch`` config block queries Materials
             Project) or ``"pyxtal"`` (the ``pyxtal`` config block builds a
             synthetic dataset with ``dim_red.generate`` instead). Exactly
@@ -629,36 +539,25 @@ class RunConfig:
         pyxtal: Required when ``data_source == "pyxtal"``, otherwise unused.
         augmentation: Optional structure-level data augmentation (thermal-
             noise-style positional jitter and/or vacancy removal) applied
-            after the dataset is built, before SOAP. ``None`` (default)
-            disables it, current behavior unchanged. Applies regardless of
-            ``data_source``. See ``AugmentationConfig``.
-        tails: Optionally auto-train a classification and/or visualization
-            tail (``dim_red.pipeline.tail_training.train_tail``) right after
-            this run's body finishes phase-1 training -- the same entry
-            point ``dimred-train-tail`` uses manually, just invoked
-            automatically. ``None`` (default) disables it. ``classification``
-            is ignored for model kinds that can't have one (see
-            ``dim_red.pipeline.tail_training._TAIL_MODEL_KINDS``); ``visualization``
-            applies to every model_kind. See ``AutoTailsConfig``.
+            after the dataset is built. ``None`` (default) disables it.
+            Applies regardless of ``data_source``. See
+            ``AugmentationConfig``.
     """
 
     soap: SoapConfig
     encoder: EncoderConfig
     train: TrainSettings
     aux_heads: AuxHeadsConfig = field(default_factory=AuxHeadsConfig)
-    supcon: SupConConfig = field(default_factory=SupConConfig)
-    batching: BatchingConfig = field(default_factory=BatchingConfig)
     graph: GraphConfig = field(default_factory=GraphConfig)
     mace: MaceConfig = field(default_factory=MaceConfig)
     seed: int = 42
     output_dir: str = "runs"
     name: Optional[str] = None
-    model_kind: str = "supcon"
+    model_kind: str = "cgcnn"
     data_source: str = "fetch"
     fetch: Optional[FetchConfig] = None
     pyxtal: Optional[PyxtalConfig] = None
     augmentation: Optional[AugmentationConfig] = None
-    tails: Optional["AutoTailsConfig"] = None
 
     def __post_init__(self):
         if self.model_kind not in _MODEL_KINDS:
@@ -721,6 +620,13 @@ _DEPRECATED_KEYS = frozenset(
     }
 )
 
+# Top-level RunConfig blocks of removed features. Every config.yaml saved by
+# run_single before their removal carries "supcon"/"batching" (they were
+# always serialized, cgcnn runs included), so they are ignored rather than
+# rejected -- otherwise no existing cgcnn run could be reloaded
+# (dimred-rerun/dimred-apply/dimred-train-tail).
+_REMOVED_RUN_BLOCKS = frozenset({"supcon", "batching"})
+
 
 def _dataclass_from_dict(cls, d: Dict[str, Any]):
     """Build a dataclass instance from a dict, ignoring unknown keys (with a
@@ -759,8 +665,7 @@ def _parse_train_settings(cls, d: Dict[str, Any]):
 def _parse_classification_tail_config(
     d: Dict[str, Any]
 ) -> Optional["ClassificationTailConfig"]:
-    """Parse a ``classification:`` block, shared by ``RunConfig.tails`` and
-    ``TailTrainConfig``.
+    """Parse a ``TailTrainConfig`` ``classification:`` block.
 
     Raises:
         ValueError: If the block still asks for the removed single-stage
@@ -773,9 +678,9 @@ def _parse_classification_tail_config(
     if block.get("mode") == "family_and_spacegroup":
         raise ValueError(
             "classification.mode='family_and_spacegroup' (a single head with "
-            "a family-masked spacegroup head) was removed; classify spacegroup "
-            "with tail_kind='hierarchical_supcon' (a per-family expert for "
-            "each family) instead."
+            "a family-masked spacegroup head) was removed; spacegroup "
+            "classification is done by the per-family experts of a FullStack "
+            "(dim_red.pipeline.full_stack)."
         )
     return _dataclass_from_dict(ClassificationTailConfig, block)
 
@@ -783,8 +688,8 @@ def _parse_classification_tail_config(
 def _parse_visualization_tail_config(
     d: Dict[str, Any]
 ) -> Optional["VisualizationTailConfig"]:
-    """Parse a ``visualization:`` block (including its nested ``batching:``
-    sub-block), shared by ``RunConfig.tails`` and ``TailTrainConfig``."""
+    """Parse a ``TailTrainConfig`` ``visualization:`` block (including its
+    nested ``batching:`` sub-block)."""
     visualization_dict = d.get("visualization")
     if visualization_dict is None:
         return None
@@ -802,24 +707,36 @@ def _parse_visualization_tail_config(
     return dataclasses.replace(visualization, batching=batching)
 
 
-def _parse_hierarchical_supcon_tail_config(
-    d: Dict[str, Any]
-) -> Optional["HierarchicalSupconTailConfig"]:
-    """Parse a ``hierarchical_supcon:`` block -- ``TailTrainConfig``-only
-    (this tail_kind isn't offered through ``RunConfig.tails``)."""
-    return (
-        _dataclass_from_dict(HierarchicalSupconTailConfig, d["hierarchical_supcon"])
-        if "hierarchical_supcon" in d
-        else None
-    )
-
-
 def load_yaml(path: Union[str, Path]) -> Dict[str, Any]:
     with open(path, "r") as f:
         return yaml.safe_load(f)
 
 
 def run_config_from_dict(d: Dict[str, Any]) -> RunConfig:
+    """Build a cgcnn ``RunConfig`` from a parsed YAML dict.
+
+    Raises:
+        ValueError: If ``model`` is anything but ``"cgcnn"`` (supcon/
+            supcon_mace configs use the FullStack schema), or if the removed
+            top-level ``tails:`` block is present.
+    """
+    model_kind = str(d.get("model", "cgcnn"))
+    if model_kind != "cgcnn":
+        raise ValueError(
+            f"model must be 'cgcnn' here, got {model_kind!r}; supcon/supcon_mace "
+            "configs use the FullStack schema (model_kind: ...) -- see "
+            "dim_red.pipeline.full_stack_config"
+        )
+    if "tails" in d:
+        raise ValueError(
+            "The top-level 'tails:' block (auto-training tails after a run) was "
+            "removed; train cgcnn tails with dimred-train-tail <config> <run_dir>, "
+            "and supcon/supcon_mace heads as part of a FullStack "
+            "(dim_red.pipeline.full_stack)."
+        )
+    removed = sorted(_REMOVED_RUN_BLOCKS & set(d))
+    if removed:
+        logger.debug("Ignoring removed RunConfig blocks: %s", removed)
     data_source = str(d.get("data_source", "fetch"))
     soap = _dataclass_from_dict(SoapConfig, d.get("soap", {}))
     # ``vae:`` is the pre-rename name of this block; merge it under ``encoder:``
@@ -829,37 +746,14 @@ def run_config_from_dict(d: Dict[str, Any]) -> RunConfig:
     )
     train = _parse_train_settings(TrainSettings, d.get("train", {}))
     aux_heads = _dataclass_from_dict(AuxHeadsConfig, d.get("aux_heads", {}))
-    supcon = _dataclass_from_dict(SupConConfig, d.get("supcon", {}))
     graph = _dataclass_from_dict(GraphConfig, d.get("graph", {}))
     mace = _dataclass_from_dict(MaceConfig, d.get("mace", {}))
-    batching_dict = d.get("batching", {})
-    batching = BatchingConfig(
-        strategy=str(batching_dict.get("strategy", "random")),
-        balanced_params=_dataclass_from_dict(
-            BalancedBatchingParams, batching_dict.get("balanced_params", {})
-        ),
-    )
     pyxtal_config = (
         _dataclass_from_dict(PyxtalConfig, d["pyxtal"]) if "pyxtal" in d else None
     )
     augmentation_config = (
         _dataclass_from_dict(AugmentationConfig, d["augmentation"])
         if "augmentation" in d
-        else None
-    )
-    tails_dict = d.get("tails")
-    if tails_dict is not None and "hierarchical" in tails_dict:
-        raise ValueError(
-            "tails.hierarchical was removed; train a hierarchical_supcon tail "
-            "with dimred-train-tail instead."
-        )
-    tails_config = (
-        AutoTailsConfig(
-            classification=_parse_classification_tail_config(tails_dict),
-            visualization=_parse_visualization_tail_config(tails_dict),
-            train=_parse_train_settings(TailTrainSettings, tails_dict.get("train", {})),
-        )
-        if tails_dict is not None
         else None
     )
 
@@ -887,19 +781,16 @@ def run_config_from_dict(d: Dict[str, Any]) -> RunConfig:
         encoder=encoder,
         train=train,
         aux_heads=aux_heads,
-        supcon=supcon,
-        batching=batching,
         graph=graph,
         mace=mace,
         seed=int(d.get("seed", 42)),
         output_dir=str(d.get("output_dir", "runs")),
         name=d.get("name"),
-        model_kind=str(d.get("model", "supcon")),
+        model_kind=model_kind,
         data_source=data_source,
         fetch=fetch_config,
         pyxtal=pyxtal_config,
         augmentation=augmentation_config,
-        tails=tails_config,
     )
 
 
@@ -921,8 +812,6 @@ def run_config_to_dict(config: RunConfig) -> Dict[str, Any]:
         "encoder": dataclasses.asdict(config.encoder),
         "train": dataclasses.asdict(config.train),
         "aux_heads": dataclasses.asdict(config.aux_heads),
-        "supcon": dataclasses.asdict(config.supcon),
-        "batching": dataclasses.asdict(config.batching),
         "graph": dataclasses.asdict(config.graph),
         "mace": dataclasses.asdict(config.mace),
     }
@@ -932,15 +821,6 @@ def run_config_to_dict(config: RunConfig) -> Dict[str, Any]:
         result["pyxtal"] = dataclasses.asdict(config.pyxtal)
     if config.augmentation is not None:
         result["augmentation"] = dataclasses.asdict(config.augmentation)
-    if config.tails is not None:
-        tails_dict: Dict[str, Any] = {"train": dataclasses.asdict(config.tails.train)}
-        if config.tails.classification is not None:
-            tails_dict["classification"] = dataclasses.asdict(
-                config.tails.classification
-            )
-        if config.tails.visualization is not None:
-            tails_dict["visualization"] = dataclasses.asdict(config.tails.visualization)
-        result["tails"] = tails_dict
     return result
 
 
@@ -950,7 +830,7 @@ def load_sweep_config(path: Union[str, Path]) -> SweepConfig:
     grid = d.get("grid", {})
     if not grid:
         logger.warning(
-            "Sweep config %s has an empty 'grid'; expand_sweep will produce a "
+            "Sweep config %s has an empty 'grid'; the sweep will produce a "
             "single run from 'base' alone",
             path,
         )
@@ -985,34 +865,14 @@ def flatten_config_dict(d: Dict[str, Any], prefix: str = "") -> Dict[str, Any]:
     return flat
 
 
-def expand_sweep(sweep: SweepConfig) -> List[RunConfig]:
-    """Expand a sweep's grid -- the Cartesian product of every dotted-path
-    axis in ``sweep.grid`` -- into one ``RunConfig`` per combination, each
-    built by overriding ``sweep.base`` at those paths. An empty grid produces
-    a single run from ``base`` alone.
-    """
-    if not sweep.grid:
-        return [run_config_from_dict(copy.deepcopy(sweep.base))]
-
-    keys = list(sweep.grid)
-    value_lists = [sweep.grid[k] for k in keys]
-    runs = []
-    for combo in itertools.product(*value_lists):
-        d = copy.deepcopy(sweep.base)
-        for key, value in zip(keys, combo):
-            _set_dotted(d, key, value)
-        runs.append(run_config_from_dict(d))
-    return runs
-
-
 # --- Phase 2: tail training (dim_red.pipeline.tail_training) ---------------
 #
 # Deliberately independent of RunConfig/SweepConfig above: this targets an
-# already-completed `model: supcon` run directory rather than building a
+# already-completed `model: cgcnn` run directory rather than building a
 # dataset from scratch, so it gets its own top-level YAML shape and loader
 # rather than being nested under RunConfig.
 
-_TAIL_KINDS = ("classification", "visualization", "hierarchical_supcon")
+_TAIL_KINDS = ("classification", "visualization")
 
 
 @dataclass(frozen=True)
@@ -1021,8 +881,8 @@ class ClassificationTailConfig:
     a family classifier (a ``dim_red.supcon.tails.ClassificationTail``) on a
     frozen run's saved representations, via cross-entropy.
 
-    Spacegroup classification is not done here: it is handled by one expert
-    per family, see ``HierarchicalSupconTailConfig``.
+    Spacegroup classification is not done here: it is handled by the
+    per-family experts of a FullStack (``dim_red.pipeline.full_stack``).
 
     Attributes:
         head_hidden_dim: Hidden width of the head's single hidden layer.
@@ -1034,7 +894,7 @@ class ClassificationTailConfig:
 @dataclass(frozen=True)
 class VisualizationTailConfig:
     """Config for ``TailTrainConfig.tail_kind == "visualization"``: trains a
-    ``dim_red.supcon.tails.VisualizationTail`` on a frozen supcon run's
+    ``dim_red.supcon.tails.VisualizationTail`` on a frozen cgcnn run's
     saved representations, via the same Supervised Contrastive loss as the
     phase-1 projection tail (see
     ``dim_red.supcon.tail_training.train_visualization_tail``).
@@ -1043,9 +903,9 @@ class VisualizationTailConfig:
         viz_dim: Output dimensionality -- 2 or 3 (plotted with
             ``dim_red.analysis.plotting.plot_reduced_space``/
             ``plot_reduced_space_3d`` respectively).
-        mode: Which label level(s) to contrast on -- same 3-value set as
-            ``SupConConfig.mode`` (independent terms, no family ->
-            spacegroup masking, unlike ``ClassificationTailConfig.mode``).
+        mode: Which label level(s) to contrast on: ``"family_only"``,
+            ``"spacegroup_only"`` or ``"family_and_spacegroup"``
+            (independent terms, no family -> spacegroup masking).
         lambda_family: Weight of the family-level term. Ignored when
             ``mode == "spacegroup_only"``.
         lambda_spacegroup: Weight of the spacegroup-level term. Ignored
@@ -1058,9 +918,9 @@ class VisualizationTailConfig:
         hidden_dim: Widths of hidden layers in the visualization MLP.
             ``None`` (default) resolves to a single hidden layer matching
             the body's own representation width.
-        batching: How training batches are formed -- same ``BatchingConfig``
-            shape/semantics as ``RunConfig.batching`` (``"random"`` default,
-            or ``"balanced"`` via ``dim_red.supcon.sampling``).
+        batching: How training batches are formed -- ``"random"`` (default)
+            or ``"balanced"`` via ``dim_red.supcon.sampling``; see
+            ``BatchingConfig``.
     """
 
     viz_dim: int = 2
@@ -1091,223 +951,6 @@ class VisualizationTailConfig:
 
 
 @dataclass(frozen=True)
-class HierarchicalSupconTailConfig:
-    """Config for ``TailTrainConfig.tail_kind == "hierarchical_supcon"``: a
-    two-stage classifier whose stage 2 mirrors the family-level SupCon
-    stack (encoder + projection -> classifier + visualizer) one level down,
-    once per crystal family.
-
-    Stage 1 (family): one ``ClassificationTail`` on the frozen body's own
-    embedding, hidden width ``head_hidden_dim``.
-
-    Stage 2, per family:
-
-    1. A fresh ``dim_red.supcon.model.SupConEncoder`` + ``ProjectionTail``
-       (called "SupCon SG" in this project's notes/discussions) is trained
-       from scratch on that family's own native feature subset (native SOAP
-       for ``supcon``, native MACE embedding for ``supcon_mace``; train +
-       val, the same split used everywhere else in this pipeline) via
-       ``dim_red.supcon.training.training_first_phase`` -- architecturally identical
-       to how the real family-level SupCon body is trained
-       (``sg_encoder_hidden_dim``/``sg_latent_dim`` default to ``[256,
-       128]``/``32``, matching ``best_combo`` (round 15's best-known
-       reference body, see
-       ``configs/single_run_supcon_best_combo.example.yaml``), but
-       contrasting on the *local spacegroup id* instead of family (passed
-       via ``train_spacegroup_ids``, with ``lambda_family=0``/
-       ``lambda_spacegroup=1`` -- the family term is left inactive since
-       family is constant within one family's own subset, so there's
-       nothing to contrast there).
-    2. That SG body is frozen; a ``ClassificationTail`` (single hidden
-       layer, width ``sg_classifier_hidden_dim``) is trained on its
-       ``sg_latent_dim``-dim embedding via cross-entropy, predicting the
-       local spacegroup id.
-    3. A ``VisualizationTail`` (hidden widths
-       ``sg_visualization_hidden_dim``, output 2D) is trained on the same
-       frozen SG embedding, contrasting on the local spacegroup id, so this
-       tail_kind produces its own per-family visualization directly.
-
-    Families below ``min_samples_per_expert`` training rows (or with fewer
-    than 2 distinct spacegroups observed) get no SG expert at all -- they
-    fall back to always predicting that family's single most frequent
-    training-set spacegroup, recorded in ``family_expert_status.yaml``.
-
-    Requires ``model_kind`` in ``("supcon", "supcon_mace")`` (the native
-    features must exist to recompute -- see ``_compute_native_soap_features``/
-    ``_compute_native_mace_features``).
-
-    Attributes:
-        head_hidden_dim: Stage-1 family classifier's hidden width. ``32``
-            (default) matches ``best_combo`` (round 15).
-        min_samples_per_expert: Minimum training rows (and 2+ observed
-            spacegroups) a family needs to get its own expert.
-        sg_encoder_hidden_dim: SupCon SG's own encoder hidden widths.
-            ``[256, 128]`` (default) matches ``best_combo``.
-        sg_latent_dim: SupCon SG's own output embedding width. ``32``
-            (default) matches ``best_combo``.
-        sg_tau: SupCon SG's contrastive temperature.
-        sg_distance: SupCon SG's similarity metric -- ``"euclidean"`` or
-            ``"cosine"``.
-        sg_lambda_norm: SupCon SG's embedding-norm regularizer weight
-            (applied to its projection tail's output, same as the real
-            body). ``0.0`` (default) disables it.
-        sg_projection_dim: SupCon SG's own projection tail output width --
-            the space its contrastive loss is actually computed in,
-            discarded after training (same as the real body's). Kept wide
-            (``128``, default) deliberately: round 15 exhaustively tested
-            narrowing this below the encoder's own output width (a
-            Khosla et al. 2020-style topology) and found it *always* hurt
-            spacegroup accuracy, monotonically so as it narrowed further
-            (0.89 oracle at 32/16 down to 0.56 at 8/2) -- regardless of how
-            wide the encoder/latent were, so the earlier idea that a
-            narrower projection paired with a wider encoder was the winning
-            combination is specifically wrong; wide projection combined
-            with wide latent (both at ``best_combo``'s "best of everything"
-            values) is what set the round's best spacegroup oracle,
-            0.9223 -- see ``experiments/round15_dims_notes.md``.
-        sg_projection_hidden_dim: SupCon SG's own projection tail hidden
-            widths. ``None`` (default) resolves to a single hidden layer
-            matching ``sg_latent_dim``.
-        sg_classifier_hidden_dim: Hidden width of the classifier trained on
-            top of the frozen SG embedding. ``32`` (default) matches
-            ``best_combo``.
-        sg_visualization_hidden_dim: Hidden widths of the visualization
-            tail trained on top of the frozen SG embedding, used as the
-            **fallback** for any family not present as a key in
-            ``sg_visualization_hidden_dim_by_family`` (below) -- currently
-            just Cubic, confirmed across rounds 13-16 to be structurally
-            insensitive to tail capacity (see
-            ``experiments/round17_cubic_root_cause_notes.md``), so never
-            tuned per-family. ``[64, 32]`` (default) matches ``best_combo``.
-        sg_visualization_hidden_dim_by_family: Per-family override of
-            ``sg_visualization_hidden_dim``, keyed by family name (e.g.
-            ``"Hexagonal"``) -- a family present here uses its own value
-            instead of the scalar fallback. Default: round 16's per-family
-            tuning result (``experiments/round16_sg_viz_tuning_notes.md``,
-            fixed ``best_combo`` body, only the visualizer's own
-            architecture varied) -- ``[64, 32, 16]`` (deeper, not wider)
-            won for Hexagonal/Monoclinic/Orthorhombic/Triclinic/Trigonal;
-            Tetragonal alone preferred ``[128, 64]`` (wider, not deeper).
-            Pass ``{}`` to disable per-family overrides entirely and force
-            every family (Cubic included) onto the ``sg_visualization_hidden_dim``
-            scalar, matching this tail_kind's pre-round-16 behavior.
-        sg_visualization_tau: Visualization tail's contrastive temperature.
-        sg_visualization_distance: Visualization tail's similarity metric --
-            ``"euclidean"`` (default) or ``"cosine"``. Deliberately not
-            ``sg_distance``'s own default (``"cosine"``, matching the real
-            body's own recipe): an initial comparison against this
-            tail_kind's predecessor (a visualization tail chained to the
-            classifier-only expert's hidden layer, which used
-            ``distance: euclidean``) found the SG-based visualizer
-            noticeably better on nearly every family/metric, but that
-            comparison wasn't a clean single-variable ablation (it also
-            defaulted to ``"cosine"`` here) -- ``"euclidean"`` is the
-            default so the two are compared on equal footing rather than
-            leaving the confound in place.
-        sg_visualization_lambda_norm: Visualization tail's embedding-norm
-            regularizer weight. ``0.0`` (default) disables it.
-    """
-
-    head_hidden_dim: int = 32
-    min_samples_per_expert: int = 10
-    sg_encoder_hidden_dim: List[int] = field(default_factory=lambda: [256, 128])
-    sg_latent_dim: int = 32
-    sg_tau: float = 0.05
-    sg_distance: str = "cosine"
-    sg_lambda_norm: float = 0.0
-    sg_projection_dim: int = 128
-    sg_projection_hidden_dim: Optional[List[int]] = None
-    sg_classifier_hidden_dim: Union[int, List[int]] = 32
-    sg_visualization_hidden_dim: List[int] = field(default_factory=lambda: [64, 32])
-    sg_visualization_hidden_dim_by_family: Dict[str, List[int]] = field(
-        default_factory=lambda: {
-            "Hexagonal": [64, 32, 16],
-            "Monoclinic": [64, 32, 16],
-            "Orthorhombic": [64, 32, 16],
-            "Triclinic": [64, 32, 16],
-            "Trigonal": [64, 32, 16],
-            "Tetragonal": [128, 64],
-        }
-    )
-    sg_visualization_tau: float = 0.1
-    sg_visualization_distance: str = "euclidean"
-    sg_visualization_lambda_norm: float = 0.0
-
-    def __post_init__(self):
-        if self.head_hidden_dim <= 0:
-            raise ValueError(
-                "hierarchical_supcon.head_hidden_dim must be a positive integer"
-            )
-        if self.min_samples_per_expert <= 0:
-            raise ValueError(
-                "hierarchical_supcon.min_samples_per_expert must be a positive integer"
-            )
-        if not self.sg_encoder_hidden_dim or any(
-            d <= 0 for d in self.sg_encoder_hidden_dim
-        ):
-            raise ValueError(
-                "hierarchical_supcon.sg_encoder_hidden_dim must be a non-empty "
-                "list of positive integers"
-            )
-        if self.sg_latent_dim <= 0:
-            raise ValueError(
-                "hierarchical_supcon.sg_latent_dim must be a positive integer"
-            )
-        if self.sg_distance not in _SUPCON_DISTANCES:
-            raise ValueError(
-                f"hierarchical_supcon.sg_distance must be one of "
-                f"{_SUPCON_DISTANCES}, got {self.sg_distance!r}"
-            )
-        if self.sg_lambda_norm < 0:
-            raise ValueError("hierarchical_supcon.sg_lambda_norm must be >= 0")
-        if self.sg_projection_dim <= 0:
-            raise ValueError(
-                "hierarchical_supcon.sg_projection_dim must be a positive integer"
-            )
-        if self.sg_projection_hidden_dim is not None and (
-            not self.sg_projection_hidden_dim
-            or any(d <= 0 for d in self.sg_projection_hidden_dim)
-        ):
-            raise ValueError(
-                "hierarchical_supcon.sg_projection_hidden_dim, if set, must be "
-                "a non-empty list of positive integers"
-            )
-        _sg_clf_dims = (
-            (self.sg_classifier_hidden_dim,)
-            if isinstance(self.sg_classifier_hidden_dim, int)
-            else self.sg_classifier_hidden_dim
-        )
-        if not _sg_clf_dims or any(d <= 0 for d in _sg_clf_dims):
-            raise ValueError(
-                "hierarchical_supcon.sg_classifier_hidden_dim must be a "
-                "positive integer, or a non-empty list of positive integers"
-            )
-        if not self.sg_visualization_hidden_dim or any(
-            d <= 0 for d in self.sg_visualization_hidden_dim
-        ):
-            raise ValueError(
-                "hierarchical_supcon.sg_visualization_hidden_dim must be a "
-                "non-empty list of positive integers"
-            )
-        for family_name, dims in self.sg_visualization_hidden_dim_by_family.items():
-            if not dims or any(d <= 0 for d in dims):
-                raise ValueError(
-                    "hierarchical_supcon.sg_visualization_hidden_dim_by_family"
-                    f"[{family_name!r}] must be a non-empty list of positive "
-                    "integers"
-                )
-        if self.sg_visualization_distance not in _SUPCON_DISTANCES:
-            raise ValueError(
-                f"hierarchical_supcon.sg_visualization_distance must be one "
-                f"of {_SUPCON_DISTANCES}, got {self.sg_visualization_distance!r}"
-            )
-        if self.sg_visualization_lambda_norm < 0:
-            raise ValueError(
-                "hierarchical_supcon.sg_visualization_lambda_norm must be >= 0"
-            )
-
-
-@dataclass(frozen=True)
 class TailTrainSettings:
     """Training-loop mechanics for phase 2, mirroring the relevant subset of
     ``RunConfig.train`` (``TrainSettings``) -- no ``val_ratio``: phase 2
@@ -1323,47 +966,16 @@ class TailTrainSettings:
 
 
 @dataclass(frozen=True)
-class AutoTailsConfig:
-    """Config for ``RunConfig.tails``: automatically train one or more tails
-    on a completed run's frozen body, right after phase-1 finishes -- the
-    same ``dim_red.pipeline.tail_training.train_tail`` entry point
-    ``dimred-train-tail`` uses, just invoked automatically instead of as a
-    separate manual command.
-
-    Which ``model_kind``s each tail applies to differs per tail kind (see
-    ``dim_red.pipeline.tail_training._TAIL_MODEL_KINDS``): ``classification``
-    is ignored for model kinds that can't have one, same treatment
-    ``aux_heads``/``supcon``/``batching`` already get for the model kinds
-    they don't apply to; ``visualization`` applies to *every* model_kind.
-
-    Attributes:
-        classification: Auto-train a classification tail when set (``None``
-            default disables it).
-        visualization: Auto-train a visualization tail when set (``None``
-            default disables it) -- for *any* model_kind. A run/sweep can
-            set both to get a classification tail AND a visualization tail
-            out of a single ``dimred-run``/``dimred-sweep`` invocation.
-        train: Training-loop mechanics shared by whichever tail(s) are
-            enabled -- same shape as ``TailTrainConfig.train``.
-    """
-
-    classification: Optional[ClassificationTailConfig] = None
-    visualization: Optional[VisualizationTailConfig] = None
-    train: TailTrainSettings = field(default_factory=TailTrainSettings)
-
-
-@dataclass(frozen=True)
 class TailTrainConfig:
     """Fully resolved configuration for phase 2: freeze an already-trained
-    run's body and train exactly one tail (classification, visualization, or
-    hierarchical_supcon) on top of it -- see ``dim_red.pipeline.tail_training``.
+    cgcnn run's body and train exactly one tail (classification or
+    visualization) on top of it -- see ``dim_red.pipeline.tail_training``.
     Which ``model_kind``s a given ``tail_kind`` accepts is documented on
     ``dim_red.pipeline.tail_training._TAIL_MODEL_KINDS``.
 
     Attributes:
-        tail_kind: ``"classification"``, ``"visualization"``, or
-            ``"hierarchical_supcon"`` -- which tail to train. The matching
-            config block must be set.
+        tail_kind: ``"classification"`` or ``"visualization"`` -- which
+            tail to train. The matching config block must be set.
         run_dir: Path to a completed run directory whose ``model_kind`` is
             allowed for ``tail_kind`` (must contain at least
             ``config.yaml``/``embeddings.npz`` --
@@ -1380,8 +992,6 @@ class TailTrainConfig:
             still ``None`` by the time training actually starts.
         classification: Required when ``tail_kind == "classification"``.
         visualization: Required when ``tail_kind == "visualization"``.
-        hierarchical_supcon: Required when ``tail_kind ==
-            "hierarchical_supcon"``.
         train: Training-loop mechanics.
         seed: Seed for the tail's own parameter initialization.
         output_subdir: Directory name under ``<run_dir>/tails/`` this tail's
@@ -1393,7 +1003,6 @@ class TailTrainConfig:
     run_dir: Optional[str] = None
     classification: Optional[ClassificationTailConfig] = None
     visualization: Optional[VisualizationTailConfig] = None
-    hierarchical_supcon: Optional[HierarchicalSupconTailConfig] = None
     train: TailTrainSettings = field(default_factory=TailTrainSettings)
     seed: int = 42
     output_subdir: Optional[str] = None
@@ -1411,21 +1020,25 @@ class TailTrainConfig:
             raise ValueError(
                 "tail_kind='visualization' requires a 'visualization' config block."
             )
-        if self.tail_kind == "hierarchical_supcon" and self.hierarchical_supcon is None:
-            raise ValueError(
-                "tail_kind='hierarchical_supcon' requires a "
-                "'hierarchical_supcon' config block."
-            )
 
 
 def tail_train_config_from_dict(d: Dict[str, Any]) -> TailTrainConfig:
     """Build a ``TailTrainConfig`` from a parsed YAML dict (see
-    ``load_tail_train_config``)."""
+    ``load_tail_train_config``).
+
+    Raises:
+        ValueError: If the removed ``hierarchical_supcon:`` block is present
+            (or ``tail_kind`` names it).
+    """
+    if "hierarchical_supcon" in d:
+        raise ValueError(
+            "The 'hierarchical_supcon' tail was removed; per-family spacegroup "
+            "experts are part of a FullStack (dim_red.pipeline.full_stack)."
+        )
     tail_kind = str(d.get("tail_kind", "classification"))
     train = _parse_train_settings(TailTrainSettings, d.get("train", {}))
     classification = _parse_classification_tail_config(d)
     visualization = _parse_visualization_tail_config(d)
-    hierarchical_supcon = _parse_hierarchical_supcon_tail_config(d)
 
     run_dir = d.get("run_dir")
     return TailTrainConfig(
@@ -1433,7 +1046,6 @@ def tail_train_config_from_dict(d: Dict[str, Any]) -> TailTrainConfig:
         tail_kind=tail_kind,
         classification=classification,
         visualization=visualization,
-        hierarchical_supcon=hierarchical_supcon,
         train=train,
         seed=int(d.get("seed", 42)),
         output_subdir=d.get("output_subdir"),
@@ -1460,6 +1072,4 @@ def tail_train_config_to_dict(config: TailTrainConfig) -> Dict[str, Any]:
         result["classification"] = dataclasses.asdict(config.classification)
     if config.visualization is not None:
         result["visualization"] = dataclasses.asdict(config.visualization)
-    if config.hierarchical_supcon is not None:
-        result["hierarchical_supcon"] = dataclasses.asdict(config.hierarchical_supcon)
     return result

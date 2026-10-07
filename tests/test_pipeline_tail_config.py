@@ -8,11 +8,11 @@ import yaml
 
 from dim_red.pipeline.config import (
     ClassificationTailConfig,
-    HierarchicalSupconTailConfig,
     TailTrainConfig,
     TailTrainSettings,
     VisualizationTailConfig,
     load_tail_train_config,
+    tail_train_config_from_dict,
     tail_train_config_to_dict,
 )
 
@@ -43,16 +43,6 @@ def _visualization_dict(**overrides):
     return d
 
 
-def _hierarchical_dict(**overrides):
-    d = {
-        "run_dir": "runs/example",
-        "tail_kind": "hierarchical_supcon",
-        "hierarchical_supcon": {"head_hidden_dim": 16, "min_samples_per_expert": 10},
-    }
-    d.update(overrides)
-    return d
-
-
 # --- TailTrainConfig validation ----------------------------------------------
 
 
@@ -71,12 +61,9 @@ def test_tail_train_config_visualization_requires_block():
         TailTrainConfig(run_dir="runs/x", tail_kind="visualization")
 
 
-def test_tail_train_config_hierarchical_supcon_requires_block():
-    with pytest.raises(ValueError, match="requires a 'hierarchical_supcon' config"):
-        TailTrainConfig(run_dir="runs/x", tail_kind="hierarchical_supcon")
-
-
-@pytest.mark.parametrize("removed", ["hierarchical", "hierarchical_visualization"])
+@pytest.mark.parametrize(
+    "removed", ["hierarchical", "hierarchical_visualization", "hierarchical_supcon"]
+)
 def test_tail_train_config_rejects_removed_tail_kinds(removed):
     with pytest.raises(ValueError, match="tail_kind must be one of"):
         TailTrainConfig(run_dir="runs/x", tail_kind=removed)
@@ -136,20 +123,6 @@ def test_visualization_tail_config_defaults():
     assert config.lambda_norm == 0.0
     assert config.hidden_dim is None
     assert config.batching.strategy == "random"
-
-
-# --- HierarchicalSupconTailConfig --------------------------------------------
-
-
-def test_hierarchical_supcon_tail_config_defaults():
-    config = HierarchicalSupconTailConfig()
-    assert config.head_hidden_dim == 32
-    assert config.min_samples_per_expert == 10
-
-
-def test_hierarchical_supcon_tail_config_rejects_non_positive_head_hidden_dim():
-    with pytest.raises(ValueError):
-        HierarchicalSupconTailConfig(head_hidden_dim=0)
 
 
 # --- YAML parsing / round-trip ------------------------------------------------
@@ -225,37 +198,11 @@ def test_tail_train_config_to_dict_roundtrips_visualization(tmp_path):
     assert reloaded.visualization.hidden_dim == [16, 8]
 
 
-def test_load_tail_train_config_hierarchical_supcon(tmp_path):
-    d = _hierarchical_dict()
-    d["hierarchical_supcon"]["min_samples_per_expert"] = 5
-    path = _write_yaml(tmp_path / "tail.yaml", d)
-    config = load_tail_train_config(path)
-
-    assert config.tail_kind == "hierarchical_supcon"
-    assert config.hierarchical_supcon.head_hidden_dim == 16
-    assert config.hierarchical_supcon.min_samples_per_expert == 5
-    assert config.classification is None
-    assert config.visualization is None
-
-
-def test_tail_train_config_to_dict_roundtrips_hierarchical_supcon(tmp_path):
-    d = _hierarchical_dict()
-    d["output_subdir"] = "my-hierarchical"
-    path = _write_yaml(tmp_path / "tail.yaml", d)
-    config = load_tail_train_config(path)
-
-    saved_path = _write_yaml(tmp_path / "saved.yaml", tail_train_config_to_dict(config))
-    reloaded = load_tail_train_config(saved_path)
-
-    assert reloaded == config
-    assert reloaded.output_subdir == "my-hierarchical"
-
-
 def test_load_tail_train_config_rejects_removed_single_stage_spacegroup(tmp_path):
     d = _classification_dict()
     d["classification"] = {"mode": "family_and_spacegroup"}
     path = _write_yaml(tmp_path / "tail.yaml", d)
-    with pytest.raises(ValueError, match="hierarchical_supcon"):
+    with pytest.raises(ValueError, match="family_and_spacegroup.*was removed"):
         load_tail_train_config(path)
 
 
@@ -264,3 +211,19 @@ def test_load_tail_train_config_ignores_removed_optimizer_key(tmp_path):
     d["train"] = {"epochs": 3, "optimizer": "velo"}
     config = load_tail_train_config(_write_yaml(tmp_path / "tail.yaml", d))
     assert config.train == TailTrainSettings(epochs=3)
+
+
+def test_tail_kind_hierarchical_supcon_is_gone():
+    with pytest.raises(ValueError, match="tail_kind must be one of"):
+        TailTrainConfig(tail_kind="hierarchical_supcon")
+
+
+def test_tail_train_config_rejects_hierarchical_supcon_block():
+    with pytest.raises(ValueError, match="hierarchical_supcon.*FullStack"):
+        tail_train_config_from_dict(
+            {
+                "tail_kind": "classification",
+                "classification": {},
+                "hierarchical_supcon": {"head_hidden_dim": 8},
+            }
+        )
